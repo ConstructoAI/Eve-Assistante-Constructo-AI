@@ -908,11 +908,8 @@ impl Chef {
                 let q: String = q.trim().chars().take(40).collect();
                 self.changer_reglage("qui", json!(q));
             }
-            // L'adresse affichée en haut de la fenêtre : ébarbée, quatre-vingts caractères au plus ; vide, plus rien.
-            ("courriel", Some(c)) => {
-                let c: String = c.trim().chars().filter(|c| !c.is_control()).take(80).collect();
-                self.changer_reglage("courriel", json!(c));
-            }
+            // Le site de Constructo AI, cliqué en haut de la fenêtre.
+            ("site", _) => self.ouvrir_dans_le_navigateur(connexion::SITE.to_string()),
             // Le thème de la fenêtre native, choisi dans ses réglages.
             ("theme", Some(t)) if matches!(t, "centre" | "constructo") => self.changer_reglage("theme", json!(t)),
             // Un profil, choisi dans le menu de la barre ou dans les réglages (son nom ; celui d'office y ramène).
@@ -3433,7 +3430,6 @@ impl Chef {
             "aide": aide,
             "niveau": niveau,
             "qui": self.reglages.qui,
-            "courriel": self.reglages.courriel,
             "theme": self.reglages.theme,
             // La comptabilité que lit la fenêtre (l'encaisse, les échéances fiscales) : son dossier, ou rien.
             "comptabilite": self.reglages.comptabilite,

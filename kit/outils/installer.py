@@ -344,18 +344,6 @@ def demander_nom(reponses, suggere, pris):
         print("  " + probleme)
 
 
-def demander_courriel(reponses):
-    """L'adresse courriel affichée en haut de la fenêtre d'Eve, au-dessus du logo ; aucune, rien ne s'affiche."""
-    while True:
-        r = "".join(reponses.commune("courriel", "\n  Ton adresse courriel, affichée en haut de la fenêtre d'Eve ? "
-                                                 "(Entrée : aucune)\n  > ").split())
-        if not r or (len(r) <= 80 and re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", r)):
-            return r
-        if reponses.essai is not None:
-            raise Echec(f"Essai : « {r} » n'est pas une adresse courriel.")
-        print("  Une adresse comme prenom@exemple.ca, s'il te plaît, ou Entrée pour aucune.")
-
-
 def demander_dossier(reponses, nom):
     defaut = os.path.join(os.path.expanduser("~"), "Eve", nom_de_fichier(nom))
     while True:
@@ -395,7 +383,6 @@ def questions_communes(reponses, nom_suggere):
     deja = registre()
     print("\n  QUELQUES RÉGLAGES, et c'est fini.")
     prenom = " ".join(reponses.commune("prenom", "\n  Ton prénom ? (Eve s'en sert pour te parler)\n  > ").split())[:40]
-    courriel = demander_courriel(reponses)
     nom = demander_nom(reponses, nom_suggere, {s.get("nom", "").lower() for s in deja})
     dossier = demander_dossier(reponses, nom)
     cerveau = CERVEAUX[choisir(reponses, "cerveau", "Le cerveau d'Eve :", [c[0] for c in CERVEAUX], 0)]
@@ -423,7 +410,7 @@ def questions_communes(reponses, nom_suggere):
                            [t[0] for t in THEMES], 0)]
     raccourci = oui_non(reponses, "raccourci", "Un raccourci sur le bureau ?", True)
     return {
-        "prenom": prenom, "courriel": courriel, "nom": nom, "dossier": dossier, "modele": cerveau[1],
+        "prenom": prenom, "nom": nom, "dossier": dossier, "modele": cerveau[1],
         "effort": cerveau[2], "cerveau": cerveau[0], "touche": touche[1], "touche_nom": touche[0], "eveil": eveil,
         "raccourci": raccourci, "carte": carte, "liberte": liberte, "constructo": constructo, "accords": accords,
         "theme": theme[2], "theme_nom": theme[1],
@@ -746,8 +733,6 @@ def installer(reponses):
 
     print("\n  EN RÉSUMÉ")
     print(f"    Spécialiste : {choix['nom']}   (pour {choix['prenom'] or 'toi'})")
-    if choix["courriel"]:
-        print(f"    Courriel    : {choix['courriel']}   (en haut de la fenêtre)")
     print(f"    Dossier     : {choix['dossier']}")
     print(f"    Cerveau     : {choix['cerveau']}")
     print(f"    Pour parler : tenir {choix['touche_nom']}" + ("   ou dire « Eve, … »" if choix["eveil"] else ""))
@@ -791,7 +776,7 @@ def installer(reponses):
         jonction(os.path.join(local, d), os.path.join(COMMUN, d))
     mots = ", ".join(dict.fromkeys(["Eve", choix["nom"]] + vocabulaire))
     reglages = {
-        "nom": choix["nom"], "qui": choix["prenom"], "courriel": choix["courriel"], "modele": choix["modele"],
+        "nom": choix["nom"], "qui": choix["prenom"], "modele": choix["modele"],
         "effort": choix["effort"],
         "port": choix["port"], "touche": choix["touche"], "eveil": choix["eveil"], "vocabulaire": mots[:700],
         # Pas de tour silencieux toutes les cinquante minutes : chacun se paie sur le compte de la personne.

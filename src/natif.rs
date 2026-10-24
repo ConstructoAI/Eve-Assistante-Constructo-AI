@@ -6,8 +6,8 @@
 //! conversation (l'orbe, le fil, la saisie, l'accord), à droite le centre de commande ([`crate::centre`]), que le
 //! bouton de la barre replie et qui se replie de lui-même dans une fenêtre étroite. La barre porte la marque : le logo
 //! de Constructo AI, « EVE de Constructo AI », le spécialiste et la personne ; elle est aussi la barre de titre de la
-//! fenêtre ([`crate::cadre`]) : sa bande du haut, à la place de celle de Windows, porte l'adresse courriel et les
-//! boutons de la fenêtre. L'icône de la fenêtre est le logo. Les icônes sont celles de Windows (Segoe Fluent Icons). La
+//! fenêtre ([`crate::cadre`]) : sa bande du haut, à la place de celle de Windows, porte le site de Constructo AI et
+//! les boutons de la fenêtre. L'icône de la fenêtre est le logo. Les icônes sont celles de Windows (Segoe Fluent Icons). La
 //! fenêtre porte le titre de la fenêtre d'Edge : le raccourci Ctrl+Alt+E et « toujours devant » la retrouvent de même
 //! (`fenetre.rs`). L'inventaire de ce qui reste : `docs\fenetre-native.md`.
 //!
@@ -151,6 +151,12 @@ const ARRIVEE: f64 = 0.9;
 /// sa rangée ; un bouton de la fenêtre a la largeur de ceux de Windows 11.
 pub(crate) const BANDE: f32 = 32.0;
 pub(crate) const RANGEE: f32 = 58.0;
+/// La première ligne du titre commence ce tant au-dessus du haut du logo : ce que garde au-dessus de ses capitales la
+/// police de « EVE » (17 points), pour que leur haut soit celui du logo (mesuré sur une capture).
+const AU_DESSUS_DES_CAPITALES: f32 = 7.0;
+/// La seconde ligne commence ce tant au-dessus du bas du logo : sa hauteur jusqu'à la ligne de base de ses lettres
+/// (12 points), pour que leur bas soit celui du logo (mesuré sur une capture).
+const SOUS_LA_LIGNE: f32 = 13.0;
 const BOUTON_DE_FENETRE: f32 = 46.0;
 
 /// Le contexte d'egui, pour que la fenêtre se ferme quand Eve s'arrête d'elle-même.
@@ -244,7 +250,7 @@ pub(crate) struct Fenetre {
     arrivees: VecDeque<f64>,
     /// Les réglages : ouverts ou non ; le bouton de la barre qui les ouvre (un clic dessus n'est pas un clic dehors) ;
     /// les valeurs changées ici, tenues quatre secondes le temps que le chef les publie ; le prénom qu'on tape, et le
-    /// dernier que le chef a publié ; de même l'adresse courriel.
+    /// dernier que le chef a publié.
     pub(crate) reglages_ouverts: bool,
     bouton_reglages: egui::Rect,
     /// L'historique des conversations, ouvert ou non (un panneau neuf à chaque ouverture) ; son bouton de la barre ; la
@@ -255,8 +261,6 @@ pub(crate) struct Fenetre {
     tenus: HashMap<String, (bool, f64)>,
     qui_saisi: String,
     qui_vu: String,
-    courriel_saisi: String,
-    courriel_vu: String,
     /// La barre est la barre de titre de la fenêtre ([`cadre`]) ; ce qui s'y clique dans egui, et les boutons de la
     /// fenêtre, à l'image d'avant : décrits à Windows.
     cadre: bool,
@@ -337,8 +341,6 @@ impl Fenetre {
             tenus: HashMap::new(),
             qui_saisi: String::new(),
             qui_vu: String::new(),
-            courriel_saisi: String::new(),
-            courriel_vu: String::new(),
             cadre,
             zones_de_la_barre: Vec::new(),
             boutons_de_fenetre: Vec::new(),
@@ -403,8 +405,8 @@ impl Fenetre {
         }
     }
 
-    /// La barre, tout en haut de la fenêtre. Sa bande du haut remplace la barre de titre de Windows : l'adresse
-    /// courriel au-dessus du logo, les boutons de la fenêtre à droite ([`bande_du_haut`]). Sa rangée : le ruban, le
+    /// La barre, tout en haut de la fenêtre. Sa bande du haut remplace la barre de titre de Windows : le site de
+    /// Constructo AI au-dessus du logo, les boutons de la fenêtre à droite ([`bande_du_haut`]). Sa rangée : le ruban, le
     /// logo, « EVE de Constructo AI », le spécialiste et la personne ; à droite, les pastilles d'état, le bouton du
     /// centre de commande et celui des réglages. Ce qui s'y clique est noté : Windows le laisse à egui, le reste de la
     /// barre déplace la fenêtre ([`cadre`]).
@@ -419,44 +421,59 @@ impl Fenetre {
         ui.scope_builder(egui::UiBuilder::new().max_rect(rangee), |ui| self.rangee_de_la_barre(ui, &mut logo));
         if self.cadre {
             let bande = egui::Rect::from_min_size(rect.left_top(), vec2(rect.width(), BANDE));
-            self.boutons_de_fenetre = bande_du_haut(ui, bande, self.champ("courriel"), logo);
+            let (boutons, site) = bande_du_haut(ui, bande, logo);
+            self.boutons_de_fenetre = boutons;
+            // Le site se clique : Windows le laisse à egui (le reste de la bande déplace la fenêtre).
+            self.zones_de_la_barre.push(site.rect);
+            if site.clicked() {
+                self.geste("site", Value::Null);
+            }
         }
     }
 
-    /// La rangée de la barre, sous sa bande ; `logo` : où commence le logo (l'adresse courriel s'y aligne).
+    /// La rangée de la barre, sous sa bande ; `logo` : où commence le logo (le site, au-dessus, s'y aligne).
     fn rangee_de_la_barre(&mut self, ui: &mut egui::Ui, logo: &mut f32) {
         ui.horizontal_centered(|ui| {
             ui.add_space(16.0);
             let (ruban, _) = ui.allocate_exact_size(vec2(4.0, 30.0), Sense::hover());
             ui.painter().rect_filled(ruban, 2.0, couleurs::ACCENT);
             ui.add_space(6.0);
-            if let Some(t) = &self.logo {
-                *logo = ui.add(egui::Image::new(t).fit_to_exact_size(vec2(28.0, 28.0))).rect.left();
+            let centre = ui.max_rect().center().y;
+            let image = match &self.logo {
+                Some(t) => ui.add(egui::Image::new(t).fit_to_exact_size(vec2(28.0, 28.0))).rect,
+                None => egui::Rect::from_center_size(egui::pos2(ui.cursor().left() + 14.0, centre), vec2(28.0, 28.0)),
+            };
+            *logo = image.left();
+            ui.add_space(8.0);
+            // Deux lignes serrées contre le logo, comme l'en-tête de l'ERP (« Constructo AI » sur « ERP Construction ») :
+            // le haut de « EVE » au haut du logo, le bas du profil et de la personne à son bas. Chaque ligne se dessine
+            // à sa place, sans pousser l'autre ; le bloc prend ensuite sa largeur dans la barre.
+            let x = ui.cursor().left();
+            let haut =
+                egui::Rect::from_min_size(egui::pos2(x, image.top() - AU_DESSUS_DES_CAPITALES), vec2(420.0, 24.0));
+            let mut nom = ui.new_child(egui::UiBuilder::new().max_rect(haut).layout(Layout::left_to_right(Align::Min)));
+            // Un seul texte de deux tailles : « EVE » et « de Constructo AI » sur la même ligne de base.
+            let blanc = |font_id: FontId, espace: f32| TextFormat {
+                font_id,
+                color: Color32::WHITE,
+                extra_letter_spacing: espace,
+                ..Default::default()
+            };
+            let mut titre = LayoutJob::default();
+            titre.append("EVE", 0.0, blanc(FontId::new(17.0, FontFamily::Name(GRAS.into())), 2.0));
+            titre.append("de Constructo AI", 6.0, blanc(FontId::new(14.0, FontFamily::Name(SEMI.into())), 0.0));
+            nom.label(titre);
+            let bas = egui::Rect::from_min_size(egui::pos2(x, image.bottom() - SOUS_LA_LIGNE), vec2(420.0, 18.0));
+            let mut qui_est_la =
+                ui.new_child(egui::UiBuilder::new().max_rect(bas).layout(Layout::left_to_right(Align::Min)));
+            qui_est_la.spacing_mut().item_spacing.x = 0.0;
+            // Le profil actif ; avec plus d'un profil, son menu ([`profils`]).
+            self.nom_et_profils(&mut qui_est_la);
+            let qui = self.champ("qui");
+            if !qui.is_empty() {
+                qui_est_la.label(RichText::new(format!("  ·  {qui}")).size(12.0).color(couleurs::BARRE_TEXTE));
             }
-            ui.add_space(2.0);
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 7.0;
-                    ui.label(
-                        RichText::new("EVE")
-                            .family(FontFamily::Name(GRAS.into()))
-                            .size(19.0)
-                            .extra_letter_spacing(3.0)
-                            .color(Color32::WHITE),
-                    );
-                    ui.label(RichText::new("de Constructo AI").size(12.5).color(couleurs::BARRE_TEXTE));
-                });
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    // Le profil actif ; avec plus d'un profil, son menu ([`profils`]).
-                    self.nom_et_profils(ui);
-                    let qui = self.champ("qui");
-                    if !qui.is_empty() {
-                        ui.label(RichText::new(format!("  ·  {qui}")).size(12.0).color(couleurs::BARRE_TEXTE));
-                    }
-                });
-            });
+            ui.allocate_rect(nom.min_rect().union(qui_est_la.min_rect()), Sense::hover());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(14.0);
                 let r = bouton(ui, Some(icones::REGLAGES), "Réglages", Bouton::Barre(self.reglages_ouverts));
@@ -1120,29 +1137,6 @@ impl Fenetre {
                 });
                 ui.add_space(10.0);
             });
-        }
-        // L'adresse courriel, en haut de la fenêtre au-dessus du logo : retenue comme le prénom ; vidée, plus rien ne
-        // s'affiche.
-        rubrique(ui, "Courriel");
-        let id = egui::Id::unique("courriel-en-haut-de-la-fenetre");
-        let publie = self.champ("courriel").to_string();
-        if publie != self.courriel_vu && !ui.memory(|m| m.has_focus(id)) {
-            self.courriel_saisi = publie.clone();
-            self.courriel_vu = publie.clone();
-        }
-        let champ = egui::TextEdit::singleline(&mut self.courriel_saisi)
-            .id(id)
-            .hint_text("Votre adresse courriel")
-            .char_limit(80)
-            .desired_width(f32::INFINITY)
-            .margin(Margin::symmetric(10, 8));
-        let rep =
-            ui.add(champ).on_hover_text("Affichée en haut de la fenêtre, au-dessus du logo ; Entrée pour la retenir");
-        if rep.lost_focus() {
-            let c = self.courriel_saisi.trim().to_string();
-            if c != publie {
-                self.geste("courriel", Value::String(c));
-            }
         }
         // L'écoute.
         rubrique(ui, "Écoute");
@@ -1914,11 +1908,12 @@ pub(crate) fn bouton_de_fenetre(p: &egui::Painter, rect: egui::Rect, bouton: cad
     p.text(rect.center(), Align2::CENTER_CENTER, glyphe, FontId::new(10.0, FontFamily::Name(ICONES.into())), encre);
 }
 
-/// La bande du haut de la barre, à la place de la barre de titre de Windows : l'adresse courriel au-dessus du logo
-/// (`gauche`, le bord du logo), petite et discrète, dans la couleur des textes de la barre ; vide, rien. À droite, les
-/// boutons de la fenêtre, sauf en plein écran (Windows n'en montre pas non plus) ; leur survol et leur clic, Windows
-/// les dit à [`cadre`]. Rend les boutons dessinés, et leur place.
-fn bande_du_haut(ui: &egui::Ui, bande: egui::Rect, courriel: &str, gauche: f32) -> Vec<(cadre::Bouton, egui::Rect)> {
+/// La bande du haut de la barre, à la place de la barre de titre de Windows : le site de Constructo AI au-dessus du logo
+/// (`gauche`, le bord du logo), petit et discret, dans la couleur des textes de la barre ; survolé, il s'éclaire et se
+/// souligne ; un clic l'ouvre dans le navigateur (le geste `site`). À droite, les boutons de la fenêtre, sauf en plein
+/// écran (Windows n'en montre pas non plus) ; leur survol et leur clic, Windows les dit à [`cadre`]. Rend les boutons
+/// dessinés et leur place, et la réponse du lien.
+fn bande_du_haut(ui: &egui::Ui, bande: egui::Rect, gauche: f32) -> (Vec<(cadre::Bouton, egui::Rect)>, egui::Response) {
     let p = ui.painter();
     let (plein_ecran, agrandie, active) = ui.input(|i| {
         let v = i.viewport();
@@ -1951,25 +1946,41 @@ fn bande_du_haut(ui: &egui::Ui, bande: egui::Rect, courriel: &str, gauche: f32) 
         };
         bouton_de_fenetre(p, r, b, allure);
     }
-    if !courriel.is_empty() {
-        let fin = boutons.last().map_or(bande.right(), |(_, r)| r.left()) - 16.0;
-        let format = TextFormat {
-            font_id: FontId::proportional(11.5),
-            color: couleurs::BARRE_TEXTE,
-            extra_letter_spacing: 0.2,
-            ..Default::default()
-        };
-        let mut job = LayoutJob::single_section(courriel.to_string(), format);
-        job.wrap = egui::text::TextWrapping {
-            max_width: (fin - gauche).max(0.0),
-            max_rows: 1,
-            break_anywhere: true,
-            overflow_character: Some('…'),
-        };
-        let g = p.layout_job(job);
-        p.galley(egui::pos2(gauche, bande.center().y - g.size().y / 2.0), g, couleurs::BARRE_TEXTE);
+    let fin = boutons.last().map_or(bande.right(), |(_, r)| r.left()) - 16.0;
+    // La couleur se donne au dessin : elle change au survol.
+    let format = TextFormat {
+        font_id: FontId::proportional(11.5),
+        color: Color32::PLACEHOLDER,
+        extra_letter_spacing: 0.2,
+        ..Default::default()
+    };
+    let mut job = LayoutJob::single_section(crate::connexion::SITE.to_string(), format);
+    job.wrap = egui::text::TextWrapping {
+        max_width: (fin - gauche).max(0.0),
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    let g = p.layout_job(job);
+    let coin = egui::pos2(gauche, bande.center().y - g.size().y / 2.0);
+    let texte = egui::Rect::from_min_size(coin, g.size());
+    let site = ui
+        .interact(texte.expand2(vec2(4.0, 3.0)), egui::Id::unique("site-de-constructo-ai"), Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Ouvrir le site de Constructo AI");
+    let encre = if site.hovered() { couleurs::BARRE_CLAIR } else { couleurs::BARRE_TEXTE };
+    p.galley(coin, g, encre);
+    if site.hovered() {
+        p.hline(texte.x_range(), texte.bottom() - 1.0, Stroke::new(1.0, encre));
     }
-    boutons
+    // La révision d'Eve, à droite du site (« v7 » : `Cargo.toml`, sa seule source) ; elle ne se clique pas.
+    let police = FontId::new(11.5, FontFamily::Name(SEMI.into()));
+    let revision = p.layout_no_wrap(crate::mise_a_jour::revision(), police, couleurs::BARRE_TEXTE);
+    let x = texte.right() + 10.0;
+    if x + revision.size().x < fin {
+        p.galley(egui::pos2(x, bande.center().y - revision.size().y / 2.0), revision, couleurs::BARRE_TEXTE);
+    }
+    (boutons, site)
 }
 
 /// La barre décrite à Windows ([`cadre::decrire`]), à chaque image : sa hauteur ; ce qui s'y clique dans egui — les

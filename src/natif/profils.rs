@@ -65,27 +65,29 @@ impl Fenetre {
         let actif = self.profil_actif();
         let profils = self.profils();
         if profils.len() < 2 {
-            ui.label(super::semi(actif, 12.0).color(couleurs::BARRE_CLAIR));
+            ui.label(super::semi(actif, 12.0).color(couleurs::BARRE_TEXTE));
             return;
         }
         let police = FontId::new(12.0, FontFamily::Name(SEMI.into()));
-        let nom = ui.painter().layout_no_wrap(actif.clone(), police, couleurs::BARRE_CLAIR);
+        let nom = ui.painter().layout_no_wrap(actif.clone(), police, couleurs::BARRE_TEXTE);
         let chevron = ui.painter().layout_no_wrap(
             CHEVRON.to_string(),
             FontId::new(9.0, FontFamily::Name(ICONES.into())),
             couleurs::BARRE_TEXTE,
         );
-        let (rect, _) =
-            ui.allocate_exact_size(vec2(6.0 + nom.size().x + 6.0 + chevron.size().x + 6.0, 20.0), Sense::hover());
+        // Serré sous « EVE de Constructo AI », et aligné sur lui : le nom au bord de sa place ; le fond du survol déborde
+        // autour, sans rien pousser.
+        let (place, _) = ui.allocate_exact_size(vec2(nom.size().x + 6.0 + chevron.size().x, 16.0), Sense::hover());
+        let rect = place.expand2(vec2(5.0, 2.0));
         let rep = ui.interact(rect, id_du_menu_des_profils(), Sense::click());
         self.zones_de_la_barre.push(rect);
         let ouvert = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&rep));
         let p = ui.painter();
         if rep.hovered() || ouvert {
-            p.rect_filled(rect, 6.0, Color32::from_white_alpha(if ouvert { 30 } else { 20 }));
+            p.rect_filled(rect, 5.0, Color32::from_white_alpha(if ouvert { 30 } else { 20 }));
         }
-        let x = rect.left() + 6.0;
-        p.galley(pos2(x, rect.center().y - nom.size().y / 2.0), nom.clone(), couleurs::BARRE_CLAIR);
+        let x = place.left();
+        p.galley(pos2(x, rect.center().y - nom.size().y / 2.0), nom.clone(), couleurs::BARRE_TEXTE);
         let x = x + nom.size().x + 6.0;
         p.galley(pos2(x, rect.center().y - chevron.size().y / 2.0), chevron, couleurs::BARRE_TEXTE);
         let rep = rep.on_hover_cursor(egui::CursorIcon::PointingHand);

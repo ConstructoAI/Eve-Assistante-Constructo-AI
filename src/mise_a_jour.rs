@@ -88,7 +88,21 @@ pub fn empreinte() -> Option<&'static str> {
     option_env!("EVE_EMPREINTE").filter(|e| !e.is_empty())
 }
 
-/// La version du programme et son empreinte (« 0.1.0 (ad2cca1) ») : notée au journal à chaque démarrage, elle range
+/// La révision d'Eve, telle que la fenêtre la montre : « v7 » pour la version 7.0.0 de `Cargo.toml` (sa seule source),
+/// « v7.1 » pour la 7.1.0, « v7.1.2 » pour la 7.1.2.
+pub fn revision() -> String {
+    revision_de(env!("CARGO_PKG_VERSION"))
+}
+
+fn revision_de(version: &str) -> String {
+    let mut parties: Vec<&str> = version.split('.').collect();
+    while parties.len() > 1 && parties.last() == Some(&"0") {
+        parties.pop();
+    }
+    format!("v{}", parties.join("."))
+}
+
+/// La version du programme et son empreinte (« 7.0.0 (ad2cca1) ») : notée au journal à chaque démarrage, elle range
 /// les mesures par version.
 pub fn version() -> String {
     match empreinte() {
@@ -1222,6 +1236,15 @@ mod essais {
         for rien in ["", "Python 3.12", "Eve ", "Eve 0.1.0 (af9c445"] {
             assert_eq!(lire_version(rien), None, "{rien:?}");
         }
+    }
+
+    /// La révision, comme la fenêtre la montre : sans les zéros de la fin.
+    #[test]
+    fn la_revision_se_dit_en_court() {
+        for (version, revision) in [("7.0.0", "v7"), ("7.1.0", "v7.1"), ("7.1.2", "v7.1.2"), ("8.0.1", "v8.0.1")] {
+            assert_eq!(revision_de(version), revision, "{version}");
+        }
+        assert_eq!(revision(), revision_de(env!("CARGO_PKG_VERSION")));
     }
 
     /// Seule une version commitée, sans changement, s'installe : elle dit où revenir.

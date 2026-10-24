@@ -28,4 +28,5 @@ Installer la nouvelle version : eve.exe --mettre-a-jour target\release\eve.exe, 
 la fin de sa réponse, la conversation reprise ; si la nouvelle ne démarre pas en 90 secondes, l'ancienne revient
 d'elle-même. eve.exe --revenir revient à la version précédente.
 
-Refaire le kit : outils\preparer_python.ps1 (une fois), puis emballer.ps1 -Construire (dist\Eve.zip).
+Refaire le kit : outils\preparer_python.ps1 (une fois), puis emballer.ps1 -Construire
+(dist\Eve-Assistante-Constructo-AI-vN.zip : N, la révision, est la version de Cargo.toml, sa seule source).

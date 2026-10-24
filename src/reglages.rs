@@ -44,9 +44,6 @@ pub struct Reglages {
     pub nom: String,
     /// Qui est devant le poste (son prénom, choisi dans la fenêtre) : l'Adjointe le sait avant la première demande.
     pub qui: String,
-    /// L'adresse courriel affichée en haut de la fenêtre native, au-dessus du logo (la fenêtre ou l'installateur la
-    /// donnent) ; vide : rien ne s'affiche.
-    pub courriel: String,
     /// L'entreprise, pour l'écran et la consigne ; vide : le nom des réglages de l'Adjointe, lu au démarrage.
     pub entreprise: String,
     /// Le nom lu au démarrage dans les réglages de l'Adjointe, quand `entreprise` est vide : jamais écrit.
@@ -224,7 +221,6 @@ impl Default for Reglages {
             nom: String::new(),
             // Personne d'office : le prénom se donne dans les réglages de la fenêtre, ou l'Adjointe le demande.
             qui: String::new(),
-            courriel: String::new(),
             entreprise: String::new(),
             entreprise_lue: String::new(),
             scan_lu: None,

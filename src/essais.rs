@@ -4479,7 +4479,6 @@ mod essai_du_cadre {
             "niveau": 0.0,
             "nom": "Essai du cadre",
             "qui": "Prénom",
-            "courriel": "bonjour@exemple.ca",
             "propre": true,
             "oreille": "prete",
             "micro": "Micro d'essai",
@@ -4620,7 +4619,12 @@ mod essai_du_cadre {
         }
         let milieu = ecran_de(&c0, largeur / 2.0, natif::BANDE * 0.6);
         b.toucher(f, "la bande, au milieu, déplace la fenêtre", milieu, HTCAPTION);
-        b.toucher(f, "l'adresse courriel aussi", ecran_de(&c0, 40.0, natif::BANDE / 2.0), HTCAPTION);
+        b.toucher(
+            f,
+            "le site de Constructo AI se clique : il reste à egui",
+            ecran_de(&c0, 40.0, natif::BANDE / 2.0),
+            HTCLIENT,
+        );
         b.toucher(f, "le logo aussi", ecran_de(&c0, 40.0, natif::BANDE + natif::RANGEE / 2.0), HTCAPTION);
         b.toucher(f, "le bord du haut redimensionne", ((c0.left + c0.right) / 2, f0.top + 1), HTTOP);
         b.toucher(f, "son coin de gauche", (c0.left + 1, f0.top + 1), HTTOPLEFT);

@@ -31,6 +31,8 @@ use crate::reglages::{dossier_local, ecrire_d_un_geste};
 
 /// Le serveur MCP de Constructo AI (`McpPage.tsx` de l'ERP : l'adresse du connecteur, sans `/mcp`).
 pub const SERVEUR_PAR_DEFAUT: &str = "https://constructo-mcp.onrender.com";
+/// Le site de Constructo AI : la bande du haut de la fenêtre le montre au-dessus du logo, un clic l'ouvre.
+pub const SITE: &str = "https://constructoai.ca/";
 /// Le nom sous lequel Eve s'enregistre : le serveur le garde dans ses journaux. Rien de la personne.
 const NOM_CLIENT: &str = "Eve de Constructo AI (assistante vocale)";
 /// La portée unique du serveur.

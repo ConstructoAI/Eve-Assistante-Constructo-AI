@@ -1,5 +1,6 @@
-# Emballe Eve a partager : dist\Eve.zip (le programme et le runtime Visual C++, son Python, son installateur et ses
-# gabarits, le telechargeur de la voix, le guide et les licences) et l'empreinte SHA-256 de celle-ci. La voix et
+# Emballe Eve a partager : dist\Eve-Assistante-Constructo-AI-vN.zip, N etant la revision (la version de Cargo.toml, sa
+# seule source : 7.0.0 donne v7) - le programme et le runtime Visual C++, son Python, son installateur et ses
+# gabarits, le telechargeur de la voix, le guide et les licences - et l'empreinte SHA-256 de celle-ci. La voix et
 # l'oreille - environ 410 Mo - n'y sont pas : l'installateur les telecharge, de leurs sources publiques officielles.
 #
 #   powershell -ExecutionPolicy Bypass -File emballer.ps1 [-Construire] [-Sortie <dossier>]
@@ -17,6 +18,10 @@ $ErrorActionPreference = "Stop"
 $racine = $PSScriptRoot
 $kit = Join-Path $racine "kit"
 if (-not $Sortie) { $Sortie = Join-Path $racine "dist" }
+# La revision : la version de Cargo.toml (7.0.0 : v7) ; le zip en porte le nom, et outils\publier.ps1 l'etiquette.
+$version = (Select-String -Path (Join-Path $racine "Cargo.toml") -Pattern '^version = "([^"]+)"' |
+  Select-Object -First 1).Matches[0].Groups[1].Value
+$revision = "v" + ($version -replace '(\.0)+$', '')
 
 # 1. Le programme.
 if ($Construire) {
@@ -109,7 +114,8 @@ $texte = [IO.File]::ReadAllText((Join-Path $kit "LISEZ-MOI-SOURCES.txt"), [Text.
 # 5. L'archive : le dossier "Eve" a sa racine. Chaque entree est nommee a la main, avec des "/" : sous PowerShell 5.1,
 # ZipFile.CreateFromDirectory ecrit des "\", contraires au format ZIP.
 Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
-$zip = Join-Path $Sortie "Eve.zip"
+$nomDuZip = "Eve-Assistante-Constructo-AI-$revision.zip"
+$zip = Join-Path $Sortie $nomDuZip
 if (Test-Path $zip) { Remove-Item -Force $zip }
 $flux = [IO.File]::Open($zip, [IO.FileMode]::CreateNew)
 try {
@@ -122,9 +128,10 @@ try {
   } finally { $archive.Dispose() }
 } finally { $flux.Dispose() }
 $empreinte = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
-[IO.File]::WriteAllText("$zip.sha256", "$empreinte  Eve.zip`n")
+[IO.File]::WriteAllText("$zip.sha256", "$empreinte  $nomDuZip`n")
 
 $taille = (Get-ChildItem -Recurse -File $eve | Measure-Object Length -Sum).Sum
+"Revision  : $revision (Cargo.toml : $version)"
 "Programme : {0} ({1:yyyy-MM-dd HH:mm})" -f $exe, (Get-Item $exe).LastWriteTime
 "Dossier   : {0} ({1:N0} Mo, {2} fichiers)" -f $eve, ($taille / 1MB), (Get-ChildItem -Recurse -File $eve).Count
 "Archive   : {0} ({1:N1} Mo)" -f $zip, ((Get-Item $zip).Length / 1MB)
