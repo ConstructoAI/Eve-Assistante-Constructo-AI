@@ -1,0 +1,33 @@
+# La construction de whisper.cpp (whisper-rs-sys) : toute variable WHISPER_*, GGML_* ou CMAKE_* devient une option
+# de CMake.
+#
+# - Les liaisons C se génèrent sur le poste (bindgen), avec une libclang (le paquet PyPI « libclang » 18.1.1, sa
+#   libclang.dll seule). Celles que fournit la crate ont été générées sous Linux : trois structures de stdio n'y ont pas
+#   la taille de Windows, et la compilation échoue. Où la prendre : la variable LIBCLANG_PATH, si elle est posée (une
+#   variable du poste l'emporte toujours sur [env] ; Compiler.bat la pose vers une copie dans un chemin sans accent),
+#   sinon `outils/libclang/` de ce dossier — que .gitignore écarte du dépôt : on l'y dépose soi-même.
+# - Le jeu d'instructions : les postes de 2012 (Intel Ivy Bridge, AVX sans AVX2) ont l'AVX et le F16C, mais ni l'AVX2
+#   ni le FMA. Une construction « native » ou AVX2 y plante au premier mot (instruction illégale) ; celle-ci tourne sur
+#   tout processeur x86-64 depuis 2012, au prix d'un peu de vitesse sur les plus récents.
+# - F16C : Ivy Bridge l'a, mais ggml ne le déclare au compilateur de Microsoft qu'avec l'AVX2. Sans lui, chaque
+#   conversion en demi-précision se fait en logiciel, au cœur de l'attention de l'encodeur. La variable CL est lue par
+#   cl.exe à chaque appel : elle ajoute __F16C__ à toute la compilation de whisper.cpp. Compiler.bat la pose lui-même
+#   (une variable du poste l'emporte sur [env]), avec /d1trimfile en plus, comme RUSTFLAGS avec --remap-path-prefix :
+#   le profil du poste qui compile n'entre pas dans le programme.
+# - L'optimisation : la crate cmake remplace les options Release de CMake par celles du compilateur Rust, dont elle a
+#   retiré /O2 — whisper.cpp se compilait en Release SANS optimisation (ni /O2 ni NDEBUG dans le projet généré), et
+#   l'encodeur tournait quatre-vingts fois sous la capacité du processeur (mesuré : 96 s pour 30 s de son avec le modèle
+#   base). Données ici, elles ne sont plus remplacées.
+[env]
+LIBCLANG_PATH = { value = "outils/libclang", relative = true }
+CL = "/D__F16C__"
+CMAKE_C_FLAGS_RELEASE = "/O2 /Ob2 /DNDEBUG"
+CMAKE_CXX_FLAGS_RELEASE = "/O2 /Ob2 /DNDEBUG"
+GGML_NATIVE = "OFF"
+GGML_AVX = "ON"
+GGML_F16C = "ON"
+GGML_AVX2 = "OFF"
+GGML_FMA = "OFF"
+GGML_BMI2 = "OFF"
+GGML_AVX512 = "OFF"
+GGML_AVX_VNNI = "OFF"

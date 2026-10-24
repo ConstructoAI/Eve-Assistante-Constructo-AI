@@ -1,0 +1,91 @@
+# Eve se construit à part : pour Windows (puis macOS), avec whisper.cpp, CMake et le compilateur de Visual Studio, ce que
+# l'image Linux du serveur n'a pas. La table [workspace] vide la détache de l'espace de travail de la racine (qui prend
+# crates/*), avec son propre Cargo.lock ; .dockerignore l'écarte de l'image.
+[workspace]
+
+[package]
+name = "eve"
+description = "Eve, l'Assistante de Constructo AI, de vive voix — on lui parle, elle fait le travail (Claude Code), elle répond à voix haute"
+license = "Apache-2.0"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+
+# La partie pure (la garde, la parole, le protocole de Claude Code) est une bibliothèque : elle compile partout et
+# pourra entrer telle quelle dans le serveur d'Entrepreneur Général. Le programme du poste (micro, voix, touche, fenêtre) est le
+# binaire.
+[lib]
+name = "eve"
+path = "src/lib.rs"
+
+[[bin]]
+name = "eve"
+path = "src/main.rs"
+
+[dependencies]
+# Le micro (WASAPI sous Windows, pur Rust).
+cpal = "0.18.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+# L'oreille : whisper.cpp, compilé avec le reste (CMake et le compilateur de Visual Studio) ; ses options de
+# construction sont dans .cargo/config.toml.
+whisper-rs = "0.16.0"
+# La fenêtre native (le lot 6) : egui, dessinée par la carte graphique en OpenGL (glow), le rendu que savent faire les
+# postes de 2012 (wgpu, celui d'office, veut DirectX 12 ou Vulkan).
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts", "accesskit", "clipboard"] }
+# Les panneaux du centre de commande : des littéraux d'objets JavaScript (activite\*.js), lus en JSON5.
+json5 = "1.3.3"
+# Le logo de Constructo AI, dans la barre de la fenêtre native (la même version que celle qu'eframe tire déjà).
+png = "0.18.1"
+# L'aperçu d'un SVG dans les cartes de la fenêtre native (un plan, un croquis que Claude a dessiné) : Windows ne sait
+# pas en dessiner un avec son texte (celui de Direct2D ignore le texte), et une page d'Edge n'est plus là. Le texte se
+# dessine avec les polices du poste ; les images incrustées dans un SVG, rares, ne se dessinent pas (moins de code).
+resvg = { version = "0.45.1", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
+
+[target."cfg(windows)".dependencies]
+# Les voix de Windows (WinRT : les voix françaises du Canada), la touche à tenir, l'heure locale ; les petits sons
+# (PlaySound), la fenêtre et son raccourci, le démarrage avec Windows (le registre), le calendrier en ligne (WinHTTP),
+# la console du journal ; la barre de titre et la taille de la fenêtre native (DWM, l'échelle de l'écran) ; l'aperçu
+# des cartes (WinRT : la première page d'un PDF, et les images PNG, JPEG, GIF et WebP, dans leur bon sens) ; la
+# connexion à Constructo AI : le hachage et l'aléa de PKCE (BCrypt), les jetons chiffrés pour la session (DPAPI), et la
+# page de connexion dans le navigateur du poste (ShellExecute : ni cmd.exe ni guillemets pour une adresse pleine de &) ;
+# la barre de titre que dessine Eve (le sous-classement de sa fenêtre, Shell ; son écran et la barre des tâches
+# masquée, Gdi) ; la boîte de dialogue « Ouvrir » des pièces jointes (Shell, COM).
+windows = { version = "0.62.2", features = [
+    "Win32_Security_Cryptography",
+    "Win32_UI_Shell",
+    "Win32_System_Com",
+    "Media_SpeechSynthesis",
+    "Media_Playback",
+    "Media_Core",
+    "Storage_Streams",
+    "Data_Pdf",
+    "Graphics_Imaging",
+    "Foundation",
+    "Foundation_Collections",
+    "Win32_System_WinRT",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+    "Win32_System_JobObjects",
+    "Win32_System_Registry",
+    "Win32_System_Console",
+    "Win32_Media",
+    "Win32_Media_Audio",
+    "Win32_Networking_WinHttp",
+    "Win32_Security",
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Controls",
+    "Win32_Graphics_Gdi",
+] }
+# La poignée de la fenêtre native, pour donner à sa barre de titre la couleur de la barre d'Eve (la version qu'eframe
+# tire déjà).
+raw-window-handle = "0.6.2"
+
+[profile.release]
+debug = "line-tables-only"
+panic = "unwind"

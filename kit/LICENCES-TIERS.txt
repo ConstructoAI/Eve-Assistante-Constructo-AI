@@ -1,0 +1,88 @@
+EVE — LES COMPOSANTS LIBRES ET LEURS LICENCES
+==============================================
+
+Eve (programme\eve.exe, sa page, son installateur et ses scripts) : © 2026 Sylvain Leduc — Constructo AI, sous
+licence Apache 2.0 (les fichiers LICENSE et NOTICE). Gracieuseté de Sylvain Leduc — Constructo AI.
+
+Eve emploie les composants libres ci-dessous. Chacun garde sa licence ; les textes complets sont aux adresses
+indiquées.
+
+
+1. Dans le programme (programme\eve.exe)
+----------------------------------------
+
+· whisper.cpp et ggml — la reconnaissance de la parole. Licence MIT.
+  © 2023-2026 Georgi Gerganov et les contributeurs de whisper.cpp. https://github.com/ggml-org/whisper.cpp
+· whisper-rs — l'accès à whisper.cpp depuis Rust. Unlicense. https://github.com/tazz4843/whisper-rs
+· cpal — le micro. Licence Apache 2.0. https://github.com/RustAudio/cpal
+· windows (windows-rs) — les interfaces de Windows. Licence MIT ou Apache 2.0, au choix.
+  © Microsoft Corporation. https://github.com/microsoft/windows-rs
+· serde, serde_json — le JSON. Licence MIT ou Apache 2.0. https://github.com/serde-rs
+· Les autres bibliothèques Rust du programme et de sa construction : la liste exacte, avec la licence de chacune,
+  est dans LICENCES-RUST.txt (produite à l'emballage depuis Cargo.lock).
+
+Licence MIT (texte) :
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+  documentation files (the "Software"), to deal in the Software without restriction, including without limitation
+  the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+  permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all copies or substantial portions of
+  the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
+  THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+  TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
+Licence Apache 2.0 : https://www.apache.org/licenses/LICENSE-2.0
+
+
+2. Dans l'archive, à côté du programme
+--------------------------------------
+
+· Le runtime Visual C++ (programme\msvcp140.dll, vcruntime140.dll, vcruntime140_1.dll) — les fichiers
+  redistribuables de Microsoft Visual Studio 2022, livrés avec le programme qui en a besoin, comme le permettent les
+  conditions de licence de Visual Studio. © Microsoft Corporation.
+· Python 3.11.9 (programme\python, la distribution « embarquable » de python.org) — il fait tourner l'installateur et
+  le téléchargeur. Python Software Foundation License Version 2. © 2001-2024 Python Software Foundation.
+  https://docs.python.org/3/license.html
+
+
+3. Téléchargés à l'installation, de leurs sources officielles
+-------------------------------------------------------------
+
+Ces composants ne sont pas dans l'archive : l'installateur les télécharge sur le poste, depuis les adresses
+ci-dessous, dans %LOCALAPPDATA%\Eve\commun, chaque fichier vérifié par sa somme SHA-256. Leurs licences s'appliquent
+aux copies ainsi obtenues.
+
+· L'oreille (modeles\) : ggml-small-q5_1.bin, ggml-base-q5_1.bin — les modèles Whisper d'OpenAI, convertis au
+  format de whisper.cpp. Licence MIT. © 2022 OpenAI. https://github.com/openai/whisper —
+  https://huggingface.co/ggerganov/whisper.cpp
+· Piper (piper\) — la synthèse de la parole, un programme à part qu'Eve lance. Licence MIT. © 2022 Michael Hansen.
+  https://github.com/rhasspy/piper (publication 2023.11.14-2). Il comprend ONNX Runtime (Licence MIT,
+  © Microsoft Corporation, https://github.com/microsoft/onnxruntime) et eSpeak NG (la phonétisation ; Licence GNU
+  GPL, version 3 : https://www.gnu.org/licenses/gpl-3.0.html ; code source : https://github.com/rhasspy/espeak-ng).
+· La voix « Jessica » (voix\fr_FR-upmc-medium.onnx, sa première locutrice) : un modèle Piper entraîné sur le corpus
+  UPMC (https://github.com/marytts/upmc-pierre-data). Licence Creative Commons Attribution - Partage dans les mêmes
+  conditions 4.0 (CC BY-SA 4.0) : https://creativecommons.org/licenses/by-sa/4.0/
+  Modèle et fiche : https://huggingface.co/rhasspy/piper-voices (fr/fr_FR/upmc/medium).
+· La voix « Siwis » (voix\fr_FR-siwis-medium.onnx) : un modèle Piper entraîné sur le corpus SIWIS
+  (https://datashare.is.ed.ac.uk/handle/10283/2353). Licence Creative Commons Attribution 4.0 (CC BY 4.0) :
+  https://creativecommons.org/licenses/by/4.0/ — modèle et fiche : https://huggingface.co/rhasspy/piper-voices
+  (fr/fr_FR/siwis/medium).
+· L'oreille sur une carte NVIDIA, seulement si elle est choisie à l'installation : whisper-gpu\ (whisper-server.exe et
+  ses bibliothèques, de la publication officielle de whisper.cpp pour CUDA 12.4, b5454 ; Licence MIT, voir plus haut),
+  avec les bibliothèques CUDA de NVIDIA que cette publication contient (cudart64_12.dll, cublas64_12.dll,
+  cublasLt64_12.dll), redistribuables selon le contrat de licence du CUDA Toolkit, © NVIDIA Corporation :
+  https://docs.nvidia.com/cuda/eula/ ; et modeles\ggml-large-v3-turbo-q5_0.bin, le modèle Whisper large-v3-turbo
+  d'OpenAI (Licence MIT, © 2022 OpenAI), https://huggingface.co/ggerganov/whisper.cpp
+
+
+4. Ailleurs
+-----------
+
+· Claude Code et les modèles Claude (le cerveau d'Eve) appartiennent à Anthropic et s'emploient sous ses conditions,
+  avec le compte Claude de la personne : https://www.anthropic.com/legal

@@ -1,0 +1,31 @@
+﻿EVE — LES SOURCES
+=================
+
+Gracieuseté de Sylvain Leduc — Constructo AI. Eve est un logiciel libre, sous la licence Apache 2.0 (LICENSE, NOTICE) :
+vous pouvez la lire, la changer et la redistribuer, en gardant la NOTICE avec toute copie. Ses sources sont sur GitHub,
+https://github.com/ConstructoAI/Eve-Assistante-Constructo-AI : les mêmes que celles du dossier sources\ du kit.
+
+C'est tout le programme d'Eve, en Rust : src\ (le code), page\ (sa page dans Edge, et le logo de Constructo AI, qui
+reste une marque), kit\ (ce qui part chez la personne : l'installateur, ses gabarits, ses textes). Eve peut le modifier
+elle-même : demandez-le-lui, elle suit ce mode d'emploi.
+
+Il faut Windows 10 ou 11 (64 bits) et Claude Code, relié à un abonnement Claude actif (forfait Max 5x ou 20x) : Eve y
+prend son intelligence.
+
+Construire eve.exe :
+
+1. Cloner les sources : git clone https://github.com/ConstructoAI/Eve-Assistante-Constructo-AI (git vient avec Claude
+   Code). Une version construite hors d'un clone n'a pas d'empreinte : elle ne s'installe pas d'elle-même.
+2. Installer Rust par rustup (https://rustup.rs) : la version 1.99.0 se pose d'elle-même (rust-toolchain.toml).
+3. Installer les Build Tools de Visual Studio 2022, avec « Développement Desktop en C++ », et CMake.
+4. Poser libclang 18.1.1 dans outils\libclang\libclang.dll : le paquet PyPI « libclang » 18.1.1 la contient.
+5. Changer le code, puis le commiter : le programme porte l'empreinte de son commit.
+6. Lancer Compiler.bat --essais : il compile target\release\eve.exe et lance les essais. Lui seul pose les options de
+   whisper.cpp (AVX et F16C, sans AVX2 ni FMA, pour les vieux processeurs).
+
+Installer la nouvelle version : eve.exe --mettre-a-jour target\release\eve.exe, lancé par le programme en place
+(%LOCALAPPDATA%\Eve\programme\eve.exe ; Eve le fait elle-même, depuis sa séance). L'Eve qui tourne redémarre dedans à
+la fin de sa réponse, la conversation reprise ; si la nouvelle ne démarre pas en 90 secondes, l'ancienne revient
+d'elle-même. eve.exe --revenir revient à la version précédente.
+
+Refaire le kit : outils\preparer_python.ps1 (une fois), puis emballer.ps1 -Construire (dist\Eve.zip).

@@ -1,0 +1,11 @@
+# La construction (Compiler.bat), le kit emballé (emballer.ps1) : ils se refont, rien de cela n'entre dans le dépôt.
+/target/
+/dist/
+# Ce qui se pose sur le poste du développeur, hors du dépôt : la libclang de whisper-rs (voir .cargo/config.toml) et
+# le Python embarquable du kit (outils/preparer_python.ps1).
+/outils/libclang/
+/outils/python/
+# Les copies de travail des agents de Claude Code (git worktree) : elles ont leur branche, rien d'elles n'entre ici.
+/.claude/worktrees/
+# Ce que Python compile en essayant l'installateur : il se refait, et n'a rien à faire dans les sources du kit.
+__pycache__/

@@ -1,0 +1,15 @@
+# Les textes en LF dans le dépôt et sur le disque (comme le dépôt d'Entrepreneur Général, d'où vient Eve) ; le poste a
+# core.autocrlf=true, que cette ligne remplace.
+* text=auto eol=lf
+# cmd.exe veut des fins de ligne CRLF dans un .bat : en LF, goto ne trouve aucune étiquette.
+*.bat text eol=crlf
+# Octet pour octet, jamais convertis.
+*.exe binary
+*.dll binary
+*.ico binary
+*.png binary
+*.jpg binary
+*.wav binary
+*.bin binary
+*.onnx binary
+*.zip binary

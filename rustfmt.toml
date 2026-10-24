@@ -1,0 +1,6 @@
+# Le style d'Entrepreneur Général : des lignes de 120 colonnes, les petites expressions sur une ligne.
+max_width = 120
+use_small_heuristics = "Max"
+# Les listes de mots (les commandes que lit la garde, les formules de la parole) restent serrées, plusieurs par ligne :
+# au-delà de dix caractères, rustfmt mettait chaque mot sur sa ligne.
+short_array_element_width_threshold = 30

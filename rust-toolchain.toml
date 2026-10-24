@@ -1,0 +1,5 @@
+# La même version de Rust qu'Entrepreneur Général (son rust-toolchain.toml), pour qu'Eve y entre sans écart.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

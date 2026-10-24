@@ -1,0 +1,120 @@
+EVE — UN SPÉCIALISTE À TA VOIX
+==============================
+
+Gracieuseté de Sylvain Leduc — Constructo AI. Logiciel libre, sous la licence Apache 2.0 (LICENSE, NOTICE) ; ses
+sources sont dans le dossier « sources ».
+
+Eve est une assistante vocale pour Windows. Tu lui parles, elle te répond à voix haute, et elle devient le spécialiste
+que tu veux : un garagiste, un conseiller en voyages, un comptable, un entraîneur… Son profil se bâtit pendant
+l'installation, par une entrevue : tu réponds à ses questions, et elle écrit un profil d'expert complet, vérifié sur le
+Web.
+
+Son cerveau est Claude Code, d'Anthropic, sur ton propre compte Claude. Tout le reste tourne sur ton ordinateur :
+l'oreille (la reconnaissance de la parole) et la voix (la synthèse) ne quittent pas le poste.
+
+
+CE QU'IL TE FAUT
+----------------
+· Windows 10 ou 11, un micro et des haut-parleurs (ou un casque).
+· Claude Code, connecté à ton compte Claude (un abonnement Claude Pro ou Max, ou une clé d'API).
+  Pour l'installer : ouvre PowerShell et tape
+      irm https://claude.ai/install.ps1 | iex
+  puis tape   claude   une fois, pour te connecter. Le guide : https://docs.claude.com/fr/docs/claude-code/setup
+· Une connexion Internet (environ 410 Mo à télécharger une seule fois : la voix et l'oreille ; 1,3 Go de plus pour
+  l'oreille sur une carte graphique NVIDIA, si ton ordinateur en a une).
+
+
+L'INSTALLATION
+--------------
+1. Décompresse l'archive en entier (clic droit, « Extraire tout »).
+2. Double-clique Installer.bat.
+3. Réponds à l'entrevue : « Quel spécialiste veux-tu ? », puis une dizaine de questions sur son métier, ses clients,
+   son savoir, ses limites, sa façon de te parler. Tape « assez » quand tu veux arrêter.
+4. Quelques réglages : ton prénom, ton adresse courriel (affichée en haut de sa fenêtre ; facultative), son nom, son
+   dossier, son cerveau (Sonnet 5.5, rapide ; ou Opus 5.5, plus fort : il se change ensuite dans ses réglages,
+   rubrique « Cerveau », ou de vive voix, « passe à Opus »), la touche pour parler et le mot d'éveil ; avec
+   une carte NVIDIA, son oreille sur la carte, bien plus rapide que le processeur ; sa liberté (totale, ou ses fichiers
+   et le Web seulement) ; Constructo AI ; si elle te demande « je confirme » avant ce qui ne se défait pas ; son
+   allure (le centre de commande, ou le thème clair de Constructo AI : elle se change ensuite dans ses réglages) ; un
+   raccourci sur le bureau.
+5. Le profil s'écrit, de 5 à 20 minutes (Claude cherche sur le Web pendant ce temps), puis Eve démarre — et, si tu l'as
+   reliée à Constructo AI, elle ouvre sa page de connexion dans ton navigateur (voir plus bas).
+
+Pour un autre spécialiste, relance Installer.bat (ou le raccourci « Eve — nouveau spécialiste » du bureau) : chacun a
+son nom, son dossier, sa touche, et ils se partagent la voix et l'oreille. Ou, sans rien réinstaller, demande-lui un
+autre profil (« Eve, crée-moi un profil de comptable ») : elle l'écrit elle-même, dans un dossier à lui, avec sa propre
+conversation ; tu passes de l'un à l'autre de vive voix (« passe au profil comptable ») ou par le menu sous son nom,
+en haut de sa fenêtre.
+
+
+LUI PARLER
+----------
+· Tiens la touche choisie pendant que tu parles, ou commence ta phrase par « Eve, … » (si tu as gardé le mot d'éveil).
+· Ctrl+Alt+E affiche ou cache sa fenêtre. Tu peux aussi écrire tes demandes en bas de la fenêtre.
+· « Eve, stop » la coupe pendant qu'elle parle. La sourdine (dans ses réglages) la fait répondre par écrit.
+· Elle a d'office la liberté de Claude Code : chercher sur le Web, lire et écrire des fichiers, lancer des commandes
+  sur ton ordinateur, travailler à plusieurs en parallèle, se servir de Chrome, des connecteurs de ton compte claude.ai,
+  des serveurs MCP de ton poste et de Constructo AI ; regarder une pièce jointe ou une page photographiée avec la caméra
+  (« Eve, scanne… »).
+· Ce qui ne se défait pas attend « je confirme », de vive voix ou d'un clic : une suppression demandée à la voix, et
+  toute écriture dans Constructo AI (voir plus bas). Un simple « oui » ne suffit pas. Elle ne lit jamais ses propres
+  jetons ni tes fichiers de clés (.env).
+· Chaque privilège se retire (ou se redonne) à la main, dans ses réglages (reglages.json, « privileges ») :
+  "chrome", "connecteurs", "mcp_du_poste", "constructo" (vrai ou faux), et "outils" (["tous"], ou une liste :
+  "Read", "Write", "Edit", "Glob", "Grep", "WebSearch", "WebFetch", "PowerShell", "Agent"…). "accords": false : Eve ne
+  demande plus jamais « je confirme » — tout part, et son journal (eve.log) note ce qui l'aurait demandé, pour que tu
+  puisses relire ce qui s'est fait. Relance Eve pour qu'un changement compte.
+
+
+CONSTRUCTO AI
+-------------
+Eve se relie à Constructo AI, l'ERP de ton entreprise (clients, projets, devis, factures et paiements, bons de travail,
+inventaire, employés et pointage, courriels…), avec ton propre compte, comme le connecteur de claude.ai. Chaque
+spécialiste a sa propre connexion.
+· Se connecter : si tu l'as reliée à l'installation, Eve ouvre d'elle-même la page de connexion au premier lancement ;
+  sinon, dans ses réglages, « Se connecter à Constructo AI ». La page de Constructo AI s'ouvre dans ton navigateur :
+  entre le courriel et le mot de passe de ton entreprise — les mêmes que pour Constructo AI —, puis reviens à la
+  fenêtre d'Eve. Cela ne se fait qu'une fois : Eve renouvelle elle-même sa connexion. Si Constructo AI la refuse un
+  jour (un mot de passe changé, un accès retiré), Eve le dit, et tu la relies de nouveau de la même façon.
+· Sa connexion est chiffrée pour ta session Windows, sur ce poste seulement (connexion.bin, dans son dossier local) :
+  Eve la remet elle-même à Claude, qui ne la lit pas. « Se déconnecter », dans ses réglages, l'efface.
+· Ce qu'Eve demande avant d'écrire : lire et chercher dans l'ERP se fait sans accord. Toute écriture dans Constructo AI
+  — créer, modifier, supprimer, enregistrer un paiement, envoyer, publier… — s'affiche avec son détail et attend
+  « je confirme », de vive voix ou d'un clic, que la demande soit dite ou écrite. Un courriel s'arrête au brouillon :
+  c'est toi qui l'envoies, de Constructo AI. (Avec "accords": false, plus rien ne se demande.)
+· Le serveur de Constructo AI s'endort quand personne ne s'en sert : la première demande après une pause peut prendre
+  une trentaine de secondes de plus, le temps qu'il se réveille. S'il ne répond pas, Eve le dit et réessaie d'elle-même ;
+  « Réessayer », dans ses réglages, le fait tout de suite.
+· Il faut un abonnement Constructo AI qui ouvre le connecteur MCP de l'ERP.
+
+
+OÙ EST QUOI
+-----------
+· Son dossier de travail (celui que tu as choisi) : PROFIL.md, son profil, que tu peux relire et modifier ;
+  CLAUDE.md, EVE_CONSIGNE.md, entrevue.json, ses notes, et Eve.bat, son lanceur.
+· %LOCALAPPDATA%\Eve : le programme, la voix et l'oreille, et pour chaque spécialiste ses réglages (reglages.json), son
+  journal (eve.log), sa mémoire, son historique et sa connexion à Constructo AI (connexion.bin, chiffrée).
+
+
+CE QUE ÇA COÛTE
+---------------
+Eve elle-même est gratuite. Chaque réponse utilise ton compte Claude, comme Claude Code au clavier : avec un
+abonnement, elle compte dans ta limite d'utilisation ; avec une clé d'API, elle se paie à l'usage. L'écriture d'un
+profil complet en utilise quelques dollars, une seule fois. Au démarrage, Eve fait un premier tour silencieux pour que ta
+première question aille plus vite.
+
+Pour qu'elle garde son contexte au chaud pendant la journée (une première réponse plus rapide après une pause, mais un
+tour payé toutes les 50 minutes), mets "au_chaud": true dans son reglages.json.
+
+
+LA DÉSINSTALLER
+---------------
+Pour un spécialiste : supprime son dossier de travail, son dossier %LOCALAPPDATA%\Eve\specialistes\<son nom>, et son
+raccourci. Pour tout : supprime aussi %LOCALAPPDATA%\Eve. Si tu avais coché « Démarrer avec Windows » dans ses réglages,
+décoche-le d'abord.
+
+
+LES LICENCES
+------------
+Eve emploie des composants libres (Whisper, Piper, des voix de synthèse, Python) : voir LICENCES-TIERS.txt et
+LICENCES-RUST.txt.
