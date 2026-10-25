@@ -112,6 +112,13 @@ pub struct Piste {
     formes: Arc<[Forme]>,
 }
 
+impl Piste {
+    /// Le temps qu'elle dure.
+    pub fn duree(&self) -> Duration {
+        PAS_DE_L_ENVELOPPE * self.niveaux.len() as u32
+    }
+}
+
 /// Ce qui s'entend en ce moment — depuis quand, et sa piste —, posé par le fil de la voix quand un son s'entend et ôté
 /// quand il finit. La fenêtre le lit à chaque image, sans attendre l'état du chef (dix fois par seconde : trop peu pour
 /// des lèvres) : une seule voix parle, une seule bouche la suit.
@@ -120,9 +127,15 @@ static S_ENTEND: Mutex<Option<(Instant, Piste)>> = Mutex::new(None);
 /// La bouche à cet instant : le niveau de la voix qui s'entend (de 0 à 1, entre deux pas, à mi-chemin) et la forme de la
 /// bouche ; `None` : rien ne s'entend.
 pub fn bouche_du_moment() -> Option<(f32, Forme)> {
+    bouche_a_venir(Duration::ZERO)
+}
+
+/// La bouche dans `avance`, celle de ce qui s'entendra alors : les lèvres d'une vraie personne se placent avant que le
+/// son ne sorte. `None` : rien ne s'entend, ou la phrase aura fini.
+pub fn bouche_a_venir(avance: Duration) -> Option<(f32, Forme)> {
     let s = S_ENTEND.lock().ok()?;
     let (depuis, piste) = s.as_ref()?;
-    let x = depuis.elapsed().as_secs_f32() / PAS_DE_L_ENVELOPPE.as_secs_f32();
+    let x = (depuis.elapsed() + avance).as_secs_f32() / PAS_DE_L_ENVELOPPE.as_secs_f32();
     let i = x as usize;
     let a = *piste.niveaux.get(i)?;
     let b = piste.niveaux.get(i + 1).copied().unwrap_or(0.0);
@@ -134,6 +147,12 @@ pub fn faire_entendre(piste: Option<Piste>) {
     if let Ok(mut s) = S_ENTEND.lock() {
         *s = piste.map(|p| (Instant::now(), p));
     }
+}
+
+/// La piste d'une phrase dite, `wav` (PCM 16 bits), dont le texte est `texte` : son enveloppe ([`enveloppe`]) et ses
+/// syllabes ([`piste_de`]).
+pub fn piste_du_son(wav: &[u8], texte: &str) -> Piste {
+    piste_de(enveloppe(wav), texte)
 }
 
 /// La piste d'une phrase : son niveau pas à pas, et ses syllabes ([`parole::syllabes`]) posées sur les crêtes de la voix
@@ -1525,7 +1544,7 @@ impl Fil {
                 self.finir(id);
             }
             let Some((numero, id, wav)) = suivant else { return };
-            let piste = piste_de(enveloppe(&wav), self.file.texte_en_cours());
+            let piste = piste_du_son(&wav, self.file.texte_en_cours());
             match self.lecteur.jouer(numero, wav) {
                 Ok(()) => {
                     self.lecture = Some(EnLecture { id, entendu: false, piste });

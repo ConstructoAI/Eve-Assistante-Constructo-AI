@@ -70,11 +70,12 @@ LUI PARLER
   d'Eve, « Choisir une image… » — une photo, ou une image détourée (un PNG au fond transparent), dont la tête sort du
   cercle. Ses poses, de la même taille et posées à côté d'elle sous son nom (eve.png, puis eve-yeux-1.png… les yeux
   qui se ferment, eve-regard-1.png… des regards de côté, eve-sourcils-1.png… les sourcils levés, eve-bouche-1.png… la
-  bouche et la mâchoire de plus en plus ouvertes, eve-detendu-1.png… de même sans sourire, eve-rond-1.png… arrondie
-  pour o et ou, eve-large-1.png… étirée pour i et é, eve-ferme-1.png les lèvres closes pour m, b et p ; et une par
-  émotion : eve-emotion-joie.png, -amusee, -empathie, -triste, -surprise, -reflexion, -serieuse), viennent avec elle et
-  l'animent : elle cligne, regarde de côté, respire, bouge la tête ; sa bouche suit sa voix et les mots qu'elle dit (en
-  sourdine, elle ne bouge pas) ; son visage prend l'émotion de chaque réponse, que Claude choisit.
+  bouche et la mâchoire de plus en plus ouvertes, eve-rond-1.png… arrondie pour o et ou, eve-large-1.png… étirée pour i
+  et é, eve-ferme-1.png les lèvres closes pour m, b et p ; et une par émotion : eve-emotion-joie.png, -amusee,
+  -empathie, -triste, -surprise, -reflexion, -serieuse, chacune avec ses bouches pour parler, eve-emotion-joie-bouche-1…),
+  viennent avec elle et l'animent : elle cligne, regarde de côté, respire ; sa tête prend une posture et la garde, et
+  hoche en parlant ; sa bouche suit sa voix et les mots qu'elle dit (en sourdine, elle ne bouge pas) ; son visage prend
+  l'émotion de chaque réponse, que Claude choisit, et parle sans la quitter.
 · Ce qui ne se défait pas attend « je confirme », de vive voix ou d'un clic : une suppression demandée à la voix, et
   toute écriture dans Constructo AI (voir plus bas). Un simple « oui » ne suffit pas. Elle ne lit jamais ses propres
   jetons ni tes fichiers de clés (.env).

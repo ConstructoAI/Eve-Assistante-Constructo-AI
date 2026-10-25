@@ -7,10 +7,10 @@
 name = "eve"
 description = "Eve, l'Assistante de Constructo AI, de vive voix — on lui parle, elle fait le travail (Claude Code), elle répond à voix haute"
 license = "Apache-2.0"
-# La révision d'Eve (11.0.0 : la v11), sa seule source : la fenêtre la montre (« v11 »), `eve --version` la dit, le zip
+# La révision d'Eve (12.0.0 : la v12), sa seule source : la fenêtre la montre (« v12 »), `eve --version` la dit, le zip
 # (emballer.ps1) et l'étiquette du dépôt public (outils\publier.ps1) en prennent le nom. Une révision de plus : monter
-# ce nombre (12.0.0 pour la v12), et rien d'autre.
-version = "11.0.0"
+# ce nombre (13.0.0 pour la v13), et rien d'autre.
+version = "12.0.0"
 edition = "2024"
 rust-version = "1.99"
 publish = false
