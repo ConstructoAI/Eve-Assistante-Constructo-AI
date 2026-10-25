@@ -200,6 +200,8 @@ const INIT_DELAI: Duration = Duration::from_secs(120);
 const DIT_RECEMMENT: Duration = Duration::from_secs(30);
 /// L'état ne se publie pas plus souvent (le texte en cours d'écriture change à chaque mot).
 const PUBLICATION_MIN: Duration = Duration::from_millis(80);
+/// Le temps que le visage d'Eve garde l'émotion d'une réponse.
+const EMOTION_DUREE: Duration = Duration::from_secs(90);
 /// Le contexte de l'Adjointe reste une heure en cache chez Anthropic (cerveau.rs) : passé ce temps sans un tour, la
 /// question suivante repartirait à froid (13 à 24 s avant le premier mot, mesuré le 2026-10-22, au lieu de 5 à 6 s). Un
 /// tour silencieux le garde au chaud, aux heures de bureau.
@@ -500,6 +502,11 @@ pub struct Chef {
     parle: bool,
     parole_id: u64,
     flux: EnFlux,
+    /// Le début du message de Claude qui arrive, retenu tant qu'il peut porter une émotion en tête (« [triste] ») ;
+    /// `None` une fois tranché.
+    tete: Option<String>,
+    /// L'émotion de la dernière réponse, que montre le visage d'Eve, et depuis quand.
+    emotion: Option<(parole::Emotion, Instant)>,
     dit_dans_le_tour: bool,
     commentaires: HashSet<&'static str>,
     dernier_dit: Option<Instant>,
@@ -697,6 +704,8 @@ impl Chef {
             parle: false,
             parole_id: 0,
             flux: EnFlux::default(),
+            tete: None,
+            emotion: None,
             dit_dans_le_tour: false,
             commentaires: HashSet::new(),
             dernier_dit: None,
@@ -2327,6 +2336,9 @@ impl Chef {
         self.commentaires.clear();
         self.en_cours.clear();
         self.flux.nouveau_tour();
+        // Le visage quitte l'émotion de la réponse d'avant ; la nouvelle viendra en tête de celle-ci.
+        self.tete = Some(String::new());
+        self.emotion = None;
     }
 
     /// Envoie le message suivant si l'Adjointe est libre : un seul à la fois.
@@ -2598,29 +2610,71 @@ impl Chef {
                     self.chrono = None;
                     self.commencer_un_tour(Instant::now());
                 }
+                // Le début retenu du message d'avant, s'il n'a jamais tranché, avant que celui-ci ne commence.
+                self.vider_la_tete();
                 self.flux.nouveau_message();
                 if !self.en_cours.trim().is_empty() && !self.en_cours.ends_with("\n\n") {
                     self.en_cours.push_str("\n\n");
                 }
+                self.tete = Some(String::new());
             }
             Flux::Texte(t) => {
-                if let Some(c) = &mut self.chrono
-                    && c.premier_mot.is_none()
-                    && !t.trim().is_empty()
-                {
-                    c.premier_mot = Some(Instant::now());
-                }
-                self.en_cours.push_str(&t);
-                for p in self.flux.ajouter(&t) {
-                    self.dire_la_reponse(&p);
-                }
+                // L'émotion en tête (« [triste] ») : le début retenu jusqu'à ce qu'il tranche, l'émotion ôtée et montrée
+                // par le visage ; elle ne se dit ni ne s'affiche.
+                let t = match self.tete.take() {
+                    None => t,
+                    Some(mut debut) => {
+                        debut.push_str(&t);
+                        match parole::emotion_du_debut(&debut) {
+                            None => {
+                                self.tete = Some(debut);
+                                return;
+                            }
+                            Some((emotion, reste)) => {
+                                if let Some(e) = emotion {
+                                    self.emotion = Some((e, Instant::now()));
+                                }
+                                reste.to_string()
+                            }
+                        }
+                    }
+                };
+                self.texte_de_la_reponse(&t);
             }
             Flux::FinBloc => {
+                self.vider_la_tete();
                 for p in self.flux.finir() {
                     self.dire_la_reponse(&p);
                 }
             }
             Flux::DebutTexte | Flux::Outil(_) => {}
+        }
+    }
+
+    /// Un morceau de la réponse : affiché au fil des mots, dit phrase par phrase ; le premier mot chronométré.
+    fn texte_de_la_reponse(&mut self, t: &str) {
+        if let Some(c) = &mut self.chrono
+            && c.premier_mot.is_none()
+            && !t.trim().is_empty()
+        {
+            c.premier_mot = Some(Instant::now());
+        }
+        self.en_cours.push_str(t);
+        for p in self.flux.ajouter(t) {
+            self.dire_la_reponse(&p);
+        }
+    }
+
+    /// Le début retenu d'un message qui finit sans avoir tranché : son émotion, s'il n'a qu'elle ; sinon du texte, tel
+    /// quel (un « [ » sans son « ] »).
+    fn vider_la_tete(&mut self) {
+        let Some(debut) = self.tete.take() else { return };
+        let (emotion, reste) = parole::emotion_en_tete(&debut);
+        if let Some(e) = emotion {
+            self.emotion = Some((e, Instant::now()));
+        }
+        if !reste.trim().is_empty() {
+            self.texte_de_la_reponse(reste);
         }
     }
 
@@ -2686,6 +2740,7 @@ impl Chef {
         if std::mem::take(&mut self.prechauffage) {
             self.en_cours.clear();
             self.flux.nouveau_tour();
+            (self.tete, self.emotion) = (None, None);
             // Un préchauffage en erreur : la personne le sait avant sa première demande (un compte déconnecté, une
             // limite atteinte), au lieu d'une Eve « prête » qui échouera.
             if erreur {
@@ -2714,13 +2769,23 @@ impl Chef {
         }
         let interrompu = std::mem::take(&mut self.interrompu);
         if !interrompu {
+            self.vider_la_tete();
             for p in self.flux.finir() {
                 self.dire_la_reponse(&p);
             }
         }
+        self.tete = None;
+        // La réponse entière, sans son émotion en tête (sans le flux, c'est ici qu'elle se lit).
+        let (emotion, texte_seul) = parole::emotion_en_tete(&texte);
+        if let Some(e) = emotion
+            && self.emotion.is_none()
+        {
+            self.emotion = Some((e, Instant::now()));
+        }
+        let texte_seul = texte_seul.to_string();
         let a_parle = self.flux.a_parle();
         let ecrit = std::mem::take(&mut self.en_cours);
-        let affiche = if ecrit.trim().is_empty() { texte.clone() } else { ecrit };
+        let affiche = if ecrit.trim().is_empty() { texte_seul.clone() } else { ecrit };
         let demande = self.demande_du_tour.take();
         if interrompu {
             // Affiché, pas dit : la personne vient de dire « arrête ».
@@ -2764,7 +2829,7 @@ impl Chef {
             }
             if !a_parle {
                 // Sans la réponse en flux (une ancienne version de Claude Code) : la réponse entière, d'un coup.
-                let dit = parole::pour_la_voix(&texte);
+                let dit = parole::pour_la_voix(&texte_seul);
                 if !dit.is_empty() {
                     let parole_id = self.dire_a_voix_haute(&dit);
                     self.premiere_phrase(parole_id);
@@ -3238,6 +3303,10 @@ impl Chef {
         self.sonner_les_rappels(maintenant);
         self.surveiller_l_initialisation(maintenant);
         self.renouveler_la_conversation(maintenant);
+        // L'émotion d'une réponse s'efface une minute et demie après, quand Eve ne parle plus.
+        if !self.parle && self.emotion.is_some_and(|(_, depuis)| maintenant.duration_since(depuis) > EMOTION_DUREE) {
+            self.emotion = None;
+        }
         if self.attentes.front().is_some_and(|a| maintenant.duration_since(a.depuis) > ACCORD_DELAI) {
             self.systeme("Pas de réponse en trois minutes : l'écriture est refusée.");
             self.decider(false);
@@ -3964,6 +4033,8 @@ impl Chef {
             "libelle": libelle,
             "aide": aide,
             "niveau": niveau,
+            // L'émotion de la réponse, que montre le visage d'Eve (son portrait).
+            "emotion": self.emotion.map(|(e, _)| e.nom()),
             "qui": self.reglages.qui,
             "theme": self.reglages.theme,
             // La comptabilité que lit la fenêtre (l'encaisse, les échéances fiscales) : son dossier, ou rien.

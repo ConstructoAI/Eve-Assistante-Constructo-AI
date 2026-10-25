@@ -28,6 +28,7 @@ use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, FontFamily, FontId, Layout, Margin, Mesh, Pos2, Rect, RichText, Sense,
     Shape, Stroke, StrokeKind, UiBuilder, pos2, vec2,
 };
+use eve::parole::Emotion;
 use serde_json::Value;
 
 use super::{
@@ -1121,18 +1122,36 @@ impl Fenetre {
         self.orbe_tenue = rep.is_pointer_button_down_on();
         rep.on_hover_text("Tiens appuyé pour parler").on_hover_cursor(egui::CursorIcon::PointingHand);
         let etat = self.champ("etat").to_string();
-        let niveau = self.etat.get("niveau").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        // Le niveau qui anime l'anneau : sa voix quand elle parle (lue à chaque image, comme sa bouche), celui du micro
+        // sinon.
+        let parle = etat == "parole";
+        let niveau = if parle {
+            crate::voix::bouche_du_moment().map_or(0.0, |(n, _)| n)
+        } else {
+            self.etat.get("niveau").and_then(Value::as_f64).unwrap_or(0.0) as f32
+        };
         let temps = ui.input(|i| i.time);
+        let vivant = animations(ui.ctx());
+        // L'émotion de sa réponse ; pendant qu'elle réfléchit, son air pensif.
+        let emotion = if etat == "reflexion" {
+            Some(Emotion::Reflexion)
+        } else {
+            self.etat.get("emotion").and_then(Value::as_str).and_then(Emotion::de)
+        };
+        let pose = self.portrait.pose_du_moment(temps, parle, vivant, emotion).unwrap_or_default();
         let (centre, rayon) = (rect.center(), rect.width().min(rect.height()) * 0.4);
         let couleur = couleur_de_l_anneau(&etat, ui.visuals().dark_mode);
         let p = ui.painter();
         p.circle_filled(centre + vec2(0.0, rayon * 0.08), rayon * 1.06, Color32::from_black_alpha(16));
         p.circle_filled(centre + vec2(0.0, rayon * 0.03), rayon * 1.01, Color32::from_black_alpha(34));
         portrait::anneau(p, centre, rayon, &etat, couleur, niveau, temps);
-        visage.en_grand(p, centre, rayon);
+        visage.en_grand(p, centre, rayon, &pose);
         portrait::pastille(p, centre, rayon, &etat, couleur);
-        if etat != "pret" {
+        // Redessinée tant qu'elle s'anime (elle respire) ; sans les animations de Windows, au prochain clignement.
+        if etat != "pret" || pose.apres <= 0.0 {
             ui.ctx().request_repaint();
+        } else {
+            ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(pose.apres));
         }
     }
 

@@ -29,6 +29,8 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use eve::parole::{self, Forme};
+
 use crate::chef::Evt;
 use crate::journal;
 use crate::reglages::{Reglages, VOIX_PAR_DEFAUT, dossier_local};
@@ -102,6 +104,85 @@ pub struct Voix {
     coupure: Arc<Coupure>,
 }
 
+/// La piste de la bouche d'une phrase : le niveau de sa voix pas à pas ([`enveloppe`]) et, à chaque pas, la forme de la
+/// bouche ([`piste_de`]).
+#[derive(Clone)]
+pub struct Piste {
+    niveaux: Arc<[f32]>,
+    formes: Arc<[Forme]>,
+}
+
+/// Ce qui s'entend en ce moment — depuis quand, et sa piste —, posé par le fil de la voix quand un son s'entend et ôté
+/// quand il finit. La fenêtre le lit à chaque image, sans attendre l'état du chef (dix fois par seconde : trop peu pour
+/// des lèvres) : une seule voix parle, une seule bouche la suit.
+static S_ENTEND: Mutex<Option<(Instant, Piste)>> = Mutex::new(None);
+
+/// La bouche à cet instant : le niveau de la voix qui s'entend (de 0 à 1, entre deux pas, à mi-chemin) et la forme de la
+/// bouche ; `None` : rien ne s'entend.
+pub fn bouche_du_moment() -> Option<(f32, Forme)> {
+    let s = S_ENTEND.lock().ok()?;
+    let (depuis, piste) = s.as_ref()?;
+    let x = depuis.elapsed().as_secs_f32() / PAS_DE_L_ENVELOPPE.as_secs_f32();
+    let i = x as usize;
+    let a = *piste.niveaux.get(i)?;
+    let b = piste.niveaux.get(i + 1).copied().unwrap_or(0.0);
+    Some((a + (b - a) * x.fract(), piste.formes.get(i).copied().unwrap_or(Forme::Ouverte)))
+}
+
+/// Fait entendre une piste à partir de maintenant (rien : plus rien ne s'entend) ; le fil de la voix, et les essais.
+pub fn faire_entendre(piste: Option<Piste>) {
+    if let Ok(mut s) = S_ENTEND.lock() {
+        *s = piste.map(|p| (Instant::now(), p));
+    }
+}
+
+/// La piste d'une phrase : son niveau pas à pas, et ses syllabes ([`parole::syllabes`]) posées sur les crêtes de la voix
+/// ([`cretes`]), dans l'ordre — une par crête quand elles sont autant, sinon réparties de la première à la dernière ;
+/// chaque pas prend la forme de la crête la plus proche, et les lèvres se ferment dans les 120 ms qui précèdent une
+/// syllabe qu'un m, un b ou un p ouvre.
+pub fn piste_de(niveaux: Arc<[f32]>, texte: &str) -> Piste {
+    let syllabes = parole::syllabes(texte);
+    let cretes = cretes(&niveaux);
+    let mut formes = vec![Forme::Ouverte; niveaux.len()];
+    if !syllabes.is_empty() && !cretes.is_empty() {
+        let (s, c) = (syllabes.len(), cretes.len());
+        let syllabe = |i: usize| syllabes[if c == 1 { 0 } else { (i * (s - 1) + (c - 1) / 2) / (c - 1) }];
+        for (pas, forme) in formes.iter_mut().enumerate() {
+            let proche = (0..c).min_by_key(|&i| cretes[i].abs_diff(pas)).unwrap_or(0);
+            *forme = syllabe(proche).forme;
+        }
+        for (i, &crete) in cretes.iter().enumerate() {
+            if syllabe(i).fermee_avant {
+                for forme in &mut formes[crete.saturating_sub(3)..crete.saturating_sub(1)] {
+                    *forme = Forme::Fermee;
+                }
+            }
+        }
+    }
+    Piste { niveaux, formes: formes.into() }
+}
+
+/// Les crêtes de la voix — ses syllabes : les pas d'au moins 0,35 que leurs deux voisins de chaque côté ne dépassent
+/// pas, à 120 ms l'une de l'autre au moins (la plus haute gardée).
+fn cretes(n: &[f32]) -> Vec<usize> {
+    let mut gardees: Vec<usize> = Vec::new();
+    for i in 0..n.len() {
+        let voisins = i.saturating_sub(2)..(i + 3).min(n.len());
+        if n[i] < 0.35 || voisins.into_iter().any(|j| n[j] > n[i]) {
+            continue;
+        }
+        match gardees.last_mut() {
+            Some(d) if i - *d < 3 => {
+                if n[i] > n[*d] {
+                    *d = i;
+                }
+            }
+            _ => gardees.push(i),
+        }
+    }
+    gardees
+}
+
 impl Voix {
     /// Dit un texte (une phrase, ou plusieurs) après ce qui a été donné avant ; `Evt::VoixFinie(id)` quand c'est dit,
     /// coupé ou en échec.
@@ -133,6 +214,43 @@ fn lancer(reglages: &Reglages, rapport: Sender<Evt>, trace: Option<Sender<Trace>
     let (voulue, debit, douceur) = (reglages.voix.clone(), reglages.debit, Douceur::de(reglages.douceur));
     thread::spawn(move || Fil::ouvrir(&voulue, debit, douceur, c, rapport, trace).mener(&rx));
     Voix { tx, coupure }
+}
+
+/// Le pas du niveau de la voix ([`enveloppe`]).
+const PAS_DE_L_ENVELOPPE: Duration = Duration::from_millis(40);
+
+/// Le niveau d'un WAV (PCM 16 bits), pas à pas ([`PAS_DE_L_ENVELOPPE`]) : de 0 sous −50 dBFS (le souffle de la synthèse)
+/// à 1 à −15 dBFS (une voix forte), en décibels comme l'oreille l'entend ; puis rapporté à la phrase (son neuvième
+/// décile parmi ce qui s'entend vaut 1) : une voix plus douce ou plus forte ouvre la bouche du portrait autant.
+fn enveloppe(wav: &[u8]) -> Arc<[f32]> {
+    let Some(e) = entete(wav) else { return Arc::from([]) };
+    let fin = (e.debut + e.taille).min(wav.len());
+    let (echantillons, _) = wav[e.debut..fin].as_chunks::<2>();
+    // Les échantillons d'un pas, toutes voies comprises : la cadence en octets dit le temps, quel que soit le WAV.
+    let par_pas = (e.octets_par_seconde as usize / 2 * PAS_DE_L_ENVELOPPE.as_millis() as usize / 1000).max(1);
+    let mut niveaux: Vec<f32> = echantillons
+        .chunks(par_pas)
+        .map(|morceau| {
+            let carres: f64 = morceau
+                .iter()
+                .map(|&b| {
+                    let v = f64::from(i16::from_le_bytes(b)) / 32_768.0;
+                    v * v
+                })
+                .sum();
+            let db = 20.0 * (carres / morceau.len() as f64).sqrt().max(1e-6).log10();
+            ((db + 50.0) / 35.0).clamp(0.0, 1.0) as f32
+        })
+        .collect();
+    let mut entendus: Vec<f32> = niveaux.iter().copied().filter(|&v| v > 0.05).collect();
+    if !entendus.is_empty() {
+        entendus.sort_by(f32::total_cmp);
+        let reference = entendus[(entendus.len() - 1) * 9 / 10];
+        for v in &mut niveaux {
+            *v = (*v / reference).min(1.0);
+        }
+    }
+    niveaux.into()
 }
 
 /// Ce que fait la voix, pour l'essai sur le poste : le délai de la première phrase, les trous, la coupure.
@@ -602,6 +720,11 @@ impl<A> File<A> {
         (finies, None)
     }
 
+    /// Le texte du morceau qui se dit (la tête, « en cours ») ; rien s'il n'y en a pas.
+    fn texte_en_cours(&self) -> &str {
+        self.morceaux.front().filter(|m| matches!(m.etat, Etat::EnCours)).map_or("", |m| m.texte.as_str())
+    }
+
     /// Le son qui se dira juste après celui en cours, s'il est déjà prêt : il peut s'ouvrir d'avance.
     fn prochain_pret(&self) -> Option<(u64, &A)> {
         let mut suite = self.morceaux.iter();
@@ -841,10 +964,11 @@ enum Panne {
     Illisible(String),
 }
 
-/// Le morceau qui se dit : sa parole, et s'il s'entend déjà (le lecteur l'a ouvert et le joue).
+/// Le morceau qui se dit : sa parole, s'il s'entend déjà (le lecteur l'a ouvert et le joue), et la piste de sa bouche.
 struct EnLecture {
     id: u64,
     entendu: bool,
+    piste: Piste,
 }
 
 /// Ce que dit le lecteur du son en cours.
@@ -1029,6 +1153,11 @@ impl Fil {
         let _ = self.rapport.send(Evt::VoixFinie(id));
     }
 
+    /// Le son a fini, ou s'est tu : la bouche du portrait se ferme.
+    fn plus_rien_ne_s_entend(&self) {
+        faire_entendre(None);
+    }
+
     /// La coupure : le son s'arrête aussitôt, tout ce qui a été donné jusqu'au seuil se termine sans un mot, et Piper,
     /// s'il prépare encore des phrases coupées, est relancé plutôt qu'attendu (le processeur va à l'oreille).
     fn couper(&mut self) {
@@ -1040,6 +1169,7 @@ impl Fil {
         if self.file.couper(seuil) {
             self.lecteur.arreter();
             self.lecture = None;
+            self.plus_rien_ne_s_entend();
             self.tracer(Trace::Coupee(Instant::now()));
         }
         if self.synthese.as_ref().is_some_and(|(n, _)| !self.file.vivant(*n))
@@ -1350,6 +1480,7 @@ impl Fil {
             l.entendu |= entendu;
             let id = l.id;
             if entendu {
+                faire_entendre(Some(l.piste.clone()));
                 self.tracer(Trace::Son { id, a: Instant::now() });
                 // Le premier son de cette parole s'entend : le chef en tient le temps de la première parole.
                 if id > self.entendue {
@@ -1380,6 +1511,7 @@ impl Fil {
                 }
             };
             self.lecture = None;
+            self.plus_rien_ne_s_entend();
             if let Some((id, dernier)) = self.file.lecture_finie() {
                 self.tracer(Trace::Fin { id, a: fin });
                 if dernier {
@@ -1393,9 +1525,10 @@ impl Fil {
                 self.finir(id);
             }
             let Some((numero, id, wav)) = suivant else { return };
+            let piste = piste_de(enveloppe(&wav), self.file.texte_en_cours());
             match self.lecteur.jouer(numero, wav) {
                 Ok(()) => {
-                    self.lecture = Some(EnLecture { id, entendu: false });
+                    self.lecture = Some(EnLecture { id, entendu: false, piste });
                     self.tracer(Trace::Debut { id, a: Instant::now() });
                     return;
                 }
@@ -1430,6 +1563,7 @@ impl Fil {
     fn fermer(&mut self) {
         self.lecteur.arreter();
         self.lecture = None;
+        self.plus_rien_ne_s_entend();
         if let Some((_, s)) = self.synthese.take() {
             s.annuler();
         }
@@ -1949,6 +2083,43 @@ mod essais {
         assert_eq!(entete(&tronque).map(|e| e.taille), Some(44_100 - 4096));
         assert!(!wav_complet(b"RIFF"));
         assert!(!ramener(&mut b"pas un son".to_vec()));
+    }
+
+    #[test]
+    fn la_bouche_suit_le_niveau_de_la_voix() {
+        // 0,2 s de silence, 0,2 s de voix forte (−6 dBFS), 0,2 s de voix douce (−36 dBFS) : cinq pas chacun.
+        let mut e = vec![0i16; 4_410];
+        e.extend((0..4_410).map(|i| if i % 2 == 0 { 16_000 } else { -16_000 }));
+        e.extend((0..4_410).map(|i| if i % 2 == 0 { 520 } else { -520 }));
+        let n = enveloppe(&wav(&e));
+        assert_eq!(n.len(), 15, "{n:?}");
+        assert!(n[..5].iter().all(|&v| v == 0.0), "{n:?}");
+        assert!(n[5..10].iter().all(|&v| v == 1.0), "{n:?}");
+        assert!(n[10..].iter().all(|&v| v > 0.2 && v < 0.6), "{n:?}");
+        assert!(enveloppe(b"pas un son").is_empty());
+        // Deux syllabes, deux crêtes (« papa ») : la bouche ouverte sur chacune, fermée juste avant chacune (le p).
+        let mut niveaux = vec![0.0f32; 20];
+        for (i, v) in [(5, 0.6), (6, 1.0), (7, 0.6), (14, 0.5), (15, 0.9), (16, 0.5)] {
+            niveaux[i] = v;
+        }
+        assert_eq!(cretes(&niveaux), [6, 15]);
+        let p = piste_de(niveaux.into(), "papa");
+        assert_eq!(&p.formes[3..7], [Forme::Fermee, Forme::Fermee, Forme::Ouverte, Forme::Ouverte]);
+        assert_eq!(&p.formes[12..16], [Forme::Fermee, Forme::Fermee, Forme::Ouverte, Forme::Ouverte]);
+        // Trois syllabes sur deux crêtes (« bonjour Eve ») : la première et la dernière.
+        let mut deux = vec![0.0f32; 12];
+        (deux[3], deux[9]) = (1.0, 1.0);
+        let p = piste_de(deux.into(), "Bonjour Ève");
+        assert_eq!((p.formes[3], p.formes[9]), (Forme::Ronde, Forme::Ouverte));
+        // Ce qui s'entend depuis 0,26 s : entre le sixième pas et le septième ; rien ne s'entend, rien.
+        faire_entendre(None);
+        assert_eq!(bouche_du_moment(), None);
+        let piste = piste_de(n, "a");
+        if let Ok(mut s) = S_ENTEND.lock() {
+            *s = Some((Instant::now() - Duration::from_millis(260), piste));
+        }
+        assert_eq!(bouche_du_moment().map(|(v, f)| (v > 0.99, f)), Some((true, Forme::Ouverte)));
+        faire_entendre(None);
     }
 
     #[test]

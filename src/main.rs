@@ -92,6 +92,7 @@ fn main() {
         Some("--essai-theme") => essais::theme(&args[1..]),
         Some("--essai-pieces") => essais::pieces(&args[1..]),
         Some("--essai-profils") => essais::profils(&args[1..]),
+        Some("--essai-portrait") => essais::portrait(&args[1..]),
         Some("--aide" | "-h" | "--help") => {
             aide();
             0
@@ -290,6 +291,8 @@ fn aide() {
          \x20                            fichiers inventés (le dossier local de l'essai : EVE_DOSSIER_LOCAL)\n\
          eve --essai-profils [--captures DOSSIER]  le menu des profils de la barre et leur rubrique des réglages,\n\
          \x20                            cliqués sans la souris, sur des profils inventés\n\
+         eve --essai-portrait <dossier> [--captures DOSSIER]  le portrait d'Eve d'un dossier local dans toutes ses\n\
+         \x20                            poses : les clignements, les regards, les bouches, et leurs mélanges\n\
          eve --mesures [dossier…]     le temps de chaque étape des demandes et le coût des tours, lus au journal\n\
          eve --profils                les profils de cette Eve (EVE_DOSSIER_LOCAL), le profil choisi marqué\n\
          eve --profil-ajouter \"nom\" \"dossier\"  un profil de plus : un dossier qui porte son CLAUDE.md\n\

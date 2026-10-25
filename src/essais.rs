@@ -28,7 +28,9 @@
 //! - `eve --essai-pieces [--captures DOSSIER] [--sans-selecteur]` : les pièces jointes de la fenêtre native, déposées,
 //!   refusées, retirées, choisies par le trombone, sur des fichiers inventés ; et celle de la page ;
 //! - `eve --essai-profils [--captures DOSSIER]` : le menu des profils de la barre et la rubrique « Profil » des
-//!   réglages, cliqués sans la souris de la personne, sur des profils inventés.
+//!   réglages, cliqués sans la souris de la personne, sur des profils inventés ;
+//! - `eve --essai-portrait <dossier> [--captures DOSSIER]` : le portrait d'Eve d'un dossier local dans toutes ses
+//!   poses, côte à côte.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -5048,12 +5050,13 @@ struct SceneDuTheme {
 }
 
 /// Les scènes de `eve --essai-theme`, dans l'ordre : le tableau de bord au repos, Eve qui réfléchit, sa réponse (un
-/// tableau, qui devient une carte), une demande d'accord, la fenêtre étroite (la conversation seule) pendant qu'Eve
-/// écoute, et le tableau de bord de nouveau.
-const SCENES_DU_THEME: [SceneDuTheme; 6] = [
+/// tableau, qui devient une carte), Eve qui la dit (une voix inventée, que suit la bouche du portrait), une demande
+/// d'accord, la fenêtre étroite (la conversation seule) pendant qu'Eve écoute, et le tableau de bord de nouveau.
+const SCENES_DU_THEME: [SceneDuTheme; 7] = [
     SceneDuTheme { nom: "tableau", duree: 6.0, taille: Some([1560.0, 900.0]) },
     SceneDuTheme { nom: "reflexion", duree: 4.0, taille: None },
     SceneDuTheme { nom: "reponse", duree: 5.0, taille: None },
+    SceneDuTheme { nom: "parole", duree: 5.0, taille: None },
     SceneDuTheme { nom: "accord", duree: 5.0, taille: None },
     SceneDuTheme { nom: "etroite", duree: 5.0, taille: Some([980.0, 820.0]) },
     SceneDuTheme { nom: "retour", duree: 4.0, taille: Some([1560.0, 900.0]) },
@@ -5137,6 +5140,10 @@ struct EtatDuTheme {
     a_corriger: Value,
     /// Une réponse inventée est due à cet instant (un texte écrit dans la fenêtre).
     reponse_a: Option<Instant>,
+    /// Eve dit sa réponse, de cet instant à celui-là (une voix inventée, que suit la bouche du portrait).
+    parle: Option<(Instant, Instant)>,
+    /// L'émotion de la réponse, que montre le visage d'Eve.
+    emotion: Option<&'static str>,
 }
 
 impl EtatDuTheme {
@@ -5151,7 +5158,33 @@ impl EtatDuTheme {
             accord: Value::Null,
             a_corriger: Value::Null,
             reponse_a: None,
+            parle: None,
+            emotion: None,
         }
+    }
+
+    /// Eve dit sa réponse pendant `duree`, comme le chef le publie (« Je réponds ») : une voix inventée, que suit sa
+    /// bouche — des syllabes (quatre et demie par seconde), plus ou moins fortes, une pause toutes les 2,2 s, et les
+    /// formes d'une vraie phrase posées dessus ([`crate::voix::piste_de`]).
+    fn dire(&mut self, duree: Duration) {
+        self.etat = "parole";
+        self.libelle = "Je réponds".into();
+        self.aide = "Dis « Eve, stop » — ou maintiens [Ctrl droit] — pour me couper".into();
+        let maintenant = Instant::now();
+        self.parle = Some((maintenant, maintenant + duree));
+        let pas = (duree.as_secs_f64() / 0.04) as usize;
+        let niveaux: Vec<f32> = (0..pas)
+            .map(|k| {
+                let t = k as f64 * 0.04;
+                let syllabe = (t * 4.5 * std::f64::consts::TAU).sin().max(0.0);
+                let force = 0.6 + 0.4 * (t * 1.3).sin();
+                let pause = if t % 2.2 > 1.9 { 0.0 } else { 1.0 };
+                (syllabe * force * pause) as f32
+            })
+            .collect();
+        let phrase = "Voici le budget de la sortie : pour le bus, les entrées et la collation, deux cent quarante \
+                      dollars, sous les trois cents prévus. Bonne journée !";
+        crate::voix::faire_entendre(Some(crate::voix::piste_de(niveaux.into(), phrase)));
     }
 
     /// Une ligne du fil.
@@ -5165,10 +5198,21 @@ impl EtatDuTheme {
         self.libelle = "Prête".into();
         self.aide = "Dis « Eve… » — ou maintiens [Ctrl droit] pour parler".into();
         self.niveau = 0.0;
+        self.parle = None;
+        crate::voix::faire_entendre(None);
     }
 
-    /// L'état d'une scène (personne de vrai : une famille et des données inventées).
+    /// L'état d'une scène (personne de vrai : une famille et des données inventées). Ce qui se disait s'arrête.
     fn scene(&mut self, nom: &str) {
+        self.parle = None;
+        crate::voix::faire_entendre(None);
+        // L'émotion de chaque scène : la joie d'une réponse, l'empathie en la disant, le sérieux d'un accord.
+        self.emotion = match nom {
+            "reponse" => Some("joie"),
+            "parole" => Some("empathie"),
+            "accord" => Some("serieuse"),
+            _ => None,
+        };
         match nom {
             "tableau" | "retour" => {
                 self.prete();
@@ -5223,6 +5267,7 @@ impl EtatDuTheme {
                 }
                 self.prete();
             }
+            "parole" => self.dire(Duration::from_secs(5)),
             "accord" => {
                 self.fil.push(Self::ligne("toi", "Efface les vieux brouillons.", "09:23", false));
                 self.etat = "confirmation";
@@ -5284,12 +5329,16 @@ impl EtatDuTheme {
         true
     }
 
-    /// La réponse inventée à un texte, quand elle est due.
+    /// La réponse inventée à un texte, quand elle est due, puis dite trois secondes et demie ; la fin de ce qui se dit.
     fn avancer(&mut self) {
         if self.reponse_a.is_some_and(|t| Instant::now() >= t) {
             self.reponse_a = None;
             let texte = "Ceci est un **essai** : je n'ai rien fait, mais voilà où ma réponse s'écrirait.";
             self.fil.push(Self::ligne("eve", texte, &crate::journal::heure(), false));
+            self.emotion = Some("amusee");
+            self.dire(Duration::from_millis(3500));
+        }
+        if self.parle.is_some_and(|(_, fin)| Instant::now() >= fin) {
             self.prete();
         }
     }
@@ -5300,6 +5349,7 @@ impl EtatDuTheme {
             "libelle": self.libelle,
             "aide": self.aide,
             "niveau": self.niveau,
+            "emotion": self.emotion,
             "qui": "Sam",
             "theme": self.theme,
             "nom": "Essai",
@@ -6807,5 +6857,117 @@ impl eframe::App for EssaiDesProfils {
 
     fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
         eframe::App::on_exit(&mut self.fenetre, gl);
+    }
+}
+
+// ---- Le portrait d'Eve et ses poses -------------------------------------------------------------------------------
+
+/// `eve --essai-portrait <dossier> [--captures DOSSIER]` : le portrait d'Eve posé dans `dossier` (un dossier local :
+/// `portrait.png` et ses poses), dans toutes ses poses côte à côte — la photo, chaque clignement, chaque regard, chaque
+/// bouche, et deux mélanges (cligner en parlant, regarder de côté en parlant) —, en grand comme la bannière les montre,
+/// sur son bleu : on y juge les calques et leurs bords. `--captures` en fait une image (`portrait.png`), puis ferme la
+/// fenêtre.
+pub fn portrait(args: &[String]) -> i32 {
+    let valeur = |nom: &str| args.iter().position(|a| a == nom).and_then(|i| args.get(i + 1)).cloned();
+    let captures = valeur("--captures").map(std::path::PathBuf::from);
+    let dossier = args
+        .iter()
+        .enumerate()
+        .find(|(k, a)| !a.starts_with("--") && (*k == 0 || args[k - 1] != "--captures"))
+        .map(|(_, a)| std::path::PathBuf::from(a));
+    let Some(dossier) = dossier else {
+        eprintln!("eve --essai-portrait <dossier> [--captures DOSSIER] : le dossier local qui porte portrait.png");
+        return 2;
+    };
+    if let Some(c) = &captures
+        && let Err(e) = std::fs::create_dir_all(c)
+    {
+        eprintln!("{} : {e}", c.display());
+        return 1;
+    }
+    let titre = "Eve — essai du portrait";
+    let vue = egui::ViewportBuilder::default().with_title(titre).with_inner_size([1480.0, 960.0]).with_active(false);
+    let options = eframe::NativeOptions { viewport: vue, ..Default::default() };
+    let creer: eframe::AppCreator<'_> = Box::new(move |_| {
+        Ok(Box::new(EssaiDuPortrait {
+            portrait: crate::natif::portrait::Portrait::nouveau(dossier),
+            captures,
+            debut: None,
+            capture: false,
+        }))
+    });
+    match eframe::run_native(titre, options, creer) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("la fenêtre ne s'ouvre pas : {e}");
+            1
+        }
+    }
+}
+
+/// La fenêtre de l'essai du portrait : le portrait, l'heure de sa première image prête, la capture demandée.
+struct EssaiDuPortrait {
+    portrait: crate::natif::portrait::Portrait,
+    captures: Option<std::path::PathBuf>,
+    debut: Option<f64>,
+    capture: bool,
+}
+
+impl eframe::App for EssaiDuPortrait {
+    fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        let zone = ui.max_rect();
+        let p = ui.painter();
+        p.rect_filled(zone, 0.0, crate::natif::theme::erp::AZUR);
+        ctx.request_repaint_after(Duration::from_millis(50));
+        let Some(visage) = self.portrait.visage(&ctx) else {
+            p.text(
+                zone.center(),
+                egui::Align2::CENTER_CENTER,
+                "…",
+                egui::FontId::proportional(20.0),
+                egui::Color32::WHITE,
+            );
+            return;
+        };
+        // Toutes les poses dans la fenêtre : le nombre de colonnes qui leur laisse les plus grands disques.
+        let poses = visage.poses_d_essai();
+        let (cote, colonnes) = (3..=12)
+            .map(|c: usize| {
+                let rangees = poses.len().div_ceil(c) as f32;
+                let cote = ((zone.width() - 30.0) / c as f32 - 30.0).min((zone.height() - 40.0) / rangees - 50.0);
+                (cote, c)
+            })
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+            .unwrap_or((210.0, 6));
+        for (i, (nom, pose)) in poses.iter().enumerate() {
+            let (c, r) = ((i % colonnes) as f32, (i / colonnes) as f32);
+            let centre =
+                zone.min + egui::vec2(30.0 + cote / 2.0 + c * (cote + 30.0), 40.0 + cote / 2.0 + r * (cote + 50.0));
+            visage.en_grand(p, centre, cote * 0.4, pose);
+            // Son nom, réduit au besoin pour tenir sous son disque : les voisins ne se chevauchent pas.
+            let mesure =
+                |taille: f32| p.layout_no_wrap(nom.clone(), egui::FontId::proportional(taille), egui::Color32::WHITE);
+            let mut texte = mesure(15.0);
+            if texte.size().x > cote + 26.0 {
+                texte = mesure((15.0 * (cote + 26.0) / texte.size().x).max(9.0));
+            }
+            p.galley(centre + egui::vec2(-texte.size().x / 2.0, cote / 2.0), texte, egui::Color32::WHITE);
+        }
+        // Une image, une seconde après que tout est là, puis la fenêtre se ferme.
+        let temps = ui.input(|i| i.time);
+        let debut = *self.debut.get_or_insert(temps);
+        if let Some(dossier) = &self.captures {
+            if !self.capture && temps - debut > 1.0 {
+                self.capture = true;
+                let chemin = dossier.join("portrait.png");
+                ctx.request_screenshot(move |image| match enregistrer_png(&image, &chemin) {
+                    Ok(()) => println!("capture : {}", chemin.display()),
+                    Err(e) => eprintln!("capture {} : {e}", chemin.display()),
+                });
+            } else if temps - debut > 2.0 {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
     }
 }

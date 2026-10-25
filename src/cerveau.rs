@@ -87,6 +87,8 @@ impl Cerveau {
         consigne.push_str(&consigne_des_dessins());
         consigne.push_str("\n\n");
         consigne.push_str(&consigne_des_rappels(&crate::reglages::dossier_local()));
+        consigne.push_str("\n\n");
+        consigne.push_str(&consigne_des_emotions());
         let mut c = Command::new(&l.claude);
         c.current_dir(&l.dossier)
             .args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"])
@@ -518,6 +520,26 @@ pub fn consigne_des_dessins() -> String {
          les dessine pas). Simple et lisible : il s'écrit pendant qu'on attend, quelques dizaines d'éléments suffisent. \
          Un graphique : ses axes, ses valeurs écrites, de vraies données.",
         police = crate::cartes::POLICE_DES_DESSINS
+    )
+}
+
+/// La ligne qui ouvre la partie « ÉMOTIONS » de la consigne.
+const ENTETE_EMOTIONS: &str = "ÉMOTIONS";
+
+/// La partie « ÉMOTIONS » de la consigne, que reçoit toute Eve : son visage (son portrait) montre l'émotion de chaque
+/// réponse, que Claude met en tête entre crochets et qu'Eve ôte avant de la dire et de l'afficher
+/// (`parole::emotion_en_tete`). Les émotions viennent de `parole::Emotion::TOUTES`, leur seule liste.
+pub fn consigne_des_emotions() -> String {
+    let noms: Vec<String> = eve::parole::Emotion::TOUTES.iter().map(|e| format!("[{}]", e.nom())).collect();
+    format!(
+        "{ENTETE_EMOTIONS}\n\
+         - Le visage d'Eve montre ce que tu ressens en répondant. Commence chaque réponse par l'émotion qui lui va, \
+         seule, entre crochets : {}. Eve l'ôte : elle ne se dit ni ne s'affiche.\n\
+         - Choisis-la comme une personne attentionnée : [empathie] pour une peine, un souci, une fatigue ; [triste] pour \
+         une mauvaise nouvelle ; [amusee] pour une blague, un moment drôle ; [joie] pour une bonne nouvelle, un merci ; \
+         [surprise] pour l'inattendu ; [reflexion] quand tu pèses une question ; [serieuse] pour un sujet grave ou \
+         délicat (l'argent, la santé, le droit) ; [neutre] sinon. Sobre et juste : pas d'émotion jouée.",
+        noms.join(", ")
     )
 }
 
