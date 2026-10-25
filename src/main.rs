@@ -27,6 +27,7 @@ mod natif;
 mod orbe;
 mod oreille;
 mod profils;
+mod rappels;
 mod reglages;
 mod reseau;
 mod sons;

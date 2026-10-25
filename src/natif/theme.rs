@@ -6,21 +6,23 @@
 //!   (`bgBreath`, sur la courbe `ease`) ; figé au milieu de sa course quand Windows ne veut pas d'animations, comme
 //!   celui de l'ERP sous `prefers-reduced-motion` (l. 169-177) ;
 //! - ses cartes (`.erp-card`, l. 336-340 ; la carte d'indicateur et la carte de section d'`AnalyticsPage.tsx`,
-//!   l. 201-265) : blanches, un filet #EDEBE9, une ombre douce, un liseré de couleur à gauche, leur titre en petites
-//!   capitales grises, leur icône dans une tuile pastel ; ses badges pastel (`Badge.tsx`) ; son en-tête de page et son
-//!   badge du jour (`DashboardWeatherBadge.tsx`) ;
+//!   l. 201-265), à la manière des tableaux de bord d'aujourd'hui : blanches, un rayon de 14 points, un filet froid,
+//!   deux ombres douces teintées de marine, leur haut lavé de leur teinte, leur icône dans une pastille en dégradé vif,
+//!   leur titre en demi-gras ; ses badges pastel (`Badge.tsx`) ; la météo de son badge du jour
+//!   (`DashboardWeatherBadge.tsx`) ;
 //! - la conversation comme le dock de son assistant (`AssistantDock.tsx`, `MessageBubble.tsx`, `AssistantIAChat.tsx`) :
 //!   une colonne à droite que le fond traverse, son en-tête marine (`.erp-topbar`, l. 417-420), les bulles d'Eve
-//!   blanches au liseré bleu (`.ai-bubble-assistant`, l. 905-908), celles de la personne en dégradé bleu, la saisie
+//!   blanches à peine bleutées (`.ai-bubble-assistant`, l. 905-908), celles de la personne en dégradé bleu, la saisie
 //!   `.erp-input` (l. 383-392) et le bouton primaire #0078D4 ; le texte des réponses comme son markdown
 //!   (`utils\aiMarkdown.ts`) ;
 //! - sa palette (`tailwind.config.js`, l. 36-129 ; `index.css`, l. 235-274 et les gris de Fluent, l. 606-670).
 //!
-//! Pas de réseau neuronal : l'orbe d'Eve est en vedette, sur le fond. Le centre déplié, le tableau de bord à gauche
-//! — l'orbe, la décision du jour, les échéances et tout le panneau d'information en cartes ([`crate::centre`]) — et la
-//! conversation à droite ; replié (ou la fenêtre étroite), la conversation seule, son orbe en tête. Un thème de bureau,
-//! calme comme l'ERP : ni musique ni notes, ni la nuit, les saisons ou l'écran de veille du tableau, ni ses touches.
-//! La barre marine reste celle de la fenêtre ([`super::Fenetre`]), comme celle de l'ERP.
+//! Pas de réseau neuronal. Le centre déplié, le tableau de bord à gauche, une page qui défile — la bannière d'accueil
+//! (un dégradé du marine de Constructo AI au bleu du ciel : l'orbe d'Eve, le salut, la date, ce que fait Eve, la
+//! météo), la décision du jour, les échéances en pages de calendrier et tout le panneau d'information en cartes
+//! ([`crate::centre`]) — et la conversation à droite ; replié (ou la fenêtre étroite), la conversation seule, son orbe en
+//! tête. Un thème de bureau, calme comme l'ERP : ni musique ni notes, ni la nuit, les saisons ou l'écran de veille du
+//! tableau, ni ses touches. La barre marine reste celle de la fenêtre ([`super::Fenetre`]), comme celle de l'ERP.
 
 use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, FontFamily, FontId, Layout, Margin, Mesh, Pos2, Rect, RichText, Sense,
@@ -28,10 +30,10 @@ use eframe::egui::{
 };
 use serde_json::Value;
 
-use super::pieces;
 use super::{
     Fenetre, GRAS, ICONES, Ligne, SEMI, Style, TENUE, couleurs, degrade, icones, melange, segments, semi, sphere,
 };
+use super::{pieces, portrait};
 use crate::cartes::{Cartes, Geste};
 use crate::reglages::THEMES;
 use crate::{ambiance, journal};
@@ -89,31 +91,42 @@ pub(crate) mod erp {
     /// Le bouton qui confirme : celui de l'Eve de Constructo AI dans son thème clair (`--oui-fond`).
     pub const OUI: Color32 = Color32::from_rgb(0x0B, 0x6E, 0x0B);
 
-    /// Une teinte pastel de l'ERP (`Badge.tsx`, les cartes d'indicateurs d'`AnalyticsPage.tsx`) : sa couleur (un
-    /// liseré ; à 15 %, le fond d'un badge ou d'une tuile) et son encre.
+    /// Une teinte pastel de l'ERP (`Badge.tsx`, les cartes d'indicateurs d'`AnalyticsPage.tsx`) : sa couleur (à 15 %,
+    /// le fond d'un badge ; à 10 %, le haut d'une carte) et son encre ; et son dégradé vif, du clair au soutenu, celui
+    /// de la pastille de son icône (les couleurs franches des tableaux de bord d'aujourd'hui).
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct Teinte {
         pub pastel: Color32,
         pub encre: Color32,
+        pub vif: [Color32; 2],
     }
 
-    const fn teinte(pastel: [u8; 3], encre: [u8; 3]) -> Teinte {
-        Teinte {
-            pastel: Color32::from_rgb(pastel[0], pastel[1], pastel[2]),
-            encre: Color32::from_rgb(encre[0], encre[1], encre[2]),
-        }
+    const fn rgb(c: [u8; 3]) -> Color32 {
+        Color32::from_rgb(c[0], c[1], c[2])
     }
 
-    pub const BLEU: Teinte = teinte([0x7B, 0xAF, 0xD4], [0x4A, 0x7F, 0xA8]);
-    pub const VERT: Teinte = teinte([0x7D, 0xC4, 0xA5], [0x4A, 0x94, 0x75]);
-    pub const ROUGE: Teinte = teinte([0xE8, 0x91, 0x9A], [0xB8, 0x61, 0x6A]);
-    pub const JAUNE: Teinte = teinte([0xF6, 0xC8, 0x7A], [0x9E, 0x7B, 0x1E]);
-    pub const AMBRE: Teinte = teinte([0xE8, 0xC1, 0x7A], [0x8B, 0x70, 0x30]);
-    pub const ORANGE: Teinte = teinte([0xF0, 0xB0, 0x7A], [0xA0, 0x6A, 0x2A]);
-    pub const VIOLET: Teinte = teinte([0xB0, 0x9B, 0xD8], [0x7A, 0x6B, 0xA8]);
-    pub const INDIGO: Teinte = teinte([0x8B, 0x9F, 0xD4], [0x5B, 0x6F, 0xA4]);
-    pub const SARCELLE: Teinte = teinte([0x7D, 0xC4, 0xB5], [0x4A, 0x94, 0x85]);
-    pub const GRIS: Teinte = teinte([0xB8, 0xC4, 0xCE], [0x6B, 0x7B, 0x8A]);
+    const fn teinte(pastel: [u8; 3], encre: [u8; 3], vif: [[u8; 3]; 2]) -> Teinte {
+        Teinte { pastel: rgb(pastel), encre: rgb(encre), vif: [rgb(vif[0]), rgb(vif[1])] }
+    }
+
+    pub const BLEU: Teinte = teinte([0x7B, 0xAF, 0xD4], [0x4A, 0x7F, 0xA8], [[0x60, 0xA5, 0xFA], [0x25, 0x63, 0xEB]]);
+    pub const VERT: Teinte = teinte([0x7D, 0xC4, 0xA5], [0x4A, 0x94, 0x75], [[0x34, 0xD3, 0x99], [0x05, 0x96, 0x69]]);
+    pub const ROUGE: Teinte = teinte([0xE8, 0x91, 0x9A], [0xB8, 0x61, 0x6A], [[0xF8, 0x71, 0x71], [0xDC, 0x26, 0x26]]);
+    pub const JAUNE: Teinte = teinte([0xF6, 0xC8, 0x7A], [0x9E, 0x7B, 0x1E], [[0xFC, 0xD3, 0x4D], [0xD9, 0x77, 0x06]]);
+    pub const AMBRE: Teinte = teinte([0xE8, 0xC1, 0x7A], [0x8B, 0x70, 0x30], [[0xFB, 0xBF, 0x24], [0xD9, 0x77, 0x06]]);
+    pub const ORANGE: Teinte = teinte([0xF0, 0xB0, 0x7A], [0xA0, 0x6A, 0x2A], [[0xFB, 0x92, 0x3C], [0xEA, 0x58, 0x0C]]);
+    pub const VIOLET: Teinte = teinte([0xB0, 0x9B, 0xD8], [0x7A, 0x6B, 0xA8], [[0xA7, 0x8B, 0xFA], [0x7C, 0x3A, 0xED]]);
+    pub const INDIGO: Teinte = teinte([0x8B, 0x9F, 0xD4], [0x5B, 0x6F, 0xA4], [[0x81, 0x8C, 0xF8], [0x4F, 0x46, 0xE5]]);
+    pub const SARCELLE: Teinte =
+        teinte([0x7D, 0xC4, 0xB5], [0x4A, 0x94, 0x85], [[0x2D, 0xD4, 0xBF], [0x0D, 0x94, 0x88]]);
+    pub const GRIS: Teinte = teinte([0xB8, 0xC4, 0xCE], [0x6B, 0x7B, 0x8A], [[0x94, 0xA3, 0xB8], [0x47, 0x55, 0x69]]);
+
+    /// Le titre d'une carte (le gris ardoise le plus foncé des tableaux de bord) et le filet froid des cartes.
+    pub const TITRE: Color32 = Color32::from_rgb(0x1F, 0x29, 0x37);
+    pub const FILET_DE_CARTE: Color32 = Color32::from_rgb(0xE5, 0xEA, 0xF1);
+    /// Le bleu vif de la bannière, de son milieu à son bout.
+    pub const AZUR: Color32 = Color32::from_rgb(0x0B, 0x4A, 0xA6);
+    pub const CIEL: Color32 = Color32::from_rgb(0x1E, 0x88, 0xE5);
 }
 
 /// Les icônes de Windows du thème (Segoe Fluent Icons), vérifiées sur un échantillon rendu.
@@ -131,6 +144,8 @@ pub(crate) mod pictos {
     pub const TEMPETE: char = '\u{E753}';
     pub const CUEILLETTE: char = '\u{E804}';
     pub const PERSONNE: char = '\u{E77B}';
+    /// Les rappels : la cloche.
+    pub const RAPPELS: char = '\u{EA8F}';
     /// « Arrêter » : Eve se tait (le haut-parleur barré ; le carré de l'arrêt se lirait « agrandir »).
     pub const TAIRE: char = '\u{E74F}';
     pub const SOLEIL: char = '\u{E706}';
@@ -148,6 +163,13 @@ const RESPIRATION: f64 = 20.0;
 /// Où la fenêtre garde, d'une image à l'autre, le fond de l'image (pour le fondu du fil) et le thème choisi d'un clic.
 const FOND: &str = "fond-qui-respire";
 const THEME_TENU: &str = "theme-choisi-d-un-clic";
+/// Où la fenêtre garde le portrait d'Eve de l'image, pour les bulles et l'en-tête du dock.
+const PORTRAIT: &str = "portrait-d-eve-du-fil";
+
+/// Le portrait d'Eve gardé pour cette image ([`Fenetre::garder_le_portrait`]) ; `None` sans portrait.
+fn portrait_du_fil(ctx: &egui::Context) -> Option<portrait::Visage> {
+    ctx.data(|d| d.get_temp::<Option<portrait::Visage>>(egui::Id::unique(PORTRAIT))).flatten()
+}
 
 /// La courbe `ease` de CSS, `cubic-bezier(0.25, 0.1, 0.25, 1)` : la part de la course faite à la part `x` du temps.
 fn ease(x: f64) -> f64 {
@@ -448,10 +470,10 @@ fn contraste(a: Color32, b: Color32) -> f32 {
 
 // ---- Les pièces de l'ERP -------------------------------------------------------------------------------------------
 
-/// Une carte de l'ERP (`.erp-card`, la carte d'indicateur du tableau de bord) : blanche, un rayon de 6 points, un filet
-/// #EDEBE9, une ombre douce (plus marquée au survol) ; un liseré de 4 points de `accent` à gauche (`border-l-4`). Elle
-/// prend toute la largeur donnée et au moins `hauteur` (une rangée d'une grille : ses cartes ont la même hauteur) ;
-/// rend la hauteur qu'il lui faut.
+/// Une carte du tableau de bord, comme celles des tableaux de bord d'aujourd'hui : blanche, un rayon de 14 points, un
+/// filet froid, deux ombres douces teintées de marine (plus marquées au survol, la carte semble se lever) ; sa couleur
+/// (`accent`) lave doucement son haut. Elle prend toute la largeur donnée et au moins `hauteur` (une rangée d'une
+/// grille : ses cartes ont la même hauteur) ; rend la hauteur qu'il lui faut.
 pub(crate) fn carte(
     ui: &mut egui::Ui,
     accent: Option<Color32>,
@@ -460,13 +482,13 @@ pub(crate) fn carte(
 ) -> f32 {
     let fond = ui.painter().add(Shape::Noop);
     let (coin, largeur) = (ui.cursor().min, ui.available_width());
-    let marge = Margin { left: if accent.is_some() { 18 } else { 16 }, right: 16, top: 14, bottom: 15 };
+    let marge = Margin { left: 18, right: 18, top: 16, bottom: 17 };
     let dedans = Rect::from_min_max(
         coin + vec2(f32::from(marge.left), f32::from(marge.top)),
         pos2(coin.x + largeur - f32::from(marge.right), coin.y + 100_000.0),
     );
     let mut enfant = ui.new_child(UiBuilder::new().max_rect(dedans).layout(Layout::top_down(Align::Min)));
-    enfant.spacing_mut().item_spacing.y = 5.0;
+    enfant.spacing_mut().item_spacing.y = 6.0;
     contenu(&mut enfant);
     let naturelle = enfant.min_rect().height() + f32::from(marge.top) + f32::from(marge.bottom);
     let rect = Rect::from_min_size(coin, vec2(largeur, naturelle.max(hauteur)));
@@ -476,35 +498,74 @@ pub(crate) fn carte(
     naturelle
 }
 
-/// Le fond d'une carte : son ombre (`shadow-sm`, et celle des bulles de l'assistant : 0 2px 8px à 6 % ; au survol,
-/// `shadow-lg` : 0 4px 12px à 12 %), sa face blanche et son filet, son liseré.
+/// Le rayon des cartes et de la bannière.
+const RAYON_DE_CARTE: u8 = 14;
+
+/// Une ombre teintée de marine, plus douce qu'une ombre noire : `dy` points plus bas, floue de `flou`, à `alpha`.
+fn ombre_marine(rect: Rect, rayon: u8, dy: i8, flou: u8, alpha: u8) -> Shape {
+    let couleur = Color32::from_rgba_unmultiplied(15, 35, 80, alpha);
+    Shape::Rect(egui::Shadow { offset: [0, dy], blur: flou, spread: 0, color: couleur }.as_shape(rect, rayon))
+}
+
+/// Le fond d'une carte : ses deux ombres (au survol, plus basses et plus larges), sa face blanche et son filet ; le
+/// haut lavé de sa couleur, de 10 % à rien sur 64 points.
 fn fond_de_carte(rect: Rect, accent: Option<Color32>, survol: bool) -> Shape {
-    let rayon: u8 = 6;
-    let ombre = |dy: i8, flou: u8, alpha: u8| {
-        Shape::Rect(
-            egui::Shadow { offset: [0, dy], blur: flou, spread: 0, color: Color32::from_black_alpha(alpha) }
-                .as_shape(rect, rayon),
-        )
-    };
-    let mut formes = vec![ombre(1, 2, 13)];
-    formes.push(if survol { ombre(4, 12, 30) } else { ombre(2, 8, 15) });
+    let rayon = RAYON_DE_CARTE;
+    let mut formes = vec![ombre_marine(rect, rayon, 1, 3, 14)];
+    formes.push(if survol { ombre_marine(rect, rayon, 10, 28, 38) } else { ombre_marine(rect, rayon, 6, 20, 22) });
     formes.push(Shape::Rect(egui::epaint::RectShape::new(
         rect,
         rayon,
         Color32::WHITE,
-        Stroke::new(1.0, erp::FILET),
+        Stroke::new(1.0, erp::FILET_DE_CARTE),
         StrokeKind::Inside,
     )));
     if let Some(c) = accent {
-        let lisere = Rect::from_min_size(rect.min, vec2(4.0, rect.height()));
-        let coins = CornerRadius { nw: rayon, sw: rayon, ne: 0, se: 0 };
-        formes.push(Shape::Rect(egui::epaint::RectShape::filled(lisere, coins, c)));
+        let haut = Rect::from_min_size(rect.min, vec2(rect.width(), 64.0f32.min(rect.height()))).shrink(1.0);
+        let lavis = |p: Pos2| c.gamma_multiply(0.1 * (1.0 - ((p.y - haut.top()) / haut.height()).clamp(0.0, 1.0)));
+        formes.push(rectangle_degrade(haut, f32::from(rayon) - 1.0, lavis));
     }
     Shape::Vec(formes)
 }
 
+/// Une pastille d'icône, comme celles des applications : un carré aux coins arrondis, en dégradé de la teinte (du
+/// clair, en haut à gauche, au soutenu), son icône blanche.
+pub(crate) fn pastille(p: &egui::Painter, case: Rect, icone: char, teinte: erp::Teinte) {
+    let [clair, soutenu] = teinte.vif;
+    let degrade = |q: Pos2| {
+        let t = ((q.x - case.left()) + (q.y - case.top())) / (case.width() + case.height()).max(1.0);
+        melange(clair, soutenu, t.clamp(0.0, 1.0))
+    };
+    p.add(ombre_marine(case, 10, 2, 6, 30));
+    p.add(rectangle_degrade(case, case.width() * 0.3, degrade));
+    let police = FontId::new(case.width() * 0.47, FontFamily::Name(ICONES.into()));
+    p.text(case.center(), Align2::CENTER_CENTER, icone, police, Color32::WHITE);
+}
+
+/// Un texte du tableau en capitales (« ÉPICERIE · 0 À ACHETER », « À SORTIR : poulet ») en casse de phrase
+/// (« Épicerie · 0 à acheter », « À sortir : poulet ») : chaque mot tout en capitales passe en minuscules, un mot qui a
+/// ses minuscules (un nom, une donnée) reste tel quel ; puis la première lettre en capitale.
+pub(crate) fn casse_de_phrase(texte: &str) -> String {
+    let mots: Vec<String> = texte
+        .split(' ')
+        .map(|m| if m.chars().any(char::is_lowercase) { m.to_string() } else { m.to_lowercase() })
+        .collect();
+    let phrase = mots.join(" ");
+    let mut c = phrase.chars();
+    c.next().map_or_else(String::new, |p| p.to_uppercase().collect::<String>() + c.as_str())
+}
+
+/// L'écart entre deux cartes du tableau de bord, et la largeur sous laquelle une carte ne descend pas dans la grille.
+const ECART: f32 = 20.0;
+const LARGEUR_DE_CARTE: f32 = 250.0;
+
+/// Le nombre de colonnes de la grille dans une largeur `l` : autant de cartes qu'il en tient, de une à trois.
+pub(crate) fn colonnes_pour(l: f32) -> usize {
+    ((l + ECART) / (LARGEUR_DE_CARTE + ECART)).floor().clamp(1.0, 3.0) as usize
+}
+
 /// Une grille de cartes de même hauteur par rangée (celles du tableau de bord de l'ERP, `grid-cols-N gap-4`) : `n`
-/// cases sur `colonnes` colonnes, à 16 points l'une de l'autre. `case(ui, k, hauteur)` dessine la k-ième dans sa case,
+/// cases sur `colonnes` colonnes, à [`ECART`] l'une de l'autre. `case(ui, k, hauteur)` dessine la k-ième dans sa case,
 /// au moins à `hauteur` (celle de la plus haute de sa rangée, mesurée à l'image d'avant), et rend celle qu'il lui faut.
 pub(crate) fn grille(
     ui: &mut egui::Ui,
@@ -516,7 +577,7 @@ pub(crate) fn grille(
     if n == 0 {
         return;
     }
-    let (ecart, colonnes) = (16.0, colonnes.max(1));
+    let (ecart, colonnes) = (ECART, colonnes.max(1));
     let (origine, largeur) = (ui.cursor().min, ui.available_width());
     let l = ((largeur - ecart * (colonnes - 1) as f32) / colonnes as f32).max(40.0);
     let avant: Vec<f32> = ui.ctx().data(|d| d.get_temp(id)).unwrap_or_default();
@@ -543,51 +604,64 @@ pub(crate) fn grille(
     }
 }
 
-/// Un badge de l'ERP (`Badge.tsx`) : une pilule de la teinte à 18 %, son texte de l'encre de la teinte, en petites
-/// capitales demi-grasses.
-pub(crate) fn badge(ui: &mut egui::Ui, texte: &str, teinte: erp::Teinte) -> egui::Response {
-    let galee = galee_de_badge(ui.painter(), texte, teinte);
-    let (rect, rep) = ui.allocate_exact_size(galee.size() + vec2(16.0, 5.0), Sense::hover());
-    peindre_badge(ui.painter(), rect, galee, teinte);
-    rep
-}
-
-/// Le texte d'un badge, mis en page (sa place : sa taille, plus 16 points de large et 5 de haut).
+/// Le texte d'un badge de l'ERP (`Badge.tsx`), en demi-gras de l'encre de sa teinte, mis en page (sa place : sa
+/// taille, plus 18 points de large et 7 de haut).
 pub(crate) fn galee_de_badge(p: &egui::Painter, texte: &str, teinte: erp::Teinte) -> std::sync::Arc<egui::Galley> {
-    p.layout_no_wrap(texte.to_string(), FontId::new(11.0, FontFamily::Name(SEMI.into())), teinte.encre)
+    p.layout_no_wrap(texte.to_string(), FontId::new(11.5, FontFamily::Name(SEMI.into())), teinte.encre)
 }
 
 /// Un badge peint dans `rect`, sa pilule et son texte au milieu.
 pub(crate) fn peindre_badge(p: &egui::Painter, rect: Rect, galee: std::sync::Arc<egui::Galley>, teinte: erp::Teinte) {
-    p.rect_filled(rect, 255.0, teinte.pastel.gamma_multiply(0.18));
+    p.rect_filled(rect, 255.0, teinte.pastel.gamma_multiply(0.2));
     p.galley(rect.center() - galee.size() / 2.0, galee, teinte.encre);
 }
 
-/// La tête d'une carte : son titre en petites capitales grises (`text-xs uppercase tracking-wide`), qui passe à la
-/// ligne au besoin, et son icône dans une tuile de sa teinte à droite (`p-2 rounded bg-…/10`) ; en alerte, le titre
-/// rouge.
-pub(crate) fn tete_de_carte(ui: &mut egui::Ui, titre: &str, icone: char, teinte: erp::Teinte, alerte: bool) {
+/// La tête d'une carte : la pastille de son icône ([`pastille`]), puis son titre en demi-gras, en casse de phrase
+/// ([`casse_de_phrase`]), qui passe à la ligne au besoin ; en alerte, la pastille et le titre rouges. `etiquette` : un
+/// badge contre le bord droit (le délai de la décision du jour).
+pub(crate) fn tete_de_carte(
+    ui: &mut egui::Ui,
+    titre: &str,
+    icone: char,
+    teinte: erp::Teinte,
+    alerte: bool,
+    etiquette: Option<(&str, erp::Teinte)>,
+) {
     let largeur = ui.available_width();
-    let tuile = 32.0;
-    let encre = if alerte { erp::DANGER_ENCRE } else { erp::TEXTE_2 };
-    let mut job = egui::text::LayoutJob::single_section(
-        titre.to_uppercase(),
-        egui::text::TextFormat {
-            font_id: FontId::new(11.5, FontFamily::Name(SEMI.into())),
-            color: encre,
-            extra_letter_spacing: 0.5,
-            ..Default::default()
-        },
-    );
-    job.wrap.max_width = (largeur - tuile - 12.0).max(40.0);
-    let galee = ui.painter().layout_job(job);
-    let (rect, _) = ui.allocate_exact_size(vec2(largeur, galee.size().y.max(tuile)), Sense::hover());
+    let cote = 36.0;
+    let (teinte, encre) = if alerte { (erp::ROUGE, erp::DANGER_ENCRE) } else { (teinte, erp::TITRE) };
     let p = ui.painter();
-    p.galley(pos2(rect.left(), rect.top() + 1.0), galee, encre);
-    let case = Rect::from_min_size(pos2(rect.right() - tuile, rect.top()), vec2(tuile, tuile));
-    p.rect_filled(case, 4.0, teinte.pastel.gamma_multiply(0.16));
-    let police = FontId::new(15.0, FontFamily::Name(ICONES.into()));
-    p.text(case.center(), Align2::CENTER_CENTER, icone, police, teinte.encre);
+    let badge = etiquette.map(|(t, x)| (galee_de_badge(p, &casse_de_phrase(t), x), x));
+    let l_badge = badge.as_ref().map_or(0.0, |(g, _)| g.size().x + 18.0 + 12.0);
+    let police = FontId::new(15.0, FontFamily::Name(SEMI.into()));
+    let galee = p.layout(casse_de_phrase(titre), police, encre, (largeur - cote - 12.0 - l_badge).max(40.0));
+    let (rect, _) = ui.allocate_exact_size(vec2(largeur, galee.size().y.max(cote)), Sense::hover());
+    let p = ui.painter();
+    let case = Rect::from_min_size(pos2(rect.left(), rect.center().y - cote / 2.0), vec2(cote, cote));
+    pastille(p, case, icone, teinte);
+    p.galley(pos2(case.right() + 12.0, rect.center().y - galee.size().y / 2.0), galee, encre);
+    if let Some((g, x)) = badge {
+        let taille = g.size() + vec2(18.0, 7.0);
+        let place = Rect::from_min_size(pos2(rect.right() - taille.x, rect.center().y - taille.y / 2.0), taille);
+        peindre_badge(p, place, g, x);
+    }
+    ui.add_space(4.0);
+}
+
+/// Une page de calendrier, celle des agendas : le mois en capitales blanches sur un bandeau de la teinte, le jour en
+/// gras dessous, sur une page blanche au filet froid et à l'ombre douce.
+pub(crate) fn page_de_calendrier(p: &egui::Painter, r: Rect, jour: &str, mois: &str, teinte: erp::Teinte) {
+    let rayon = 10;
+    p.add(ombre_marine(r, rayon, 2, 6, 26));
+    p.rect(r, rayon, Color32::WHITE, Stroke::new(1.0, erp::FILET_DE_CARTE), StrokeKind::Inside);
+    let bandeau = Rect::from_min_size(r.min, vec2(r.width(), 17.0));
+    let coins = CornerRadius { nw: rayon, ne: rayon, sw: 0, se: 0 };
+    p.rect_filled(bandeau, coins, teinte.vif[1]);
+    let petite = FontId::new(9.5, FontFamily::Name(SEMI.into()));
+    p.text(bandeau.center() + vec2(0.0, 0.5), Align2::CENTER_CENTER, mois, petite, Color32::WHITE);
+    let page = Rect::from_min_max(pos2(r.left(), bandeau.bottom()), r.max);
+    let grande = FontId::new(20.0, FontFamily::Name(GRAS.into()));
+    p.text(page.center() - vec2(0.0, 0.5), Align2::CENTER_CENTER, jour, grande, erp::TITRE);
 }
 
 /// Les sortes de boutons de l'ERP : celui qui confirme (vert, celui de l'Eve de Constructo AI), secondaire
@@ -642,7 +716,8 @@ fn bouton_erp(ui: &mut egui::Ui, code: Option<char>, texte: &str, sorte: BoutonE
 }
 
 /// Un rectangle aux coins arrondis peint d'un dégradé : ses sommets prennent la couleur de `couleur` à leur place (un
-/// éventail depuis le centre). Pour des dégradés doux, comme ceux des bulles de l'ERP.
+/// éventail depuis le centre ; ses côtés droits coupés tous les 24 points, pour qu'un dégradé à trois arrêts y garde
+/// celui du milieu). Pour des dégradés doux, comme ceux des bulles de l'ERP.
 fn rectangle_degrade(rect: Rect, rayon: f32, couleur: impl Fn(Pos2) -> Color32) -> Shape {
     let rayon = rayon.min(rect.width() / 2.0).min(rect.height() / 2.0);
     let centres = [
@@ -651,12 +726,20 @@ fn rectangle_degrade(rect: Rect, rayon: f32, couleur: impl Fn(Pos2) -> Color32) 
         (pos2(rect.left() + rayon, rect.bottom() - rayon), 90.0),
         (pos2(rect.left() + rayon, rect.top() + rayon), 180.0),
     ];
-    let mut m = Mesh::default();
-    m.colored_vertex(rect.center(), couleur(rect.center()));
+    let mut tour = Vec::with_capacity(20);
     for (c, depart) in centres {
         for k in 0..=4 {
             let a = (depart + k as f32 * 22.5).to_radians();
-            let p = c + vec2(a.cos(), a.sin()) * rayon;
+            tour.push(c + vec2(a.cos(), a.sin()) * rayon);
+        }
+    }
+    let mut m = Mesh::default();
+    m.colored_vertex(rect.center(), couleur(rect.center()));
+    for (k, &a) in tour.iter().enumerate() {
+        let b = tour[(k + 1) % tour.len()];
+        let morceaux = ((b - a).length() / 24.0).ceil().max(1.0) as usize;
+        for i in 0..morceaux {
+            let p = a + (b - a) * (i as f32 / morceaux as f32);
             m.colored_vertex(p, couleur(p));
         }
     }
@@ -685,8 +768,9 @@ fn degrade_css(rect: Rect, angle: f32, arrets: &[Color32], p: Pos2) -> Color32 {
 /// grise ; Eve-même (le système) au centre, en gris ; une alerte dans le cadre ambre des avertissements de l'ERP. Une
 /// ligne d'une séance précédente, plus pâle.
 pub(super) fn bulle(ui: &mut egui::Ui, l: &Ligne<'_>, cartes: &mut Cartes, gestes: &mut Vec<Geste>) {
-    let Ligne { de, texte, heure, ancien, pieces, en_cours } = *l;
-    let opacite = if ancien { 0.55 } else { 1.0 };
+    let Ligne { de, texte, heure, ancien, pieces, en_cours, tour } = *l;
+    // Plus pâle, une ligne d'une séance précédente se lit encore sur le fond clair.
+    let opacite = if ancien { 0.75 } else { 1.0 };
     let largeur = ui.available_width();
     match de {
         "systeme" => {
@@ -714,12 +798,18 @@ pub(super) fn bulle(ui: &mut egui::Ui, l: &Ligne<'_>, cartes: &mut Cartes, geste
                         })
                         .response
                         .rect;
-                    let couleur = |p: Pos2| degrade_css(r, 90.0, &erp::TOI, p).gamma_multiply(opacite);
-                    let ombre =
-                        egui::Shadow { offset: [0, 1], blur: 2, spread: 0, color: Color32::from_black_alpha(13) };
-                    ui.painter()
-                        .set(fond, Shape::Vec(vec![ombre.as_shape(r, 4).into(), rectangle_degrade(r, 4.0, couleur)]));
-                    heure_sous(ui, heure, opacite);
+                    let couleur = |p: Pos2| degrade_css(r, 135.0, &erp::TOI, p).gamma_multiply(opacite);
+                    let ombre = egui::Shadow {
+                        offset: [0, 4],
+                        blur: 12,
+                        spread: 0,
+                        color: Color32::from_rgba_unmultiplied(37, 99, 235, 45),
+                    };
+                    ui.painter().set(
+                        fond,
+                        Shape::Vec(vec![ombre.as_shape(r, RAYON_DE_BULLE).into(), rectangle_degrade(r, 14.0, couleur)]),
+                    );
+                    heure_sous(ui, heure, opacite, None, "");
                 });
             });
             ui.add_space(4.0);
@@ -746,7 +836,7 @@ pub(super) fn bulle(ui: &mut egui::Ui, l: &Ligne<'_>, cartes: &mut Cartes, geste
                         .response
                         .rect;
                     ui.painter().set(fond, fond_de_bulle(r, alerte, opacite));
-                    heure_sous(ui, heure, opacite);
+                    heure_sous(ui, heure, opacite, (!en_cours).then_some(texte), tour);
                 });
             });
             ui.add_space(4.0);
@@ -754,30 +844,32 @@ pub(super) fn bulle(ui: &mut egui::Ui, l: &Ligne<'_>, cartes: &mut Cartes, geste
     }
 }
 
-/// Le fond d'une bulle d'Eve (`.ai-bubble-assistant`) : son ombre (0 2px 8px à 6 %), son dégradé à 135°, son filet
-/// #EDEBE9, son liseré bleu de 4 points ; une alerte, dans le cadre ambre de l'ERP (`.erp-alert-warning`).
+/// Le rayon des bulles.
+const RAYON_DE_BULLE: u8 = 14;
+
+/// Le fond d'une bulle d'Eve : son ombre douce teintée de marine, sa face blanche à peine bleutée vers le bas (le
+/// dégradé des bulles de l'assistant de l'ERP), son filet froid ; une alerte, dans le cadre ambre de l'ERP
+/// (`.erp-alert-warning`).
 fn fond_de_bulle(r: Rect, alerte: bool, opacite: f32) -> Shape {
-    let ombre = egui::Shadow { offset: [0, 2], blur: 8, spread: 0, color: Color32::from_black_alpha(15) };
-    let (face, filet, lisere) = if alerte {
-        let face = rectangle_degrade(r, 4.0, |_| erp::AVERTISSEMENT_FOND.gamma_multiply(opacite));
-        (face, erp::AVERTISSEMENT_BORD, erp::AVERTISSEMENT)
+    let rayon = f32::from(RAYON_DE_BULLE);
+    let (face, filet) = if alerte {
+        (rectangle_degrade(r, rayon, |_| erp::AVERTISSEMENT_FOND.gamma_multiply(opacite)), erp::AVERTISSEMENT_BORD)
     } else {
-        let face = rectangle_degrade(r, 4.0, |p| degrade_css(r, 135.0, &erp::BULLE, p).gamma_multiply(opacite));
-        (face, erp::FILET, erp::BULLE_LISERE)
+        let face = rectangle_degrade(r, rayon, |p| degrade_css(r, 160.0, &erp::BULLE, p).gamma_multiply(opacite));
+        (face, erp::FILET_DE_CARTE)
     };
-    let contour =
-        egui::epaint::RectShape::stroke(r, 4, Stroke::new(1.0, filet.gamma_multiply(opacite)), StrokeKind::Inside);
-    let bande = Rect::from_min_size(r.min, vec2(4.0, r.height()));
-    let coins = CornerRadius { nw: 4, sw: 4, ne: 0, se: 0 };
+    let trait_ = Stroke::new(1.0, filet.gamma_multiply(opacite));
+    let contour = egui::epaint::RectShape::stroke(r, RAYON_DE_BULLE, trait_, StrokeKind::Inside);
+    let alpha = (20.0 * opacite) as u8;
     Shape::Vec(vec![
-        ombre.as_shape(r, 4).into(),
+        ombre_marine(r, RAYON_DE_BULLE, 1, 3, alpha / 2),
+        ombre_marine(r, RAYON_DE_BULLE, 4, 14, alpha),
         face,
         Shape::Rect(contour),
-        Shape::Rect(egui::epaint::RectShape::filled(bande, coins, lisere.gamma_multiply(opacite))),
     ])
 }
 
-/// La petite orbe d'Eve devant ses bulles (son ombre douce dessous) ; une cloche ambre pour une alerte.
+/// La petite orbe d'Eve devant ses bulles, ou son portrait (son ombre douce dessous) ; une cloche ambre pour une alerte.
 fn avatar(ui: &mut egui::Ui, alerte: bool, opacite: f32) {
     let (rect, _) = ui.allocate_exact_size(vec2(34.0, 34.0), Sense::hover());
     let (c, p) = (rect.center(), ui.painter());
@@ -789,7 +881,10 @@ fn avatar(ui: &mut egui::Ui, alerte: bool, opacite: f32) {
         return;
     }
     p.circle_filled(c + vec2(0.0, 1.5), 15.0, Color32::from_black_alpha((26.0 * opacite) as u8));
-    sphere(p, c, 15.0);
+    match portrait_du_fil(ui.ctx()) {
+        Some(v) => v.vignette(p, c, 15.0),
+        None => sphere(p, c, 15.0),
+    }
     p.circle_stroke(c, 15.0, Stroke::new(1.0, Color32::from_white_alpha(70)));
     if opacite < 1.0 {
         p.circle_filled(c, 15.5, Color32::WHITE.gamma_multiply(1.0 - opacite));
@@ -805,10 +900,23 @@ fn tuile_de_la_personne(ui: &mut egui::Ui, opacite: f32) {
     p.text(rect.center(), Align2::CENTER_CENTER, pictos::PERSONNE, police, erp::TEXTE_2.gamma_multiply(opacite));
 }
 
-fn heure_sous(ui: &mut egui::Ui, heure: &str, opacite: f32) {
-    if !heure.is_empty() {
+/// L'heure sous une bulle ; sous une réponse d'Eve finie (`copie` : son texte), ce que son tour a pris (`tour`) et
+/// « Copier » à côté ([`super::ce_qu_a_pris`], [`super::bouton_copier`]).
+fn heure_sous(ui: &mut egui::Ui, heure: &str, opacite: f32, copie: Option<&str>, tour: &str) {
+    let encre = erp::TEXTE_3.gamma_multiply(opacite);
+    if let Some(reponse) = copie {
         ui.add_space(2.0);
-        ui.label(RichText::new(heure).size(11.0).color(erp::TEXTE_3.gamma_multiply(opacite)));
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            if !heure.is_empty() {
+                ui.label(RichText::new(heure).size(11.0).color(encre));
+            }
+            super::ce_qu_a_pris(ui, tour, encre, FontId::proportional(11.0));
+            super::bouton_copier(ui, reponse, encre, erp::PRIMAIRE, FontId::proportional(11.0));
+        });
+    } else if !heure.is_empty() {
+        ui.add_space(2.0);
+        ui.label(RichText::new(heure).size(11.0).color(encre));
     }
     ui.add_space(8.0);
 }
@@ -850,11 +958,11 @@ pub(super) fn points_de_suspension(ui: &mut egui::Ui) {
 
 // ---- La fenêtre dans ce thème ----------------------------------------------------------------------------------
 
-/// Ce que le badge du jour dit de la météo, comme celui du tableau de bord de l'ERP (`DashboardWeatherBadge.tsx`,
-/// l. 30-51, 163-180) : l'icône et sa teinte selon le temps (le soleil en jaune pâle, la pluie et la neige en bleu,
-/// l'orage en orange, le reste en gris), la température, le temps qu'il fait, la ville.
+/// Ce que la bannière dit de la météo, comme le badge du tableau de bord de l'ERP (`DashboardWeatherBadge.tsx`,
+/// l. 30-51, 163-180) : l'icône et sa teinte sur le bleu de la bannière (le soleil en jaune, la pluie et la neige en
+/// bleu pâle, l'orage en orange, le reste en blanc), la température, le temps qu'il fait, la ville.
 #[derive(Debug, PartialEq)]
-struct MeteoDuBadge {
+struct MeteoDuJour {
     icone: char,
     teinte: Color32,
     temperature: String,
@@ -862,17 +970,12 @@ struct MeteoDuBadge {
     ville: String,
 }
 
-/// Le badge du jour d'après la ligne du bulletin (« MONTRÉAL · 5 °C · COUVERT », ou sans la ville), son code WMO et le
+/// La météo du jour d'après la ligne du bulletin (« MONTRÉAL · 5 °C · COUVERT », ou sans la ville), son code WMO et le
 /// nom de la ville tel que la famille l'écrit (vide : celui de la ligne).
-fn meteo_du_badge(ligne: &str, code: u32, ville: &str) -> Option<MeteoDuBadge> {
+fn meteo_du_jour(ligne: &str, code: u32, ville: &str) -> Option<MeteoDuJour> {
     let morceaux: Vec<&str> = ligne.split(" · ").map(str::trim).collect();
     let k = morceaux.iter().position(|m| m.contains('°'))?;
-    // « CIEL DÉGAGÉ » → « Ciel dégagé » ; une ville en capitales, « SAINT-JEAN » → « Saint-Jean ».
-    let phrase = |m: &str| {
-        let bas = m.to_lowercase();
-        let mut c = bas.chars();
-        c.next().map_or_else(String::new, |p| p.to_uppercase().collect::<String>() + c.as_str())
-    };
+    // Une ville en capitales, « SAINT-JEAN » → « Saint-Jean ».
     let nom_propre = |m: &str| {
         let mut sortie = String::new();
         let mut debut = true;
@@ -892,25 +995,23 @@ fn meteo_du_badge(ligne: &str, code: u32, ville: &str) -> Option<MeteoDuBadge> {
         ville.trim().to_string()
     };
     let (icone, teinte) = match code {
-        0 | 1 => (pictos::SOLEIL, erp::JAUNE.pastel),
-        2 => (pictos::SOLEIL_VOILE, erp::JAUNE.pastel),
-        51..=67 | 71..=77 | 80..=86 => (pictos::NUAGE, erp::BLEU.pastel),
-        95..=99 => (pictos::NUAGE, erp::ORANGE.pastel),
-        _ => (pictos::NUAGE, erp::TEXTE_3),
+        0 | 1 => (pictos::SOLEIL, SOLEIL_DE_LA_BANNIERE),
+        2 => (pictos::SOLEIL_VOILE, SOLEIL_DE_LA_BANNIERE),
+        51..=67 | 71..=77 | 80..=86 => (pictos::NUAGE, Color32::from_rgb(0xBF, 0xDB, 0xFE)),
+        95..=99 => (pictos::NUAGE, Color32::from_rgb(0xFD, 0xBA, 0x74)),
+        _ => (pictos::NUAGE, Color32::WHITE),
     };
-    Some(MeteoDuBadge {
+    Some(MeteoDuJour {
         icone,
         teinte,
         temperature: morceaux[k].to_string(),
-        temps: morceaux.get(k + 1).map(|m| phrase(m)).unwrap_or_default(),
+        temps: morceaux.get(k + 1).map(|m| casse_de_phrase(m)).unwrap_or_default(),
         ville,
     })
 }
 
-/// « SAMEDI 24 OCTOBRE » → « samedi 24 octobre » : la date longue du Canada français, comme l'ERP l'écrit.
-fn date_du_badge(aujourdhui: &str) -> String {
-    ambiance::date_longue(aujourdhui).to_lowercase()
-}
+/// Le jaune du soleil sur le bleu de la bannière.
+const SOLEIL_DE_LA_BANNIERE: Color32 = Color32::from_rgb(0xFD, 0xE0, 0x47);
 
 impl Fenetre {
     /// Le thème choisi (son nom, [`THEMES`]) : celui que publie le chef, ou celui qu'on vient de choisir d'un clic,
@@ -943,10 +1044,103 @@ impl Fenetre {
         }
     }
 
+    /// Le portrait d'Eve dans les réglages, sous le choix du thème « Constructo AI », le seul qui le montre : sa
+    /// vignette (sinon l'orbe), « Choisir une image… » ou « Changer d'image… » (la boîte « Ouvrir » de Windows), et
+    /// « Retirer ». L'image se copie dans le dossier local ([`portrait::poser`]), et la fenêtre la prend d'elle-même ;
+    /// un refus va au fil, comme celui d'une pièce jointe.
+    pub(super) fn choix_du_portrait(&mut self, ui: &mut egui::Ui) {
+        if !self.theme_constructo(ui.ctx()) {
+            return;
+        }
+        let visage = self.portrait.visage(ui.ctx());
+        ui.add_space(8.0);
+        super::groupe(ui, |ui| {
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(vec2(44.0, 44.0), Sense::hover());
+                match &visage {
+                    Some(v) => v.vignette(ui.painter(), r.center(), 22.0),
+                    None => sphere(ui.painter(), r.center(), 17.0),
+                }
+                ui.add_space(4.0);
+                ui.vertical(|ui| {
+                    ui.add_space(4.0);
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(RichText::new("Portrait d'Eve").size(14.0).color(couleurs::ENCRE));
+                    let aide =
+                        if visage.is_some() { "À la place de l'orbe" } else { "Une photo à la place de l'orbe" };
+                    ui.label(RichText::new(aide).size(12.0).color(couleurs::ENCRE_3));
+                });
+            });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let mot = if visage.is_some() { "Changer d'image…" } else { "Choisir une image…" };
+                let rep = super::bouton(ui, None, mot, super::Bouton::Cerne);
+                let aide = "Une photo, ou un PNG détouré (au fond transparent) : sa tête sort alors du cercle";
+                if rep.on_hover_text(aide).clicked() {
+                    let (local, rapport) = (self.portrait.local().to_path_buf(), self.rapport.clone());
+                    let ctx = ui.ctx().clone();
+                    pieces::choisir_puis(move |choisies| {
+                        let refus = match choisies {
+                            Ok(images) => images.first().and_then(|image| {
+                                portrait::poser(image, &local)
+                                    .err()
+                                    .map(|e| format!("Le portrait d'Eve n'est pas posé : {e}"))
+                            }),
+                            Err(e) => Some(format!("La boîte de dialogue « Ouvrir » ne s'ouvre pas : {e}")),
+                        };
+                        if let Some(r) = refus {
+                            let evt = crate::chef::Evt::Ui { action: "piece_erreur".into(), valeur: Value::String(r) };
+                            let _ = rapport.send(evt);
+                        }
+                        ctx.request_repaint();
+                    });
+                }
+                if visage.is_some() && super::bouton(ui, None, "Retirer", super::Bouton::Plat).clicked() {
+                    self.portrait.retirer();
+                }
+            });
+            ui.add_space(10.0);
+        });
+    }
+
+    /// Le portrait à cette image, gardé pour les bulles et l'en-tête du dock ([`portrait_du_fil`]), qui se dessinent
+    /// sans la fenêtre.
+    fn garder_le_portrait(&mut self, ctx: &egui::Context) {
+        let visage = self.portrait.visage(ctx);
+        ctx.data_mut(|d| d.insert_temp(egui::Id::unique(PORTRAIT), visage));
+    }
+
+    /// Le visage d'Eve dans `rect`, qui répond par `rep` : son portrait, s'il y en a un, son ombre dessous, cerné de
+    /// l'anneau de ce qu'elle fait ([`portrait::anneau`], dans la couleur de la pastille de la bannière) — un portrait
+    /// détouré passe devant l'anneau, la tête hors du cercle ; sinon l'orbe. Tenu, il parle, comme la touche.
+    fn visage_dans(&mut self, ui: &mut egui::Ui, rect: Rect, rep: egui::Response) {
+        let Some(visage) = self.portrait.visage(ui.ctx()) else {
+            return self.orbe_dans(ui, rect, rep);
+        };
+        self.orbe_tenue = rep.is_pointer_button_down_on();
+        rep.on_hover_text("Tiens appuyé pour parler").on_hover_cursor(egui::CursorIcon::PointingHand);
+        let etat = self.champ("etat").to_string();
+        let niveau = self.etat.get("niveau").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        let temps = ui.input(|i| i.time);
+        let (centre, rayon) = (rect.center(), rect.width().min(rect.height()) * 0.4);
+        let couleur = couleur_de_l_anneau(&etat, ui.visuals().dark_mode);
+        let p = ui.painter();
+        p.circle_filled(centre + vec2(0.0, rayon * 0.08), rayon * 1.06, Color32::from_black_alpha(16));
+        p.circle_filled(centre + vec2(0.0, rayon * 0.03), rayon * 1.01, Color32::from_black_alpha(34));
+        portrait::anneau(p, centre, rayon, &etat, couleur, niveau, temps);
+        visage.en_grand(p, centre, rayon);
+        portrait::pastille(p, centre, rayon, &etat, couleur);
+        if etat != "pret" {
+            ui.ctx().request_repaint();
+        }
+    }
+
     /// La fenêtre sous la barre, dans le thème « Constructo AI » : le fond qui respire ; le centre déplié, le tableau
     /// de bord, et la conversation à droite comme le dock de l'assistant de l'ERP ; replié (ou la fenêtre étroite), la
     /// conversation seule, son orbe en tête.
     pub(super) fn constructo(&mut self, ui: &mut egui::Ui) {
+        self.garder_le_portrait(ui.ctx());
         let zone = ui.available_rect_before_wrap();
         let anime = animations(ui.ctx());
         let fond = Fond { zone, course: if anime { course(ui.input(|i| i.time)) } else { 0.5 } };
@@ -1009,8 +1203,13 @@ impl Fenetre {
         ui.horizontal_centered(|ui| {
             ui.add_space(14.0);
             let (tuile, _) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::hover());
-            ui.painter().rect_filled(tuile, 4.0, Color32::from_white_alpha(38));
-            sphere(ui.painter(), tuile.center(), 10.0);
+            if let Some(v) = portrait_du_fil(ui.ctx()) {
+                v.vignette(ui.painter(), tuile.center(), 15.0);
+                ui.painter().circle_stroke(tuile.center(), 15.0, Stroke::new(1.0, Color32::from_white_alpha(90)));
+            } else {
+                ui.painter().rect_filled(tuile, 4.0, Color32::from_white_alpha(38));
+                sphere(ui.painter(), tuile.center(), 10.0);
+            }
             ui.add_space(4.0);
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
@@ -1119,6 +1318,9 @@ impl Fenetre {
                     )
                 })
                 .inner;
+            if std::mem::take(&mut self.saisie_au_clavier) {
+                champ.request_focus();
+            }
             let entree = champ.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             let pret = !self.saisie.trim().is_empty();
             if (bouton_envoyer_clair(ui, pret).clicked() || entree) && pret {
@@ -1173,12 +1375,14 @@ impl Fenetre {
         rep.on_hover_text("Maintiens pour parler").on_hover_cursor(egui::CursorIcon::PointingHand);
     }
 
-    /// Le haut de la conversation seule : l'orbe, ce qu'Eve fait (comme l'Eve de Constructo AI dans son thème clair :
-    /// 19 points en gras), comment lui parler ; la demande d'accord, s'il y en a une.
+    /// Le haut de la conversation seule : l'orbe (ou le portrait d'Eve), ce qu'Eve fait (comme l'Eve de Constructo AI
+    /// dans son thème clair : 19 points en gras), comment lui parler ; la demande d'accord, s'il y en a une.
     fn tete_claire(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
             ui.add_space(10.0);
-            self.orbe(ui);
+            let cote = self.cote_de_l_orbe(ui.ctx());
+            let (rect, rep) = ui.allocate_exact_size(vec2(cote, cote), Sense::click());
+            self.visage_dans(ui, rect, rep);
             let etat = RichText::new(self.champ("libelle")).family(FontFamily::Name(GRAS.into())).size(19.0);
             ui.label(etat.color(erp::TEXTE));
             let aide = self.champ("aide");
@@ -1205,119 +1409,292 @@ impl Fenetre {
         egui::CentralPanel::default().frame(egui::Frame::new()).show(ui, |ui| self.fil(ui, Style::Claire));
     }
 
-    /// Le tableau de bord, comme celui de l'ERP (`AnalyticsPage.tsx`) : son titre et le badge du jour ; l'orbe en
-    /// vedette et la décision du jour à gauche ; à droite, les échéances et tout le panneau d'information en cartes.
-    /// Dans une place étroite, tout en une colonne. Chaque colonne défile si elle déborde.
+    /// Le tableau de bord, comme les beaux tableaux de bord d'aujourd'hui : une page qui défile — la bannière
+    /// d'accueil ([`Fenetre::banniere`]), la décision du jour, puis les échéances à gauche et tout le panneau
+    /// d'information en cartes à droite ; dans une place étroite, ou sans échéances, les cartes prennent toute la
+    /// largeur.
     fn tableau_de_bord(&mut self, ui: &mut egui::Ui) {
-        // Les marges de l'ERP (`p-6`) ; en bas, les colonnes défilent jusqu'au bord de la fenêtre, comme une page.
-        let m = ui.max_rect();
-        let r = Rect::from_min_max(m.min + vec2(24.0, 22.0), pos2(m.right() - 24.0, m.bottom()));
+        // La page défile sur toute la zone ; ses marges (celles de l'ERP, `p-6`) sont dedans, pour que les ombres des
+        // cartes ne s'y coupent pas.
+        let zone = ui.max_rect();
         let aujourdhui = journal::date();
         let horodatage = journal::horodatage();
         let heure = horodatage.get(11..16).unwrap_or("").replace('-', ":");
-        ui.scope_builder(UiBuilder::new().max_rect(r), |ui| {
-            ui.horizontal(|ui| {
-                let titre = RichText::new("Tableau de bord").family(FontFamily::Name(GRAS.into())).size(24.0);
-                ui.label(titre.color(erp::TEXTE));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    self.badge_du_jour(ui, &aujourdhui, &horodatage);
-                });
-            });
-            ui.add_space(14.0);
-            let corps = ui.available_rect_before_wrap();
-            let colonne = |ui: &mut egui::Ui, place: Rect, nom: &str, contenu: &mut dyn FnMut(&mut egui::Ui)| {
-                ui.scope_builder(UiBuilder::new().max_rect(place), |ui| {
-                    let sortie = egui::ScrollArea::vertical().id_salt(nom).auto_shrink([false, false]).show(ui, |ui| {
-                        ui.add_space(4.0);
-                        contenu(ui);
-                        ui.add_space(24.0);
-                    });
-                    // Défilée, la colonne s'estompe sous le titre au lieu d'y être coupée net.
-                    if sortie.state.clamped_offset().y > 1.0 {
-                        fondu(ui.painter(), Rect::from_min_size(place.min, vec2(place.width(), 18.0)));
+        let sortie =
+            egui::ScrollArea::vertical().id_salt("tableau-de-bord").auto_shrink([false, false]).show(ui, |ui| {
+                egui::Frame::new().inner_margin(Margin { left: 24, right: 24, top: 22, bottom: 30 }).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    self.banniere(ui, &aujourdhui, &horodatage);
+                    ui.add_space(ECART);
+                    if self.centre.decision_carte(ui, &aujourdhui) {
+                        ui.add_space(ECART);
+                    }
+                    let largeur = ui.available_width();
+                    let echeances = self.centre.a_des_echeances(&aujourdhui);
+                    if largeur >= 900.0 && echeances {
+                        // Deux colonnes : les échéances, les cartes ; la page descend jusqu'à la plus longue.
+                        let gauche = (largeur * 0.38).clamp(330.0, 520.0);
+                        let haut = ui.cursor().min;
+                        let colonne = |ui: &mut egui::Ui, x: f32, l: f32| {
+                            let place = Rect::from_min_size(pos2(x, haut.y), vec2(l, 100_000.0));
+                            ui.new_child(UiBuilder::new().max_rect(place).layout(Layout::top_down(Align::Min)))
+                        };
+                        let mut ug = colonne(ui, haut.x, gauche);
+                        self.centre.echeances_carte(&mut ug, &aujourdhui);
+                        let reste = largeur - gauche - ECART;
+                        let mut ud = colonne(ui, haut.x + gauche + ECART, reste);
+                        self.centre.panneau_cartes(&mut ud, &aujourdhui, &heure, colonnes_pour(reste));
+                        ui.advance_cursor_after_rect(ug.min_rect().union(ud.min_rect()));
+                    } else {
+                        if echeances {
+                            self.centre.echeances_carte(ui, &aujourdhui);
+                            ui.add_space(ECART);
+                        }
+                        self.centre.panneau_cartes(ui, &aujourdhui, &heure, colonnes_pour(largeur));
                     }
                 });
-            };
-            if corps.width() >= 860.0 {
-                let l = (corps.width() * 0.36).clamp(320.0, 460.0);
-                let gauche = Rect::from_min_size(corps.min, vec2(l, corps.height()));
-                let droite = Rect::from_min_max(pos2(gauche.right() + 24.0, corps.top()), corps.max);
-                let hauteur = gauche.height() - 28.0;
-                colonne(ui, gauche, "colonne-du-jour", &mut |ui| self.colonne_du_jour(ui, &aujourdhui, hauteur));
-                colonne(ui, droite, "colonne-des-cartes", &mut |ui| self.cartes_du_tableau(ui, &aujourdhui, &heure));
-            } else {
-                colonne(ui, corps, "colonne-unique", &mut |ui| {
-                    self.colonne_du_jour(ui, &aujourdhui, 0.0);
-                    ui.add_space(16.0);
-                    self.cartes_du_tableau(ui, &aujourdhui, &heure);
-                });
-            }
-        });
-    }
-
-    /// La colonne du jour : l'orbe en vedette sur le fond, ce qu'Eve fait et comment lui parler, puis la décision du
-    /// jour. Centrée dans `hauteur` (la colonne), d'après sa hauteur à l'image d'avant ; 0 : en haut.
-    fn colonne_du_jour(&mut self, ui: &mut egui::Ui, aujourdhui: &str, hauteur: f32) {
-        let id = egui::Id::unique("hauteur-de-la-colonne-du-jour");
-        let avant = ui.ctx().data(|d| d.get_temp::<f32>(id)).unwrap_or(0.0);
-        ui.add_space(((hauteur - avant) / 2.0 - 12.0).max(0.0));
-        let debut = ui.cursor().top();
-        ui.vertical_centered(|ui| {
-            self.orbe(ui);
-            let etat = RichText::new(self.champ("libelle")).family(FontFamily::Name(GRAS.into())).size(19.0);
-            ui.label(etat.color(erp::TEXTE));
-            let aide = self.champ("aide");
-            if !aide.is_empty() {
-                ui.label(RichText::new(aide).size(13.0).color(erp::TEXTE_2));
-            }
-        });
-        ui.add_space(22.0);
-        self.centre.decision_carte(ui, aujourdhui);
-        let mesure = ui.cursor().top() - debut;
-        if (mesure - avant).abs() > 0.5 {
-            ui.ctx().data_mut(|d| d.insert_temp(id, mesure));
-            ui.ctx().request_repaint();
+            });
+        // Défilée, la page s'estompe sous la barre au lieu d'y être coupée net.
+        if sortie.state.clamped_offset().y > 1.0 {
+            fondu(ui.painter(), Rect::from_min_size(zone.min, vec2(zone.width(), 24.0)));
         }
     }
 
-    /// Les cartes du tableau de bord : les échéances, puis le panneau d'information, en deux ou trois colonnes selon la
-    /// place.
-    fn cartes_du_tableau(&mut self, ui: &mut egui::Ui, aujourdhui: &str, heure: &str) {
-        self.centre.echeances_carte(ui, aujourdhui);
-        let colonnes = ((ui.available_width() + 16.0) / (290.0 + 16.0)).floor().clamp(1.0, 3.0) as usize;
-        self.centre.panneau_cartes(ui, aujourdhui, heure, colonnes);
-    }
-
-    /// Le badge du jour, comme celui du tableau de bord de l'ERP : la date et l'heure, puis, quand la météo est là, son
-    /// icône, la température, le temps qu'il fait et la ville.
-    fn badge_du_jour(&self, ui: &mut egui::Ui, aujourdhui: &str, horodatage: &str) {
+    /// La bannière d'accueil, en tête du tableau de bord : un dégradé du marine de Constructo AI au bleu du ciel, deux
+    /// anneaux et deux lueurs ; l'orbe d'Eve à gauche (tenue, elle parle) ; « Tableau de bord », le salut du moment et
+    /// le prénom de la personne (« Bonsoir, Sam »), la date et l'heure, et ce que fait Eve dans une pastille (son
+    /// point de couleur, qui bat quand elle travaille, et comment lui parler) ; à droite, la météo en grand (sans le
+    /// temps qu'il fait dans une bannière étroite, et pas du tout dans une très étroite).
+    fn banniere(&mut self, ui: &mut egui::Ui, aujourdhui: &str, horodatage: &str) {
+        let hauteur = (self.hauteur * 0.2).clamp(160.0, 196.0);
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), hauteur), Sense::hover());
+        let texture = texture_de_la_banniere(ui.ctx(), rect.size());
+        let p = ui.painter();
+        p.add(ombre_marine(rect, RAYON_DE_CARTE, 10, 30, 64));
+        let uv = Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0));
+        p.add(egui::epaint::RectShape::filled(rect, RAYON_DE_CARTE, Color32::WHITE).with_texture(texture.id(), uv));
+        let cote = hauteur - 24.0;
+        let orbe = Rect::from_min_size(pos2(rect.left() + 20.0, rect.center().y - cote / 2.0), vec2(cote, cote));
+        // Les ornements, gardés dans la bannière : deux anneaux à droite, une lueur derrière l'orbe, une autre à droite.
+        let ornements = p.with_clip_rect(rect.shrink(1.0));
+        let anneaux = pos2(rect.right() - hauteur * 0.55, rect.top() + hauteur * 0.15);
+        for (r, a) in [(hauteur * 0.95, 22), (hauteur * 1.45, 14)] {
+            ornements.circle_stroke(anneaux, r, Stroke::new(1.5, Color32::from_white_alpha(a)));
+        }
+        lueur(&ornements, orbe.center(), cote * 0.75, 0.16);
+        lueur(&ornements, pos2(rect.right() - hauteur * 0.7, rect.center().y), hauteur * 0.8, 0.07);
+        // L'orbe — ou le portrait d'Eve — : dans ses couleurs du centre de commande, faites pour un fond sombre.
+        let rep = ui.interact(orbe, egui::Id::unique("orbe-de-la-banniere"), Sense::click());
+        ui.scope(|ui| {
+            ui.visuals_mut().dark_mode = true;
+            self.visage_dans(ui, orbe, rep);
+        });
+        let p = ui.painter();
+        let x = orbe.right() + 24.0;
+        // La météo, contre le bord droit, si le texte garde sa place ; le texte prend le reste.
         let ville = self.meteo.as_ref().map(|m| m.lieu().ville.clone()).unwrap_or_default();
-        let meteo = self.bulletin.as_ref().and_then(|b| meteo_du_badge(&b.ligne, b.code, &ville));
-        // Ses morceaux, de gauche à droite, mis en page d'abord : le badge épouse leur largeur.
-        let (normale, demi) = (FontId::proportional(13.5), FontId::new(13.5, FontFamily::Name(SEMI.into())));
-        let p = ui.painter();
-        let jour = format!("{} · {}", date_du_badge(aujourdhui), ambiance::heure_de_veille(horodatage));
-        let mut morceaux = vec![p.layout_no_wrap(jour, normale.clone(), erp::TEXTE_2)];
-        if let Some(m) = meteo {
-            morceaux.push(p.layout_no_wrap("|".into(), normale.clone(), Color32::from_rgb(0xC8, 0xC6, 0xC4)));
-            let icone = FontId::new(15.0, FontFamily::Name(ICONES.into()));
-            morceaux.push(p.layout_no_wrap(m.icone.to_string(), icone, m.teinte));
-            morceaux.push(p.layout_no_wrap(m.temperature, demi, erp::TEXTE));
-            for mot in [m.temps, m.ville].into_iter().filter(|x| !x.is_empty()) {
-                morceaux.push(p.layout_no_wrap(mot, normale.clone(), erp::TEXTE_2));
-            }
+        let jour = self.bulletin.as_ref().and_then(|b| meteo_du_jour(&b.ligne, b.code, &ville));
+        let meteo = jour.and_then(|m| {
+            [false, true].into_iter().map(|compacte| MeteoDeLaBanniere::nouvelle(p, &m, compacte)).find(|g| {
+                let reste = rect.right() - 30.0 - g.largeur() - 24.0 - x;
+                reste >= if g.compacte { 200.0 } else { 280.0 }
+            })
+        });
+        let droite = meteo.as_ref().map_or(rect.right() - 28.0, |g| rect.right() - 30.0 - g.largeur() - 24.0);
+        let l = (droite - x).max(120.0);
+        // Le texte, de haut en bas.
+        let mut surtitre = egui::text::LayoutJob::default();
+        let semi_11 = FontId::new(11.0, FontFamily::Name(SEMI.into()));
+        let format =
+            egui::text::TextFormat { font_id: semi_11, color: Color32::from_white_alpha(170), ..Default::default() };
+        surtitre.append("TABLEAU DE BORD", 0.0, egui::text::TextFormat { extra_letter_spacing: 1.6, ..format });
+        let g_surtitre = p.layout_job(surtitre);
+        let qui = self.champ("qui");
+        let salut = salut_du_moment(horodatage.get(11..13).and_then(|h| h.parse().ok()).unwrap_or(12));
+        let salut = if qui.is_empty() { salut.to_string() } else { format!("{salut}, {qui}") };
+        let gras = |taille: f32| FontId::new(taille, FontFamily::Name(GRAS.into()));
+        let large = p.layout_no_wrap(salut.clone(), gras(30.0), Color32::WHITE).size().x;
+        let taille = if large > l { (30.0 * l / large).max(22.0) } else { 30.0 };
+        let g_salut = p.layout(salut, gras(taille), Color32::WHITE, l);
+        let date = casse_de_phrase(&ambiance::date_longue(aujourdhui));
+        let date = format!("{date} · {}", ambiance::heure_de_veille(horodatage));
+        let g_date = p.layout_no_wrap(date, FontId::proportional(15.0), Color32::from_white_alpha(220));
+        let g_etat = ligne_de_l_etat(p, self.champ("libelle"), self.champ("aide"), l - 44.0);
+        let h_pilule = g_etat.size().y + 12.0;
+        let tailles = [g_surtitre.size().y, g_salut.size().y, g_date.size().y];
+        let total = tailles.iter().sum::<f32>() + 6.0 + 2.0 + 14.0 + h_pilule;
+        let mut y = rect.center().y - total / 2.0;
+        for (g, apres) in [(g_surtitre, 6.0), (g_salut, 2.0), (g_date, 14.0)] {
+            let h = g.size().y;
+            p.galley(pos2(x, y), g, Color32::WHITE);
+            y += h + apres;
         }
-        let ecart = 7.0;
-        let largeur = morceaux.iter().map(|g| g.size().x).sum::<f32>() + ecart * (morceaux.len() - 1) as f32 + 22.0;
-        let (rect, _) = ui.allocate_exact_size(vec2(largeur, 32.0), Sense::hover());
-        let p = ui.painter();
-        p.rect(rect, 4.0, Color32::WHITE, Stroke::new(1.0, erp::FILET), StrokeKind::Inside);
-        let mut x = rect.left() + 11.0;
-        for g in morceaux {
-            let l = g.size().x;
-            p.galley(pos2(x, rect.center().y - g.size().y / 2.0), g, erp::TEXTE);
-            x += l + ecart;
+        let pilule = Rect::from_min_size(pos2(x, y), vec2(g_etat.size().x + 44.0, h_pilule));
+        let (fond, filet) = (Color32::from_white_alpha(28), Color32::from_white_alpha(46));
+        p.rect(pilule, 255.0, fond, Stroke::new(1.0, filet), StrokeKind::Inside);
+        let etat = self.champ("etat");
+        let point = pos2(pilule.left() + 17.0, pilule.center().y);
+        let couleur = couleur_de_l_etat(etat);
+        if !matches!(etat, "pret" | "demarrage" | "erreur") {
+            // Eve travaille : son point bat.
+            let f = (ui.input(|i| i.time) * 1.2).fract() as f32;
+            p.circle_filled(point, 4.0 + 6.0 * f, couleur.gamma_multiply(0.45 * (1.0 - f)));
         }
+        p.circle_filled(point, 7.0, couleur.gamma_multiply(0.28));
+        p.circle_filled(point, 4.0, couleur);
+        p.galley(pos2(pilule.left() + 30.0, pilule.center().y - g_etat.size().y / 2.0), g_etat, Color32::WHITE);
+        if let Some(g) = meteo {
+            g.peindre(p, rect.right() - 30.0, rect.center().y);
+        }
+    }
+}
+
+/// La météo de la bannière, mise en page : son icône en grand, la température en très grand, et dessous le temps qu'il
+/// fait et la ville (pas dans une bannière étroite : `compacte`).
+struct MeteoDeLaBanniere {
+    icone: std::sync::Arc<egui::Galley>,
+    temperature: std::sync::Arc<egui::Galley>,
+    dessous: Option<std::sync::Arc<egui::Galley>>,
+    compacte: bool,
+}
+
+impl MeteoDeLaBanniere {
+    fn nouvelle(p: &egui::Painter, m: &MeteoDuJour, compacte: bool) -> Self {
+        let icone = p.layout_no_wrap(m.icone.to_string(), FontId::new(40.0, FontFamily::Name(ICONES.into())), m.teinte);
+        let gras = FontId::new(36.0, FontFamily::Name(GRAS.into()));
+        let temperature = p.layout_no_wrap(m.temperature.clone(), gras, Color32::WHITE);
+        let mots: Vec<&str> = [m.temps.as_str(), m.ville.as_str()].into_iter().filter(|x| !x.is_empty()).collect();
+        let dessous = (!compacte && !mots.is_empty())
+            .then(|| p.layout_no_wrap(mots.join(" · "), FontId::proportional(14.0), Color32::from_white_alpha(210)));
+        Self { icone, temperature, dessous, compacte }
+    }
+
+    fn largeur(&self) -> f32 {
+        let texte = self.dessous.as_ref().map_or(0.0, |g| g.size().x).max(self.temperature.size().x);
+        self.icone.size().x + 14.0 + texte
+    }
+
+    /// Peinte contre `droite`, centrée sur `milieu`.
+    fn peindre(self, p: &egui::Painter, droite: f32, milieu: f32) {
+        let gauche = droite - self.largeur();
+        let h_icone = self.icone.size().y;
+        let l_icone = self.icone.size().x;
+        p.galley(pos2(gauche, milieu - h_icone / 2.0), self.icone, Color32::WHITE);
+        let x = gauche + l_icone + 14.0;
+        let h_temperature = self.temperature.size().y;
+        let h = h_temperature + self.dessous.as_ref().map_or(0.0, |g| g.size().y);
+        p.galley(pos2(x, milieu - h / 2.0), self.temperature, Color32::WHITE);
+        if let Some(g) = self.dessous {
+            p.galley(pos2(x, milieu - h / 2.0 + h_temperature), g, Color32::WHITE);
+        }
+    }
+}
+
+/// Le dégradé de la bannière en texture, à un texel pour quatre points (le filtrage linéaire le lisse) : egui en adoucit
+/// les coins arrondis, ce qu'un maillage ne fait pas. Refaite quand la bannière change de taille.
+fn texture_de_la_banniere(ctx: &egui::Context, taille: egui::Vec2) -> egui::TextureHandle {
+    let id = egui::Id::unique("texture-de-la-banniere");
+    let cle = [(taille.x / 4.0).round().max(2.0) as usize, (taille.y / 4.0).round().max(2.0) as usize];
+    if let Some((c, t)) = ctx.data(|d| d.get_temp::<([usize; 2], egui::TextureHandle)>(id))
+        && c == cle
+    {
+        return t;
+    }
+    let r = Rect::from_min_size(Pos2::ZERO, vec2(cle[0] as f32, cle[1] as f32));
+    let arrets = [erp::MARINE_HAUT, erp::AZUR, erp::CIEL];
+    let pixels = (0..cle[0] * cle[1])
+        .map(|i| degrade_css(r, 110.0, &arrets, pos2((i % cle[0]) as f32 + 0.5, (i / cle[0]) as f32 + 0.5)))
+        .collect();
+    let t = ctx.load_texture("banniere", egui::ColorImage::new(cle, pixels), egui::TextureOptions::LINEAR);
+    ctx.data_mut(|d| d.insert_temp(id, (cle, t.clone())));
+    t
+}
+
+/// Une lueur blanche et ronde, qui s'efface de son centre (à `force`) à son bord sans anneau visible : trois couronnes
+/// d'un maillage, de plus en plus pâles.
+fn lueur(p: &egui::Painter, centre: Pos2, rayon: f32, force: f32) {
+    const COURONNES: [(f32, f32); 4] = [(0.0, 1.0), (0.35, 0.6), (0.7, 0.22), (1.0, 0.0)];
+    let n = 48;
+    let mut m = Mesh::default();
+    m.colored_vertex(centre, Color32::from_white_alpha((255.0 * force) as u8));
+    for &(r, a) in &COURONNES[1..] {
+        let couleur = Color32::from_white_alpha((255.0 * force * a) as u8);
+        for i in 0..n {
+            let t = i as f32 / n as f32 * std::f32::consts::TAU;
+            m.colored_vertex(centre + vec2(t.cos(), t.sin()) * rayon * r, couleur);
+        }
+    }
+    for i in 0..n {
+        let j = (i + 1) % n;
+        m.add_triangle(0, 1 + i, 1 + j);
+        for c in 0..COURONNES.len() as u32 - 2 {
+            let (a, b) = (1 + c * n, 1 + (c + 1) * n);
+            m.add_triangle(a + i, b + i, b + j);
+            m.add_triangle(a + i, b + j, a + j);
+        }
+    }
+    p.add(Shape::mesh(m));
+}
+
+/// La ligne de la pastille de la bannière : ce que fait Eve en demi-gras, puis comment lui parler, ses touches (entre
+/// crochets dans l'aide du chef) en demi-gras aussi ; coupée d'une ellipse à `largeur`.
+fn ligne_de_l_etat(p: &egui::Painter, libelle: &str, aide: &str, largeur: f32) -> std::sync::Arc<egui::Galley> {
+    let semi = egui::text::TextFormat::simple(FontId::new(13.0, FontFamily::Name(SEMI.into())), Color32::WHITE);
+    let normal = egui::text::TextFormat::simple(FontId::proportional(13.0), Color32::from_white_alpha(215));
+    let mut job = egui::text::LayoutJob::default();
+    job.append(libelle, 0.0, semi.clone());
+    if !aide.is_empty() {
+        job.append("  ·  ", 0.0, normal.clone());
+        // « Maintiens [Ctrl+Espace] pour parler » : le texte, la touche, le texte…
+        for (k, morceau) in aide.split(['[', ']']).enumerate() {
+            job.append(morceau, 0.0, if k % 2 == 1 { semi.clone() } else { normal.clone() });
+        }
+    }
+    job.wrap = egui::text::TextWrapping::truncate_at_width(largeur.max(60.0));
+    p.layout_job(job)
+}
+
+/// Le salut du moment : bonjour le matin, bon après-midi, bonsoir, bonne nuit de 23 h à 5 h.
+fn salut_du_moment(heure: u32) -> &'static str {
+    match heure {
+        5..=11 => "Bonjour",
+        12..=17 => "Bon après-midi",
+        18..=22 => "Bonsoir",
+        _ => "Bonne nuit",
+    }
+}
+
+/// Le point de couleur de ce que fait Eve, dans la pastille de la bannière : vert, prête ; corail, elle écoute ; ciel,
+/// elle transcrit ; pervenche, elle réfléchit ; bleu, elle parle ; ambre, elle attend un accord ; rouge, un problème ;
+/// gris, elle se prépare.
+fn couleur_de_l_etat(etat: &str) -> Color32 {
+    match etat {
+        "pret" => Color32::from_rgb(0x4A, 0xDE, 0x80),
+        "ecoute" => Color32::from_rgb(0xFF, 0x8A, 0x65),
+        "transcription" => Color32::from_rgb(0x7D, 0xD3, 0xFC),
+        "reflexion" => Color32::from_rgb(0xA5, 0xB4, 0xFC),
+        "parole" => Color32::from_rgb(0x93, 0xC5, 0xFD),
+        "confirmation" => Color32::from_rgb(0xFB, 0xBF, 0x24),
+        "erreur" => Color32::from_rgb(0xF8, 0x71, 0x71),
+        _ => Color32::from_rgb(0xCB, 0xD5, 0xE1),
+    }
+}
+
+/// La couleur de l'anneau du portrait d'Eve : sur le fond sombre de la bannière, celle de la pastille ; sur un fond
+/// clair (la conversation seule), où les pastels s'effacent, la même teinte, franche.
+fn couleur_de_l_anneau(etat: &str, sombre: bool) -> Color32 {
+    if sombre {
+        return couleur_de_l_etat(etat);
+    }
+    match etat {
+        "pret" => erp::SUCCES,
+        "ecoute" => Color32::from_rgb(0xF9, 0x73, 0x16),
+        "transcription" => erp::CIEL,
+        "reflexion" => Color32::from_rgb(0x63, 0x66, 0xF1),
+        "parole" => erp::PRIMAIRE,
+        "confirmation" => erp::AVERTISSEMENT,
+        "erreur" => Color32::from_rgb(0xDC, 0x26, 0x26),
+        _ => Color32::from_rgb(0x94, 0xA3, 0xB8),
     }
 }
 
@@ -1430,27 +1807,45 @@ mod essais {
     }
 
     #[test]
-    fn le_badge_du_jour_comme_l_erp() {
-        let m = meteo_du_badge("LAVAL · 3 °C · CIEL DÉGAGÉ", 0, "").unwrap();
+    fn la_meteo_du_jour_comme_l_erp() {
+        let m = meteo_du_jour("LAVAL · 3 °C · CIEL DÉGAGÉ", 0, "").unwrap();
         assert_eq!(
             m,
-            MeteoDuBadge {
+            MeteoDuJour {
                 icone: pictos::SOLEIL,
-                teinte: erp::JAUNE.pastel,
+                teinte: SOLEIL_DE_LA_BANNIERE,
                 temperature: "3 °C".into(),
                 temps: "Ciel dégagé".into(),
                 ville: "Laval".into()
             }
         );
-        let m = meteo_du_badge("SAINT-JEAN · -2 °C · NEIGE MODÉRÉE", 73, "Saint-Jean-sur-Richelieu").unwrap();
-        assert_eq!(
-            (m.ville.as_str(), m.temps.as_str(), m.teinte),
-            ("Saint-Jean-sur-Richelieu", "Neige modérée", erp::BLEU.pastel)
-        );
-        let m = meteo_du_badge("5 °C · COUVERT", 3, "").unwrap();
-        assert_eq!((m.ville.as_str(), m.temperature.as_str(), m.teinte), ("", "5 °C", erp::TEXTE_3));
-        assert_eq!(meteo_du_badge("", 0, ""), None);
-        assert_eq!(date_du_badge("2026-10-24"), "samedi 24 octobre");
+        let m = meteo_du_jour("SAINT-JEAN · -2 °C · NEIGE MODÉRÉE", 73, "Saint-Jean-sur-Richelieu").unwrap();
+        assert_eq!((m.ville.as_str(), m.temps.as_str()), ("Saint-Jean-sur-Richelieu", "Neige modérée"));
+        let m = meteo_du_jour("5 °C · COUVERT", 3, "").unwrap();
+        assert_eq!((m.ville.as_str(), m.temperature.as_str(), m.teinte), ("", "5 °C", Color32::WHITE));
+        assert_eq!(meteo_du_jour("", 0, ""), None);
+    }
+
+    #[test]
+    fn les_textes_du_tableau_en_casse_de_phrase() {
+        assert_eq!(casse_de_phrase("ÉPICERIE · 0 À ACHETER"), "Épicerie · 0 à acheter");
+        assert_eq!(casse_de_phrase("À SORTIR : poulet"), "À sortir : poulet");
+        assert_eq!(casse_de_phrase("Décision du jour"), "Décision du jour");
+        assert_eq!(casse_de_phrase(&ambiance::date_longue("2026-10-24")), "Samedi 24 octobre");
+        assert_eq!(casse_de_phrase("L'ENCAISSE EN VIENT"), "L'encaisse en vient");
+        assert_eq!(casse_de_phrase(""), "");
+        assert_eq!(salut_du_moment(8), "Bonjour");
+        assert_eq!(salut_du_moment(14), "Bon après-midi");
+        assert_eq!(salut_du_moment(20), "Bonsoir");
+        assert_eq!(salut_du_moment(2), "Bonne nuit");
+    }
+
+    #[test]
+    fn la_grille_prend_autant_de_cartes_qu_il_en_tient() {
+        assert_eq!(colonnes_pour(200.0), 1);
+        assert_eq!(colonnes_pour(LARGEUR_DE_CARTE * 2.0 + ECART), 2);
+        assert_eq!(colonnes_pour(LARGEUR_DE_CARTE * 2.0 + ECART - 1.0), 1);
+        assert_eq!(colonnes_pour(2000.0), 3);
     }
 
     #[test]

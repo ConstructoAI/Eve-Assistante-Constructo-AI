@@ -8,6 +8,7 @@
 
 use std::fs::File;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::thread;
 
@@ -138,11 +139,16 @@ impl Fenetre {
     }
 
     /// Le dépôt (P2) : tant qu'un fichier se glisse sur la fenêtre, le voile par-dessus tout ; les fichiers déposés se
-    /// joignent.
+    /// joignent. Et une image collée (Ctrl+V après une capture d'écran : Win+Maj+S) se joint aussi, en PNG.
     pub(super) fn depot(&self, ctx: &egui::Context, habit: &Habit) {
-        let (survol, deposes) = ctx.input(|i| {
+        let (survol, deposes, collees) = ctx.input(|i| {
             let deposes: Vec<PathBuf> = i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect();
-            (!i.raw.hovered_files.is_empty(), deposes)
+            let collees: Vec<Arc<egui::ColorImage>> = i
+                .events
+                .iter()
+                .filter_map(|e| if let egui::Event::PasteImage(image) = e { Some(image.clone()) } else { None })
+                .collect();
+            (!i.raw.hovered_files.is_empty(), deposes, collees)
         });
         if survol {
             voile(ctx, habit);
@@ -150,7 +156,27 @@ impl Fenetre {
         if !deposes.is_empty() {
             joindre(deposes, self.rapport.clone());
         }
+        for image in collees {
+            joindre_l_image(image, self.rapport.clone());
+        }
     }
+}
+
+/// Une image collée, jointe comme un fichier dans un fil (la mettre en PNG prend un moment) : « Capture 2026-10-25
+/// 09-05-00.png », par la même fonction que la page ([`ecran::joindre`]) ; un refus va au chef, qui l'écrit au fil.
+fn joindre_l_image(image: Arc<egui::ColorImage>, rapport: Sender<Evt>) {
+    thread::spawn(move || {
+        let nom = format!("Capture {}.png", crate::journal::horodatage());
+        let [l, h] = image.size;
+        let rgba: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_srgba_unmultiplied()).collect();
+        let joint = match crate::cartes::png_rgba(l as u32, h as u32, &rgba) {
+            Ok(octets) => ecran::joindre(&nom, octets.len() as u64, octets.as_slice(), &rapport),
+            Err(e) => Err(PieceRefusee::echec(&nom, e)),
+        };
+        if let Err(refus) = joint {
+            let _ = rapport.send(Evt::Ui { action: "piece_erreur".into(), valeur: Value::String(refus.to_string()) });
+        }
+    });
 }
 
 /// Une pastille (P4, P5), comme celles de la page (`.piece`) : le trombone et le nom de la pièce (260 points au plus,
@@ -236,6 +262,13 @@ fn joindre_tous(chemins: &[PathBuf], rapport: &Sender<Evt>) {
             let _ = rapport.send(Evt::Ui { action: "piece_erreur".into(), valeur: Value::String(refus.to_string()) });
         }
     }
+}
+
+/// La boîte « Ouvrir » de Windows dans son fil, attachée à la fenêtre d'Eve, puis `suite` avec ce qu'on y a choisi
+/// (rien : annulée) ou ce qui l'a empêchée de s'ouvrir : le portrait d'Eve, que les réglages font choisir.
+pub(crate) fn choisir_puis(suite: impl FnOnce(Result<Vec<PathBuf>, String>) + Send + 'static) {
+    let proprietaire = fenetre_d_eve();
+    thread::spawn(move || suite(choisir(proprietaire)));
 }
 
 /// Le trombone cliqué : la boîte de dialogue dans son propre fil, attachée à la fenêtre d'Eve, puis les fichiers

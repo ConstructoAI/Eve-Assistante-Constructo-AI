@@ -137,6 +137,30 @@ fn triees(valeurs: &[f64]) -> Vec<f64> {
     v
 }
 
+/// Le bilan d'un jour (`date` : « 2026-10-25 ») d'après le journal : le nombre de tours de Claude qui répondaient à
+/// une demande, et ce qu'a coûté tout ce que Claude a fait ce jour-là, les tours silencieux compris (le préchauffage
+/// se paie aussi). Le journal est la seule source : la fenêtre et la réponse dite le relisent.
+pub fn bilan_du_jour(journal: &str, date: &str) -> (usize, f64) {
+    let du_jour: Vec<&str> = journal.lines().filter(|l| l.starts_with(date)).collect();
+    let series = lire_journal(&du_jour.join("\n"));
+    let demandes = series.iter().map(|s| s.tours.len()).sum();
+    let cout =
+        series.iter().flat_map(|s| s.tours.iter().map(|t| t.1).chain(s.silencieux.iter().copied())).flatten().sum();
+    (demandes, cout)
+}
+
+/// Un montant en dollars, comme on le dit au Québec : « 4,10 $ » ; « 0,004 $ » sous un cent.
+pub fn dollars(montant: f64) -> String {
+    let texte = if montant > 0.0 && montant < 0.01 { format!("{montant:.3}") } else { format!("{montant:.2}") };
+    format!("{} $", texte.replace('.', ","))
+}
+
+/// Une durée de tour : « 12 s », « 2 min 05 ».
+pub fn duree(secondes: f64) -> String {
+    let s = secondes.round().max(0.0) as u64;
+    if s < 60 { format!("{s} s") } else { format!("{} min {:02}", s / 60, s % 60) }
+}
+
 /// Ce que dit le journal pour une version du programme, un réglage de Claude et une oreille.
 #[derive(Debug, Default, PartialEq)]
 pub struct Serie {
@@ -419,6 +443,29 @@ mod essais {
         assert_eq!(cout_du_tour(None, 0.173), 0.173, "le premier tour de la séance");
         assert!((cout_du_tour(Some(0.173), 0.292) - 0.119).abs() < 1e-9);
         assert_eq!(cout_du_tour(Some(1.4), 0.17), 0.17, "le cumul a baissé : une séance neuve");
+    }
+
+    #[test]
+    fn le_bilan_du_jour_compte_les_demandes_et_tout_ce_qui_se_paie() {
+        let journal = "\
+2026-10-24 23:50:00 fin du tour (5.0 s, 0.5000 $ ; cumul 0.5000 $) : La veille.
+2026-10-25 07:00:00 Eve 9.0.0 (abc1234) démarre (Sam).
+2026-10-25 07:00:05 Claude Code lancé (claude-sonnet-5-5, effort medium)
+2026-10-25 07:00:09 fin du tour (2.7 s, 0.2300 $ ; cumul 0.2300 $) : Prête.
+2026-10-25 07:00:09 préchauffage fait : Eve est prête
+2026-10-25 08:12:00 fin du tour (9.1 s, 0.0410 $ ; cumul 0.2710 $) : Voilà le point.
+2026-10-25 08:30:00 fin du tour (12.0 s, 0.0000 $ ; cumul 0.2710 $) : Le tour s'est mal terminé.
+2026-10-25 09:00:00 fin du tour (4.0 s, 0.0190 $ ; cumul 0.2900 $) : C'est noté.
+";
+        let (demandes, cout) = bilan_du_jour(journal, "2026-10-25");
+        assert_eq!(demandes, 3, "le préchauffage n'est pas une demande");
+        assert!((cout - 0.29).abs() < 1e-9, "le préchauffage se paie : {cout}");
+        assert_eq!(bilan_du_jour(journal, "2026-10-26"), (0, 0.0));
+        assert_eq!(dollars(4.1), "4,10 $");
+        assert_eq!(dollars(0.0043), "0,004 $");
+        assert_eq!(dollars(0.0), "0,00 $");
+        assert_eq!(duree(9.4), "9 s");
+        assert_eq!(duree(125.0), "2 min 05");
     }
 
     #[test]

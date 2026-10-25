@@ -3771,7 +3771,7 @@ impl eframe::App for EssaiDeLHistorique {
                     ("toi", "Merci !", "09:31"),
                     ("eve", "Avec plaisir.", "09:31"),
                 ] {
-                    let ligne = Ligne { de, texte, heure, ancien: false, pieces: &[], en_cours: false };
+                    let ligne = Ligne { de, texte, heure, ancien: false, pieces: &[], en_cours: false, tour: "" };
                     natif::bulle(ui, &ligne, cartes, &mut gestes);
                 }
             });
@@ -5133,6 +5133,8 @@ struct EtatDuTheme {
     niveau: f64,
     fil: Vec<Value>,
     accord: Value,
+    /// Une phrase mal entendue, que la fenêtre met dans la saisie (le garde-fou de l'oreille).
+    a_corriger: Value,
     /// Une réponse inventée est due à cet instant (un texte écrit dans la fenêtre).
     reponse_a: Option<Instant>,
 }
@@ -5147,6 +5149,7 @@ impl EtatDuTheme {
             niveau: 0.0,
             fil: Vec::new(),
             accord: Value::Null,
+            a_corriger: Value::Null,
             reponse_a: None,
         }
     }
@@ -5185,7 +5188,8 @@ impl EtatDuTheme {
                             "eve",
                             "Trois échéances arrivent :\n- **Journée pédagogique** demain : pas d'école\n- \
                              L'**acompte provisionnel**, dans 6 jours\n- Le rendez-vous chez l'optométriste, dans 12 \
-                             jours\n---\nJe les ai lues dans `activite/echeances.js`.",
+                             jours\n---\nJe les ai lues dans `activite/echeances.js` ; le calendrier scolaire est sur \
+                             [quebec.ca](https://www.quebec.ca/education).",
                             "09:14",
                             false,
                         ),
@@ -5213,6 +5217,10 @@ impl EtatDuTheme {
                     "09:21",
                     false,
                 ));
+                // Ce que le tour a pris, comme le chef le publie sous une réponse de Claude.
+                if let Some(l) = self.fil.last_mut() {
+                    l["tour"] = Value::String("9 s · 0,03 $ · Sonnet 5.5, moyen".into());
+                }
                 self.prete();
             }
             "accord" => {
@@ -5230,6 +5238,10 @@ impl EtatDuTheme {
             "etroite" => {
                 self.accord = Value::Null;
                 self.fil.push(Self::ligne("systeme", "Les brouillons sont supprimés.", "", false));
+                // Ce que dirait le garde-fou de l'oreille d'une boucle, et la phrase repliée qu'il met dans la saisie.
+                let mal = "Mal entendu (une boucle de l'oreille) : rien n'est parti. La phrase est dans la saisie.";
+                self.fil.push(Self::ligne("systeme", mal, "", false));
+                self.a_corriger = serde_json::json!({ "numero": 1, "texte": "Ajoute du lait à l'épi" });
                 self.etat = "ecoute";
                 self.libelle = "Je t'écoute".into();
                 self.aide = "Relâche pour envoyer".into();
@@ -5297,6 +5309,7 @@ impl EtatDuTheme {
             "micro": "Le micro de l'essai",
             "oreille": "prete",
             "accord": self.accord,
+            "a_corriger": self.a_corriger,
             "activite": [],
             "outils": [],
             "pieces": [],
@@ -5513,6 +5526,8 @@ enum PasDesPieces {
     /// Ces fichiers inventés se glissent sur la fenêtre (le voile), jusqu'à ce qu'ils s'y déposent.
     Survoler(&'static [&'static str]),
     Deposer(&'static [&'static str]),
+    /// Une image collée (Ctrl+V après une capture d'écran), comme egui la donne : un petit rectangle bleu.
+    Coller,
     /// Le chef de l'essai tient ce nombre de pièces (le parcours l'attend six secondes au plus).
     Pieces(usize),
     /// Le pointeur sur la cible ; son bouton qui s'enfonce, qui se relâche.
@@ -5617,7 +5632,16 @@ fn parcours_des_pieces(selecteur: bool) -> VecDeque<PasDesPieces> {
             Capture("10-clair-choisies"),
         ]);
     }
-    v.extend([Taille(980.0, 820.0), Pause(1.5), Capture("11-clair-etroite"), Fin]);
+    v.extend([
+        Taille(980.0, 820.0),
+        Pause(1.5),
+        Capture("11-clair-etroite"),
+        Coller,
+        Pieces(if selecteur { 6 } else { 4 }),
+        Pause(0.8),
+        Capture("12-clair-collee"),
+        Fin,
+    ]);
     v.into()
 }
 
@@ -5859,6 +5883,11 @@ impl EssaiDesPieces {
                     entree.dropped_files.extend(
                         noms.iter().map(|n| Arc::new(FichierDepose(source.join(n))) as egui::DroppedFileHandle),
                     );
+                    0.0
+                }
+                PasDesPieces::Coller => {
+                    let image = egui::ColorImage::filled([64, 48], egui::Color32::from_rgb(0x25, 0x63, 0xEB));
+                    entree.events.push(egui::Event::PasteImage(Arc::new(image)));
                     0.0
                 }
                 PasDesPieces::Pieces(n) => {
@@ -6241,6 +6270,11 @@ fn bilan_des_pieces(
         let choisies = jointes(6, &[FICHIERS_DES_PIECES[0].0, FICHIERS_DES_PIECES[2].0]);
         verifications.push(("le trombone : sa boîte de dialogue, deux fichiers choisis, deux pièces", choisies));
     }
+    // L'image collée : la dernière pièce de la fenêtre, un PNG nommé d'après l'heure.
+    let collee = recues.iter().rev().find(|(nom, _, _)| nom.starts_with("Capture ")).is_some_and(|(nom, chemin, _)| {
+        nom.ends_with(".png") && std::fs::read(chemin).is_ok_and(|o| o.starts_with(b"\x89PNG"))
+    });
+    verifications.push(("une image collée (Ctrl+V) : une pièce, en PNG", collee));
     let par_la_page = recues.iter().any(|(nom, _, taille)| *nom == "depuis-la-page.txt" && *taille == 25);
     let vide_refusee = page_vide.ends_with("« vide-par-la-page.txt » est vide : non joint.");
     verifications.extend([
@@ -6279,7 +6313,7 @@ const PROFILS_D_ESSAI: [(&str, &str, bool); 3] = [
 /// réglages cochent le nouveau —, et ses profils mis à l'épreuve sans la souris de la personne : le nom sous « EVE »
 /// ouvre leur menu, un profil s'y choisit ; le menu ouvert reste à egui pour Windows (pas à la barre de titre, qui
 /// déplacerait la fenêtre) ; la rubrique « Profil » des réglages choisit aussi ; puis le même menu dans le thème
-/// « Constructo AI ». Le bilan dit ce qui va. `--captures` : la fenêtre, par elle-même, en PNG, à chaque étape. La
+/// « Constructo AI », et ses réglages défilés jusqu'au portrait d'Eve. Le bilan dit ce qui va. `--captures` : la fenêtre, par elle-même, en PNG, à chaque étape. La
 /// musique du centre se tait (A, S) avant de jouer.
 pub fn profils(args: &[String]) -> i32 {
     let captures = match args {
@@ -6503,6 +6537,8 @@ enum PasDesProfils {
     MenuAEgui,
     Reglages(bool),
     Theme(&'static str),
+    /// La molette sous le pointeur (en points ; négatif : vers le bas).
+    Molette(f32),
     Capture(&'static str),
     Fin,
 }
@@ -6516,7 +6552,8 @@ enum CibleDesProfils {
 }
 
 /// Le parcours : le menu de la barre (ouvert, survolé, un profil choisi), la rubrique des réglages (celui d'office
-/// choisi), puis le thème « Constructo AI » et son menu (un troisième profil).
+/// choisi), puis le thème « Constructo AI » et son menu (un troisième profil), et ses réglages défilés jusqu'au thème
+/// (le portrait d'Eve, qu'il est seul à montrer).
 fn parcours_des_profils() -> VecDeque<PasDesProfils> {
     use CibleDesProfils::{DesReglages, DuMenu, Menu};
     use PasDesProfils::*;
@@ -6566,6 +6603,13 @@ fn parcours_des_profils() -> VecDeque<PasDesProfils> {
         Actif("Designer"),
         Pause(0.8),
         Capture("09-clair-designer"),
+        Reglages(true),
+        Pause(1.0),
+        Survol(DesReglages("Designer")),
+        Molette(-700.0),
+        Pause(0.8),
+        Capture("10-clair-reglages"),
+        Reglages(false),
         Fin,
     ])
 }
@@ -6701,6 +6745,16 @@ impl EssaiDesProfils {
                         c.theme = t;
                     }
                     0.0
+                }
+                PasDesProfils::Molette(dy) => {
+                    entree.events.push(egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, dy),
+                        phase: egui::TouchPhase::Move,
+                        source: egui::MouseWheelSource::Wheel,
+                        modifiers: rien,
+                    });
+                    0.1
                 }
                 PasDesProfils::Capture(nom) => {
                     self.a_capturer.push(nom);

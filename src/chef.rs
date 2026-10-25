@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use eve::annuler::{self, Annulations};
 use eve::garde::{self, Decision, Espace};
 use eve::mesures::{self, Etape, Temps};
-use eve::parole::{self, EnFlux, GestePhoto};
+use eve::parole::{self, EnFlux, GestePhoto, Transcription};
 use eve::protocole::{self, Flux, Recu};
 use serde_json::{Value, json};
 
@@ -44,6 +44,7 @@ use crate::micro::{self, Micro};
 use crate::mise_a_jour::{self, Empeche, Relance};
 use crate::oreille::Demande;
 use crate::profils::{self, Laisse, Laisses};
+use crate::rappels::{self, Rappels};
 use crate::reglages::{Profil, Reglages, dossier_local, nom_affiche};
 use crate::sons::{self, Son};
 use crate::touche;
@@ -184,6 +185,19 @@ const ECOUTE_MAX: Duration = Duration::from_secs(45);
 const COUPE_APRES: Duration = Duration::from_millis(350);
 /// Après « Oui ? », le temps de commencer sa demande.
 const SUITE_DELAI: Duration = Duration::from_secs(8);
+/// La conversation du jour ne reprend après un redémarrage que si son dernier tour date de moins que cela : au-delà,
+/// le cache de Claude a refroidi, et reprendre une longue conversation coûterait plus qu'en ouvrir une neuve (la
+/// mémoire courte fait le pont).
+const REPRISE_MAX: i64 = 3600;
+/// Une conversation neuve chaque jour : passé cette heure, au premier moment libre après ce calme.
+const NOUVELLE_JOURNEE_A: u32 = 4;
+const CALME_AVANT_LA_NOUVELLE: Duration = Duration::from_secs(30 * 60);
+
+/// Claude Code qui n'a pas répondu à `initialize` en ce temps-là est relancé (le serveur de Constructo AI qui dort
+/// sur Render prend jusqu'à une minute à s'éveiller).
+const INIT_DELAI: Duration = Duration::from_secs(120);
+/// Ce qu'Eve a dit dans ce temps-là peut revenir par le micro : le garde-fou de l'oreille le reconnaît.
+const DIT_RECEMMENT: Duration = Duration::from_secs(30);
 /// L'état ne se publie pas plus souvent (le texte en cours d'écriture change à chaque mot).
 const PUBLICATION_MIN: Duration = Duration::from_millis(80);
 /// Le contexte de l'Adjointe reste une heure en cache chez Anthropic (cerveau.rs) : passé ce temps sans un tour, la
@@ -239,6 +253,8 @@ struct Ligne {
     pieces: Vec<String>,
     /// Un échange repris d'une séance précédente.
     ancien: bool,
+    /// Sous une réponse de Claude : ce que son tour a pris (« 12 s · 0,04 $ · Sonnet 5.5, moyen ») ; vide ailleurs.
+    tour: String,
 }
 
 struct Piece {
@@ -391,6 +407,21 @@ pub struct Chef {
     tour_numero: u64,
     /// Les copies des fichiers d'avant leur écriture ([`Annulations`]).
     annulations: Annulations,
+    /// Les rappels et les minuteries (`rappels.json` du dossier local), et la dernière fois qu'on les a regardés.
+    rappels: Rappels,
+    rappels_vus: Option<Instant>,
+    /// La panne de Claude vue dans le tour (sa sorte : « rate_limit », « overloaded », « reseau »…), dite à sa fin ; un
+    /// nouvel essai de l'API déjà dit dans le tour.
+    panne: String,
+    reessai_dit: bool,
+    /// La limite d'utilisation du compte : l'instant (Unix) où elle se rouvre, quand elle est atteinte ; et la dernière
+    /// limite dite (une seule fois chacune).
+    limite: Option<i64>,
+    limite_dite: Option<(String, Option<i64>)>,
+    /// Depuis quand Claude Code attend sa réponse à `initialize` : au-delà d'[`INIT_DELAI`], il est relancé.
+    init_attendue: Option<Instant>,
+    /// Le jour où la conversation de Claude a commencé (« 2026-10-25 ») : un autre jour, elle se renouvelle.
+    seance_du: Option<String>,
     /// Ce qu'Eve a fait de son côté (une annulation) : dit à l'Adjointe avec la demande suivante.
     note_pour_l_adjointe: Option<String>,
     /// Les temps de la demande en cours ; ceux d'une demande finie dont la première phrase n'est pas encore entendue.
@@ -399,6 +430,15 @@ pub struct Chef {
     /// Le cumul que Claude Code a rendu à la fin du tour d'avant (le coût de sa séance) : le coût d'un tour en est la
     /// différence. Il repart à chaque lancement.
     cumul: Option<f64>,
+    /// La dernière réponse, en pages pour la voix (`parole::pages_pour_la_voix`), et la prochaine page à dire : la
+    /// première s'est dite avec la réponse ; « la suite » dit les autres, « répète » la dernière dite.
+    pages: Vec<String>,
+    page: usize,
+    /// Les phrases qu'Eve vient de dire (30 s) : le garde-fou de l'oreille y reconnaît sa propre voix revenue par le
+    /// micro.
+    dit_recemment: VecDeque<(Instant, String)>,
+    /// La dernière phrase mal entendue (son numéro, son texte), publiée : la fenêtre la met dans la saisie, à corriger.
+    a_corriger: Option<(u64, String)>,
     pieces_du_tour: Vec<String>,
     attentes: VecDeque<Attente>,
     numero_accord: u64,
@@ -606,10 +646,22 @@ impl Chef {
             tour_a_la_voix: false,
             tour_numero: 0,
             annulations: Annulations::nouvelles(dossier_local().join("annuler")),
+            rappels: Rappels::ouvrir(&dossier_local()),
+            rappels_vus: None,
+            panne: String::new(),
+            reessai_dit: false,
+            limite: None,
+            limite_dite: None,
+            init_attendue: None,
+            seance_du: None,
             note_pour_l_adjointe: None,
             chrono: None,
             chrono_a_entendre: None,
             cumul: None,
+            pages: Vec::new(),
+            page: 0,
+            dit_recemment: VecDeque::new(),
+            a_corriger: None,
             pieces_du_tour: Vec::new(),
             attentes: VecDeque::new(),
             numero_accord: 0,
@@ -708,6 +760,13 @@ impl Chef {
             chef.session = Some(session);
             chef.reprendre = true;
             chef.memoire_a_donner = false;
+        } else if let Some(session) = seance_a_reprendre(chef.profil.as_ref().map(|p| p.nom.as_str())) {
+            // Redémarrée dans la journée : la conversation du jour reprend (`--resume`), sans préchauffage.
+            journal::ecrire(&format!("la conversation du jour reprend (session {session})"));
+            chef.session = Some(session);
+            chef.reprendre = true;
+            chef.memoire_a_donner = false;
+            chef.seance_du = Some(journal::date());
         }
         if let Some((fil, voix)) = depart.annonce {
             chef.systeme(&fil);
@@ -793,8 +852,10 @@ impl Chef {
                 } else if continue_ && let Some(reste) = parole::appel_a_eve(&t) {
                     // Dans la fenêtre d'après « Eve », la personne redit « Eve, … » : lu comme un appel — le nom s'ôte
                     // (« Eve, scanne cette facture » ouvre la caméra), et « Eve » seul redemande « Oui ? ».
-                    self.apres_eve(reste, depuis);
-                } else {
+                    if let Some(reste) = self.passer_l_oreille(reste, secondes_audio, secondes_calcul, depuis) {
+                        self.apres_eve(reste, depuis);
+                    }
+                } else if let Some(t) = self.passer_l_oreille(t, secondes_audio, secondes_calcul, depuis) {
                     self.phrase(t, Some(depuis));
                 }
             }
@@ -814,7 +875,9 @@ impl Chef {
             Evt::Eveil { demande, depuis } => {
                 self.transcriptions = self.transcriptions.saturating_sub(1);
                 journal::ecrire(&format!("demande après « Eve » : {demande}"));
-                self.apres_eve(parole::nettoyer_transcription(&demande), depuis);
+                if let Some(d) = self.passer_l_oreille(parole::nettoyer_transcription(&demande), 0.0, 0.0, depuis) {
+                    self.apres_eve(d, depuis);
+                }
             }
             Evt::Claude { generation, message } => {
                 if generation == self.generation {
@@ -910,6 +973,11 @@ impl Chef {
             }
             // Le site de Constructo AI, cliqué en haut de la fenêtre.
             ("site", _) => self.ouvrir_dans_le_navigateur(connexion::SITE.to_string()),
+            // Un lien d'une réponse, cliqué dans la fenêtre : seulement `https://` (une adresse du poste, même en
+            // `http://127.0.0.1`, ne s'ouvre jamais d'une réponse, que pourrait souffler une page lue par Claude).
+            ("ouvrir_lien", Some(url)) if url.starts_with("https://") => {
+                self.ouvrir_dans_le_navigateur(url.to_string())
+            }
             // Le thème de la fenêtre native, choisi dans ses réglages : l'un de ceux qu'elle offre.
             ("theme", Some(t)) if crate::reglages::THEMES.iter().any(|x| x.0 == t) => {
                 self.changer_reglage("theme", json!(t))
@@ -1877,6 +1945,25 @@ impl Chef {
             }
             return;
         }
+        // La voix sans Claude : « la suite », « répète », la sourdine (avant l'arrêt : « mode silence » la met).
+        if parole::demande_la_suite(&t) {
+            self.lire_la_suite();
+            return;
+        }
+        if parole::demande_de_repeter(&t) {
+            self.repeter();
+            return;
+        }
+        if let Some(sourdine) = parole::reglage_de_la_sourdine(&t) {
+            self.changer_reglage("sourdine", json!(sourdine));
+            if sourdine {
+                self.couper();
+                self.systeme("Sourdine : je réponds par écrit. Dis « parle » pour m'entendre.");
+            } else {
+                self.dire("D'accord, je parle de nouveau.");
+            }
+            return;
+        }
         if parole::demande_d_annuler(&t) {
             self.ajouter("toi", t, Vec::new());
             self.annuler_la_derniere_modification();
@@ -1894,6 +1981,50 @@ impl Chef {
             }
             return;
         }
+        // Ce qu'Eve a coûté aujourd'hui : relu dans le journal, sa seule source, sans Claude.
+        // Un rappel ou une minuterie dits : posés sans Claude (« rappelle-moi à 16 h d'appeler le plombier »).
+        if let Some(r) = parole::rappel_dit(&t) {
+            self.ajouter("toi", t.clone(), Vec::new());
+            self.poser_un_rappel_dit(&t, r);
+            return;
+        }
+        // Le point du jour : le tableau de bord, dit en une seconde, sans Claude.
+        if parole::demande_le_point(&t) {
+            self.ajouter("toi", t.clone(), Vec::new());
+            let point = self.point_du_jour();
+            if point.is_empty() {
+                let rien = "Rien de prévu aujourd'hui, et aucune échéance qui presse.";
+                self.repondre_sans_claude(&t, rien, rien);
+            } else {
+                let ecrit = point.iter().map(|l| format!("- {l}")).collect::<Vec<_>>().join("\n");
+                self.repondre_sans_claude(
+                    &t,
+                    &format!("Le point :\n{ecrit}"),
+                    &format!("Voici le point. {}", point.join(" ")),
+                );
+            }
+            return;
+        }
+        if parole::demande_le_cout(&t) {
+            self.ajouter("toi", t.clone(), Vec::new());
+            let (demandes, cout) = mesures::bilan_du_jour(&journal::lire_tout(&dossier_local()), &journal::date());
+            let (ecrit, dit) = if demandes == 0 && cout == 0.0 {
+                let r = "Aujourd'hui, Claude ne m'a encore rien coûté.".to_string();
+                (r.clone(), r)
+            } else {
+                let montant = mesures::dollars(cout);
+                let s = if demandes > 1 { "s" } else { "" };
+                (
+                    format!(
+                        "Aujourd'hui : environ **{montant}**, pour {demandes} demande{s}.\n---\nLe prix de Claude au tarif \
+                         de l'API, d'après le journal ; avec un abonnement, c'en est l'équivalent."
+                    ),
+                    format!("Aujourd'hui, environ {}, pour {demandes} demande{s}.", montant.replace('$', "dollars")),
+                )
+            };
+            self.repondre_sans_claude(&t, &ecrit, &dit);
+            return;
+        }
         let pieces = std::mem::take(&mut self.pieces);
         let noms: Vec<String> = pieces.iter().map(|p| p.nom.clone()).collect();
         self.ajouter("toi", t.clone(), noms.clone());
@@ -1902,7 +2033,12 @@ impl Chef {
             self.dire(&format!("Je ne peux pas : {} n'est pas démarré{}. Le détail est à l'écran.", n.le, n.e));
             return;
         }
-        let mut message = String::new();
+        // L'heure de la demande, que Claude Code ne sait pas (il n'a que la date) : pour un rappel, « dans une heure ».
+        let mut message = format!(
+            "[Eve : nous sommes le {}, il est {}.]\n\n",
+            crate::ambiance::date_longue(&journal::date()).to_lowercase(),
+            rappels::heure_dite(&journal::date_et_heure(), &journal::date())
+        );
         if std::mem::take(&mut self.memoire_a_donner) && !self.memoire.is_empty() {
             message.push_str(&memoire::pour_l_adjointe(&self.reglages.qui, &self.memoire));
             message.push_str("\n\n");
@@ -1925,7 +2061,19 @@ impl Chef {
         if parole::demande_le_resume(&t) {
             message.push_str(&actions_du_jour());
         } else if parole::demande_les_nouvelles(&t) {
-            message.push_str(&self.releve_d_eve());
+            // L'Adjointe a sa veille des courriels ; un spécialiste n'en a pas (il aurait lu « rien de neuf dans la veille
+            // des courriels ») : il reçoit le point de son tableau de bord.
+            if self.reglages.specialiste() {
+                let point = self.point_du_jour();
+                let point = if point.is_empty() {
+                    "rien de prévu, aucune échéance qui presse".into()
+                } else {
+                    point.join(" ")
+                };
+                message.push_str(&format!("\n\n[Le tableau de bord d'Eve, à cette heure : {point}]"));
+            } else {
+                message.push_str(&self.releve_d_eve());
+            }
             self.dernier_point = Some(journal::heure());
         } else if parole::parle_du_calendrier(&t) {
             message.push_str(&self.calendrier_pour_l_adjointe());
@@ -2100,6 +2248,7 @@ impl Chef {
                 heure: e.heure.clone(),
                 pieces: e.pieces.clone(),
                 ancien: true,
+                tour: String::new(),
             });
             self.fil.push(Ligne {
                 de: "eve",
@@ -2107,6 +2256,7 @@ impl Chef {
                 heure: e.heure.clone(),
                 pieces: Vec::new(),
                 ancien: true,
+                tour: String::new(),
             });
         }
         self.fil_rev += 1;
@@ -2257,7 +2407,14 @@ impl Chef {
                         ));
                     }
                 }
+                if self.session.as_deref() != Some(session.as_str()) || self.seance_du.is_none() {
+                    // Une séance neuve commence aujourd'hui ; une séance reprise garde son jour.
+                    if !self.lance_en_reprise || self.seance_du.is_none() {
+                        self.seance_du = Some(journal::date());
+                    }
+                }
                 self.session = Some(session);
+                self.noter_la_seance();
                 if self.jeton.as_ref().is_some_and(Option::is_some) {
                     let en_connexion = serveurs.iter().any(|(n, s)| n == "entrepreneur-general" && s == "pending");
                     if self.prechauffage && en_connexion {
@@ -2273,7 +2430,11 @@ impl Chef {
                 }
             }
             Recu::Flux(f) => self.flux_recu(f),
-            Recu::Adjointe { outils, .. } => {
+            Recu::Adjointe { outils, panne, .. } => {
+                if !panne.is_empty() {
+                    journal::ecrire(&format!("Claude rend une erreur de l'API : {panne}"));
+                    self.panne = panne;
+                }
                 for (id, nom, entree) in outils {
                     let resume = protocole::resume_outil(&nom, entree);
                     journal::ecrire(&format!("outil {resume}"));
@@ -2332,6 +2493,7 @@ impl Chef {
             }
             Recu::Reponse { id, reussie, erreur, corps } => {
                 if id == self.id_init {
+                    self.init_attendue = None;
                     if reussie {
                         self.init_ok = true;
                         journal::ecrire("garde branchée (initialisation acceptée)");
@@ -2368,6 +2530,25 @@ impl Chef {
                 }
             }
             Recu::Agents(agents) => self.suivre_les_agents(agents),
+            Recu::Limite { etat, reprise, sorte, part } => self.suivre_la_limite(&etat, reprise, &sorte, part),
+            Recu::Reessai { tentative, permis, panne, sans_reponse } => {
+                journal::ecrire(&format!(
+                    "Claude Code réessaie l'API ({tentative}/{permis}) : {panne}{}",
+                    if sans_reponse { ", aucune réponse" } else { "" }
+                ));
+                let panne = if sans_reponse { "reseau".to_string() } else { panne };
+                // À la deuxième tentative, Eve le dit une fois : sans cela, un long silence.
+                if tentative >= 2 && !self.reessai_dit {
+                    self.reessai_dit = true;
+                    self.dire(match panne.as_str() {
+                        "reseau" => "Claude ne répond pas ; je réessaie.",
+                        "overloaded" => "Claude est surchargé ; je réessaie.",
+                        "rate_limit" => "Claude me fait attendre ; je réessaie.",
+                        _ => "Claude a un souci ; je réessaie.",
+                    });
+                }
+                self.panne = panne;
+            }
             Recu::Autre => {}
         }
     }
@@ -2474,18 +2655,50 @@ impl Chef {
         self.dernier_tour = Instant::now();
         self.activite.clear();
         self.en_route.clear();
-        // Claude Code rend le cumul de sa séance : le coût du tour en est la différence. Au dix-millième : un tour de
-        // Haiku coûte moins d'un dixième de cent.
-        let cout = cout.map(|c| format!("{:.4} $ ; cumul {c:.4} $", mesures::cout_du_tour(self.cumul.replace(c), c)));
+        // Claude Code rend le cumul de sa séance : le coût du tour en est la différence. Dans une même séance (le cumul
+        // repart à chaque lancement de Claude Code), il ne baisse jamais : un cumul plus bas — un tour en erreur rend
+        // parfois 0 $ — ne compte pour rien, et ne remet pas le compte à zéro (le tour suivant aurait compté toute la
+        // séance). Au dix-millième : un tour de Haiku coûte moins d'un dixième de cent.
+        let du_tour = cout.map(|c| match self.cumul {
+            Some(avant) if c < avant => 0.0,
+            avant => {
+                self.cumul = Some(c);
+                mesures::cout_du_tour(avant, c)
+            }
+        });
+        let secondes = duree_ms.unwrap_or(0) as f64 / 1000.0;
+        let cumul = self.cumul.unwrap_or_default();
         journal::ecrire(&format!(
-            "fin du tour ({:.1} s, {}) : {}",
-            duree_ms.unwrap_or(0) as f64 / 1000.0,
-            cout.unwrap_or_default(),
+            "fin du tour ({secondes:.1} s, {}) : {}",
+            du_tour.map(|t| format!("{t:.4} $ ; cumul {cumul:.4} $")).unwrap_or_default(),
             garde::ecourter(&texte, 400)
         ));
+        // Ce que la réponse a pris, montré sous elle : sa durée, son coût, le cerveau qui l'a faite.
+        let cerveau = format!(
+            "{}, {}",
+            crate::reglages::nom_du_modele(&self.reglages.modele),
+            crate::reglages::nom_de_l_effort(&self.reglages.effort)
+        );
+        let tour = match du_tour {
+            Some(t) => format!("{} · {} · {cerveau}", mesures::duree(secondes), mesures::dollars(t)),
+            None => format!("{} · {cerveau}", mesures::duree(secondes)),
+        };
         if std::mem::take(&mut self.prechauffage) {
             self.en_cours.clear();
             self.flux.nouveau_tour();
+            // Un préchauffage en erreur : la personne le sait avant sa première demande (un compte déconnecté, une
+            // limite atteinte), au lieu d'une Eve « prête » qui échouera.
+            if erreur {
+                journal::ecrire(&format!("le préchauffage a échoué : {}", garde::ecourter(&texte, 300)));
+                match self.phrase_de_la_panne() {
+                    Some((ecrit, dit)) => {
+                        self.systeme(&ecrit);
+                        self.dire_a_voix_haute(&dit);
+                    }
+                    None => self
+                        .systeme(&format!("{} ne répond pas comme il faut : voir le journal.", self.nommee().le_maj)),
+                }
+            }
             if std::mem::take(&mut self.rechauffer) && self.rechauffages < 2 {
                 // La base s'est branchée pendant ce tour : un second, silencieux, met le bon contexte en cache.
                 self.rechauffages += 1;
@@ -2523,7 +2736,14 @@ impl Chef {
                 self.historiser(d, &t, "erreur");
             }
             self.ajouter("eve", t, Vec::new());
-            self.dire("Il y a eu un problème. Le détail est à l'écran.");
+            // La panne dite pour ce qu'elle est (la limite, le compte, le réseau…), sinon le message d'office.
+            match self.phrase_de_la_panne() {
+                Some((ecrit, dit)) => {
+                    self.systeme(&ecrit);
+                    self.dire_a_voix_haute(&dit);
+                }
+                None => self.dire("Il y a eu un problème. Le détail est à l'écran."),
+            }
         } else {
             if let Some(d) = &demande {
                 self.historiser(d, &affiche, "");
@@ -2531,6 +2751,16 @@ impl Chef {
             // Un tour vide (Claude Code en rend un quand un agent a fini sans qu'il ait rien à dire) : pas de bulle vide.
             if !affiche.trim().is_empty() {
                 self.ajouter("eve", affiche.clone(), Vec::new());
+                if let Some(l) = self.fil.last_mut() {
+                    l.tour = tour;
+                }
+                // Ses pages pour la voix : la première vient de se dire (en sourdine, « répète » la dira).
+                self.pages = parole::pages_pour_la_voix(&affiche);
+                self.page = 1;
+                // Les rappels que Claude a posés : ses cartes « rappel », dans rappels.json.
+                for json in crate::natif::cartes_de(&affiche) {
+                    self.poser_un_rappel_de_claude(&json);
+                }
             }
             if !a_parle {
                 // Sans la réponse en flux (une ancienne version de Claude Code) : la réponse entière, d'un coup.
@@ -2546,6 +2776,8 @@ impl Chef {
         }
         self.ranger_le_chrono();
         self.flux.nouveau_tour();
+        // Le dernier tour de la séance, au fichier : un redémarrage proche la reprendra.
+        self.noter_la_seance();
         self.suivant();
     }
 
@@ -2619,8 +2851,16 @@ impl Chef {
                 heure: e.heure.clone(),
                 pieces: Vec::new(),
                 ancien: true,
+                tour: String::new(),
             });
-            self.fil.push(Ligne { de: "eve", texte: e.reponse, heure: e.heure, pieces: Vec::new(), ancien: true });
+            self.fil.push(Ligne {
+                de: "eve",
+                texte: e.reponse,
+                heure: e.heure,
+                pieces: Vec::new(),
+                ancien: true,
+                tour: String::new(),
+            });
         }
         self.fil_rev += 1;
     }
@@ -2829,6 +3069,7 @@ impl Chef {
                 }
                 self.id_init = c.id_init.clone();
                 self.cerveau = Some(c);
+                self.init_attendue = Some(Instant::now());
                 self.cumul = None;
                 self.outils_vus = false;
                 // Une séance neuve n'a aucun serveur d'Eve : Constructo AI s'y rebranche après l'initialisation.
@@ -2920,6 +3161,7 @@ impl Chef {
         self.en_cours.clear();
         self.flux.nouveau_tour();
         self.session = None;
+        self.seance_du = None;
         self.reprendre = false;
         self.rechauffer = false;
         self.rechauffages = 0;
@@ -2993,6 +3235,9 @@ impl Chef {
         self.suivi_du_tour(maintenant);
         self.garder_au_chaud(maintenant);
         self.dire_les_alertes(maintenant);
+        self.sonner_les_rappels(maintenant);
+        self.surveiller_l_initialisation(maintenant);
+        self.renouveler_la_conversation(maintenant);
         if self.attentes.front().is_some_and(|a| maintenant.duration_since(a.depuis) > ACCORD_DELAI) {
             self.systeme("Pas de réponse en trois minutes : l'écriture est refusée.");
             self.decider(false);
@@ -3314,6 +3559,9 @@ impl Chef {
         self.parole_id += 1;
         self.parle = true;
         self.voix.dire(self.parole_id, texte);
+        let maintenant = Instant::now();
+        self.dit_recemment.retain(|(quand, _)| maintenant.duration_since(*quand) < DIT_RECEMMENT);
+        self.dit_recemment.push_back((maintenant, texte.to_string()));
         Some(self.parole_id)
     }
 
@@ -3344,7 +3592,7 @@ impl Chef {
     }
 
     fn ajouter(&mut self, de: &'static str, texte: String, pieces: Vec<String>) {
-        self.fil.push(Ligne { de, texte, heure: journal::heure(), pieces, ancien: false });
+        self.fil.push(Ligne { de, texte, heure: journal::heure(), pieces, ancien: false, tour: String::new() });
         self.fil_rev += 1;
         if self.fil.len() > FIL_MAX {
             let trop = self.fil.len() - FIL_MAX;
@@ -3354,6 +3602,283 @@ impl Chef {
 
     fn systeme(&mut self, texte: &str) {
         self.ajouter("systeme", texte.to_string(), Vec::new());
+    }
+
+    /// Le garde-fou de l'oreille ([`parole::juger_la_transcription`]) : une phrase douteuse ne part pas à Claude — Eve
+    /// dit qu'elle a mal entendu et la met dans la saisie, à corriger ; sa propre voix revenue par le micro s'ignore ;
+    /// une boucle se replie. Rend ce qui part. Une réponse à une demande d'accord a ses propres règles : elle passe.
+    /// `depuis` : la fin de la parole entendue ; sa voix ne se cherche que si Eve parlait pendant que le son se prenait
+    /// (on lui répond souvent avec ses mots à elle).
+    fn passer_l_oreille(&mut self, t: String, parole_s: f32, calcul_s: f32, depuis: Instant) -> Option<String> {
+        if t.is_empty() || !self.attentes.is_empty() {
+            return Some(t);
+        }
+        let maintenant = Instant::now();
+        // Le début du son (une seconde de marge ; la demande d'après « Eve » n'a pas de durée : quatre secondes).
+        let duree = if parole_s > 0.0 { parole_s + 1.0 } else { 4.0 };
+        let debut = depuis.checked_sub(Duration::from_secs_f32(duree)).unwrap_or(depuis);
+        let parlait = self.parle || self.fin_parole.is_some_and(|f| f >= debut);
+        let dites: Vec<String> = if parlait {
+            self.dit_recemment
+                .iter()
+                .filter(|(quand, _)| maintenant.duration_since(*quand) < DIT_RECEMMENT)
+                .map(|(_, p)| p.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // La carte graphique : une phrase y prend moins de deux secondes, une boucle bien plus (sur le processeur, une
+        // phrase courte en prend déjà sept).
+        let sur_la_carte = self.oreille_etat.1.contains("sur la carte graphique");
+        match parole::juger_la_transcription(&t, parole_s, calcul_s, sur_la_carte, &dites) {
+            Transcription::Juste(j) => {
+                if j != t {
+                    journal::ecrire(&format!("repliée (une boucle de l'oreille) : {j}"));
+                }
+                Some(j)
+            }
+            Transcription::Douteuse { texte, raison } => {
+                journal::ecrire(&format!("douteuse ({raison}) : rien n'est parti à Claude"));
+                self.systeme(&format!("Mal entendu ({raison}) : rien n'est parti. La phrase est dans la saisie."));
+                let numero = self.a_corriger.as_ref().map_or(1, |(n, _)| n + 1);
+                self.a_corriger = Some((numero, texte));
+                self.dire("Je n'ai pas bien entendu. Redis-le, ou corrige-le à l'écran.");
+                None
+            }
+            Transcription::MaVoix => {
+                journal::ecrire("ma propre voix, revenue par le micro : ignorée");
+                None
+            }
+        }
+    }
+
+    /// La phrase de la panne vue dans ce tour (`parole::phrase_de_panne`), avec l'heure où la limite se rouvre ; la
+    /// panne s'oublie (le tour suivant a les siennes).
+    fn phrase_de_la_panne(&mut self) -> Option<(String, String)> {
+        let panne = std::mem::take(&mut self.panne);
+        self.reessai_dit = false;
+        let reprise = self.limite.and_then(rappels::heure_locale).map(|a| rappels::heure_dite(&a, &journal::date()));
+        parole::phrase_de_panne(&panne, reprise.as_deref(), self.reglages.modele.contains("opus"))
+    }
+
+    /// La limite d'utilisation du compte, que Claude Code dit à chaque appel : atteinte, Eve le dit une fois (et
+    /// jusqu'à quand) ; presque atteinte, une ligne au fil, une fois ; ouverte, rien.
+    fn suivre_la_limite(&mut self, etat: &str, reprise: Option<i64>, sorte: &str, part: Option<f64>) {
+        if etat == "allowed" {
+            self.limite = None;
+            return;
+        }
+        let quand = reprise.and_then(rappels::heure_locale).map(|a| rappels::heure_dite(&a, &journal::date()));
+        let pourcent =
+            part.map(|p| if p <= 1.0 { p * 100.0 } else { p }).map(|p| format!(" ({p:.0} %)")).unwrap_or_default();
+        journal::ecrire(&format!(
+            "limite de Claude : {etat}, {sorte}{pourcent}{}",
+            quand.as_ref().map(|q| format!(", se rouvre {q}")).unwrap_or_default()
+        ));
+        // Atteinte : la fin du tour le dira, avec l'heure où elle se rouvre.
+        if etat == "rejected" {
+            self.limite = reprise;
+            self.panne = "rate_limit".into();
+            return;
+        }
+        let cle = (etat.to_string(), reprise);
+        if self.limite_dite.as_ref() != Some(&cle) {
+            self.limite_dite = Some(cle);
+            let quand = quand.map(|q| format!(" ; elle se rouvre {q}")).unwrap_or_default();
+            self.systeme(&format!("Ma limite d'utilisation de Claude est presque atteinte{pourcent}{quand}."));
+        }
+    }
+
+    /// La séance de Claude au fichier `seance.json` du dossier local : son jour, son profil, son numéro, et l'instant de
+    /// son dernier tour. Un redémarrage dans l'heure la reprend ([`seance_a_reprendre`]).
+    fn noter_la_seance(&self) {
+        let Some(session) = &self.session else { return };
+        let seance = json!({
+            "jour": self.seance_du.clone().unwrap_or_else(journal::date),
+            "profil": self.profil.as_ref().map(|p| p.nom.as_str()).unwrap_or(""),
+            "session": session,
+            "vu": journal::date_et_heure(),
+        });
+        let chemin = dossier_local().join("seance.json");
+        if let Err(e) = crate::reglages::ecrire_d_un_geste(&chemin, seance.to_string().as_bytes()) {
+            journal::ecrire(&format!("seance.json ne s'écrit pas : {e}"));
+        }
+    }
+
+    /// Une conversation par jour : la séance d'un autre jour, passé [`NOUVELLE_JOURNEE_A`] h, au premier moment libre
+    /// après [`CALME_AVANT_LA_NOUVELLE`] de calme, laisse la place à une neuve — les tours ne s'alourdissent plus de
+    /// tout ce qui s'est dit les jours d'avant (la mémoire courte fait le pont). Les conversations laissées par les
+    /// autres profils s'oublient aussi.
+    fn renouveler_la_conversation(&mut self, maintenant: Instant) {
+        let aujourdhui = journal::date();
+        let Some(du) = &self.seance_du else { return };
+        let heure: u32 = journal::heure().get(..2).and_then(|h| h.parse().ok()).unwrap_or(0);
+        let libre = self.init_ok
+            && self.tours == 0
+            && self.en_attente.is_empty()
+            && self.attentes.is_empty()
+            && self.agents.is_empty()
+            && self.compte_rendu_attendu.is_none()
+            && !self.parle
+            && !self.ecoute;
+        if *du == aujourdhui
+            || heure < NOUVELLE_JOURNEE_A
+            || !libre
+            || maintenant.duration_since(self.dernier_tour) < CALME_AVANT_LA_NOUVELLE
+        {
+            return;
+        }
+        journal::ecrire(&format!("nouvelle journée : la conversation du {du} laisse la place à une neuve"));
+        self.laisses.oublier();
+        self.nouvelle_conversation("— Nouvelle journée : une conversation neuve —", false);
+    }
+
+    /// Claude Code qui ne répond pas à `initialize` en [`INIT_DELAI`] : arrêté et relancé, comme s'il s'était arrêté
+    /// (trois fois en deux minutes, Eve le dit et cesse).
+    fn surveiller_l_initialisation(&mut self, maintenant: Instant) {
+        if self.init_ok || !self.init_attendue.is_some_and(|t| maintenant.duration_since(t) > INIT_DELAI) {
+            return;
+        }
+        self.init_attendue = None;
+        journal::ecrire("Claude Code ne répond pas à l'initialisation en deux minutes : je le relance");
+        if let Some(c) = self.cerveau.take() {
+            c.tuer();
+        }
+        self.claude_fini();
+    }
+
+    /// Le point du jour ([`crate::centre::Centre::point_du_jour`]) : le tableau de bord lu d'un coup — les fichiers
+    /// d'`activite\`, la comptabilité nommée, les rappels.
+    fn point_du_jour(&self) -> Vec<String> {
+        let dossier = self.reglages.dossier_adjointe();
+        let centre =
+            crate::centre::Centre::lu_maintenant(dossier.as_deref(), &dossier_local(), &self.reglages.comptabilite);
+        centre.point_du_jour(&journal::date(), &journal::heure())
+    }
+
+    /// Un rappel ou une minuterie dits (la voie rapide) : posés dans rappels.json, puis l'heure retenue, au fil et à
+    /// voix haute.
+    fn poser_un_rappel_dit(&mut self, demande: &str, r: parole::RappelDit) {
+        let maintenant = journal::date_et_heure();
+        let Some(a) = rappels::heure_du_rappel(r.quand, &maintenant) else {
+            let non = "Je n'arrive pas à placer cette heure : redis-la autrement.";
+            self.repondre_sans_claude(demande, non, non);
+            return;
+        };
+        let texte = match (r.minuterie, r.quand) {
+            (true, parole::Quand::Dans(s)) => {
+                let duree = rappels::duree_en_mots(s);
+                if r.texte.is_empty() {
+                    format!("La minuterie de {duree} est finie.")
+                } else {
+                    format!("{} : la minuterie de {duree} est finie.", majuscule(&r.texte))
+                }
+            }
+            _ if r.texte.is_empty() => "c'est l'heure.".to_string(),
+            _ => r.texte.clone(),
+        };
+        let quand = rappels::heure_dite(&a, &journal::date());
+        let quand = if quand.starts_with(|c: char| c.is_ascii_digit()) { format!("à {quand}") } else { quand };
+        match self.rappels.poser(a, texte.clone(), r.minuterie) {
+            Ok(_) if r.minuterie => {
+                let ecrit = format!("Minuterie lancée : elle sonne **{quand}**.");
+                self.repondre_sans_claude(demande, &ecrit, &format!("C'est parti. Elle sonne {quand}."));
+            }
+            Ok(_) => {
+                let ecrit = format!("Rappel noté, **{quand}** : {texte}");
+                self.repondre_sans_claude(demande, &ecrit, &format!("C'est noté. Je te le rappelle {quand}."));
+            }
+            Err(e) => {
+                journal::ecrire(&format!("rappel non posé : {e}"));
+                let non = "Je n'arrive pas à noter ce rappel. Le détail est au journal.";
+                self.repondre_sans_claude(demande, non, non);
+            }
+        }
+    }
+
+    /// Une carte « rappel » de Claude (`{"type":"rappel","a":"AAAA-MM-JJ HH:MM","texte":"…"}`) : posée dans
+    /// rappels.json. Sa réponse a déjà dit l'heure ; une carte fausse va au journal.
+    fn poser_un_rappel_de_claude(&mut self, json: &str) {
+        let Ok(v) = serde_json::from_str::<Value>(json).or_else(|_| json5::from_str::<Value>(json)) else { return };
+        if v["type"] != "rappel" {
+            return;
+        }
+        let texte = v["texte"].as_str().unwrap_or("").trim();
+        let texte = if texte.is_empty() { "c'est l'heure." } else { texte };
+        match v["a"].as_str().and_then(rappels::heure_ecrite) {
+            Some(a) => match self.rappels.poser(a.clone(), texte.to_string(), false) {
+                Ok(_) => journal::ecrire(&format!("rappel posé par Claude, {a} : {texte}")),
+                Err(e) => journal::ecrire(&format!("rappel de Claude non posé : {e}")),
+            },
+            None => journal::ecrire(&format!("une carte « rappel » sans heure lisible : {json}")),
+        }
+    }
+
+    /// Les rappels dus, une fois par seconde : la cloche, le rappel au fil (en alerte) et à voix haute — même la nuit ;
+    /// en sourdine, la cloche et le fil. Un rappel manqué (Eve fermée à son heure) dit l'heure qu'il avait.
+    fn sonner_les_rappels(&mut self, maintenant: Instant) {
+        if self.rappels_vus.is_some_and(|t| maintenant.duration_since(t) < Duration::from_secs(1)) {
+            return;
+        }
+        self.rappels_vus = Some(maintenant);
+        self.rappels.relire();
+        let heure = journal::date_et_heure();
+        for r in self.rappels.sonner(&heure) {
+            let mut phrase = r.phrase();
+            if rappels::secondes_entre(&r.a, &heure) > 120 {
+                let prevu = rappels::heure_dite(&r.a, &journal::date());
+                let prevu = if prevu.starts_with(|c: char| c.is_ascii_digit()) { format!("à {prevu}") } else { prevu };
+                phrase = format!("{phrase} (prévu {prevu}, quand j'étais fermée)");
+            }
+            journal::ecrire(&format!("rappel sonné : {phrase}"));
+            self.son(Son::Alerte);
+            self.ajouter("alerte", phrase.clone(), Vec::new());
+            self.dire_a_voix_haute(&phrase);
+        }
+    }
+
+    /// « La suite » : la page suivante de la dernière réponse, dite ; si d'autres suivent, Eve le dit. En sourdine, ou
+    /// sans rien de plus à lire, elle le dit aussi.
+    fn lire_la_suite(&mut self) {
+        if self.reglages.sourdine {
+            self.systeme("Je suis en sourdine : dis « parle » pour m'entendre.");
+            return;
+        }
+        let Some(page) = self.pages.get(self.page).cloned() else {
+            self.dire(if self.pages.is_empty() { "Je n'ai rien à lire." } else { "C'est tout." });
+            return;
+        };
+        journal::ecrire(&format!("la suite, sans Claude : page {} sur {}", self.page + 1, self.pages.len()));
+        self.page += 1;
+        self.couper();
+        self.dire_a_voix_haute(&page);
+        if self.page < self.pages.len() {
+            self.dire_a_voix_haute("Dis « la suite » pour continuer.");
+        }
+    }
+
+    /// « Répète » : la dernière page dite de la dernière réponse, de nouveau.
+    fn repeter(&mut self) {
+        if self.reglages.sourdine {
+            self.systeme("Je suis en sourdine : dis « parle » pour m'entendre.");
+            return;
+        }
+        let Some(page) = self.page.checked_sub(1).and_then(|k| self.pages.get(k)).cloned() else {
+            self.dire("Je n'ai rien à répéter.");
+            return;
+        };
+        journal::ecrire("répète, sans Claude");
+        self.couper();
+        self.dire_a_voix_haute(&page);
+    }
+
+    /// Une réponse d'Eve elle-même à `demande`, sans Claude (la voie rapide) : `ecrit` au fil et à l'historique, `dit` à
+    /// voix haute (en sourdine, écrite seulement).
+    fn repondre_sans_claude(&mut self, demande: &str, ecrit: &str, dit: &str) {
+        journal::ecrire(&format!("réponse d'Eve, sans Claude : {}", garde::ecourter(ecrit, 400)));
+        self.historiser(demande, ecrit, "");
+        self.ajouter("eve", ecrit.to_string(), Vec::new());
+        self.dire_a_voix_haute(dit);
     }
 
     /// L'état à l'écran : son nom (la classe de l'orbe), son libellé, et l'aide (les touches entre crochets).
@@ -3403,6 +3928,14 @@ impl Chef {
         if self.oreille_etat.0 == "chargement" {
             return ("demarrage", "Presque prête…".into(), "L'oreille se charge ; tu peux déjà écrire".into());
         }
+        // La sourdine se voit : sans elle, une Eve muette semble en panne (une sourdine mise le soir, oubliée le matin).
+        if self.reglages.sourdine {
+            return (
+                "pret",
+                "Prête · en sourdine".into(),
+                "Je réponds par écrit — dis « parle » pour m'entendre".into(),
+            );
+        }
         if self.reglages.eveil && self.micro.is_some() {
             return ("pret", "Prête".into(), format!("Dis « Eve… » — ou maintiens [{touche}] pour parler"));
         }
@@ -3451,9 +3984,10 @@ impl Chef {
             "activite": self.activite,
             "outils": self.outils,
             "pieces": self.pieces.iter().map(|p| json!({ "id": p.id, "nom": p.nom, "taille": p.taille })).collect::<Vec<_>>(),
+            "a_corriger": self.a_corriger.as_ref().map(|(numero, texte)| json!({ "numero": numero, "texte": texte })),
             "fil_rev": self.fil_rev,
             "fil": self.fil.iter().map(|l| json!({
-                "de": l.de, "texte": l.texte, "heure": l.heure, "pieces": l.pieces, "ancien": l.ancien }))
+                "de": l.de, "texte": l.texte, "heure": l.heure, "pieces": l.pieces, "ancien": l.ancien, "tour": l.tour }))
                 .collect::<Vec<_>>(),
             "en_cours": if self.en_cours.trim().is_empty() || self.prechauffage { Value::Null } else { json!({ "texte": self.en_cours }) },
             "voix": { "liste": self.voix_liste, "choisie": self.voix_choisie },
@@ -3625,6 +4159,22 @@ fn sans_cartes(t: &str) -> String {
     sortie
 }
 
+/// La séance de Claude à reprendre au démarrage (`seance.json` du dossier local) : celle de ce jour, du même profil
+/// (`profil` : son nom ; `None` : celui d'office), dont le dernier tour date de moins de [`REPRISE_MAX`] secondes.
+fn seance_a_reprendre(profil: Option<&str>) -> Option<String> {
+    let texte = std::fs::read_to_string(dossier_local().join("seance.json")).ok()?;
+    seance_valable(&serde_json::from_str(&texte).ok()?, profil, &journal::date_et_heure())
+}
+
+/// [`seance_a_reprendre`], à l'instant `maintenant` (« AAAA-MM-JJ HH:MM:SS »).
+fn seance_valable(s: &Value, profil: Option<&str>, maintenant: &str) -> Option<String> {
+    let recent = rappels::secondes_entre(s["vu"].as_str()?, maintenant);
+    let meme = maintenant.starts_with(s["jour"].as_str()?)
+        && s["profil"].as_str().unwrap_or("") == profil.unwrap_or("")
+        && (0..REPRISE_MAX).contains(&recent);
+    meme.then(|| s["session"].as_str().map(str::to_string)).flatten().filter(|id| !id.is_empty())
+}
+
 /// Le dossier de travail manque : une Eve qui porte son propre nom le dit avec celui que son lanceur a nommé, qui a perdu
 /// de quoi travailler ; celle d'Entrepreneur Général renvoie à son réglage.
 fn dossier_introuvable() -> String {
@@ -3669,4 +4219,20 @@ fn actions_du_jour() -> String {
         if debut > 0 { ", les 150 dernières" } else { "" },
         lignes[debut..].join("\n")
     )
+}
+
+#[cfg(test)]
+mod essais {
+    use super::*;
+
+    #[test]
+    fn la_conversation_du_jour_reprend_dans_l_heure() {
+        let s = json!({ "jour": "2026-10-25", "profil": "", "session": "abc", "vu": "2026-10-25 09:30:00" });
+        assert_eq!(seance_valable(&s, None, "2026-10-25 10:00:00").as_deref(), Some("abc"));
+        assert_eq!(seance_valable(&s, None, "2026-10-25 10:31:00"), None, "plus d'une heure : le cache a refroidi");
+        assert_eq!(seance_valable(&s, None, "2026-10-26 09:31:00"), None, "un autre jour : une conversation neuve");
+        assert_eq!(seance_valable(&s, Some("Estimateur"), "2026-10-25 10:00:00"), None, "un autre profil");
+        let p = json!({ "jour": "2026-10-25", "profil": "Estimateur", "session": "def", "vu": "2026-10-25 09:30:00" });
+        assert_eq!(seance_valable(&p, Some("Estimateur"), "2026-10-25 09:45:00").as_deref(), Some("def"));
+    }
 }

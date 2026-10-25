@@ -30,6 +30,13 @@ pub fn ouvrir(dossier: &Path) {
     }
 }
 
+/// Le journal d'un dossier local, à relire : le précédent (`eve.1.log`, mis de côté au-delà de 5 Mo), puis l'actuel ;
+/// rien de ce qui manque.
+pub fn lire_tout(dossier: &Path) -> String {
+    let lire = |nom: &str| fs::read(dossier.join(nom)).map(|o| String::from_utf8_lossy(&o).into_owned());
+    format!("{}\n{}", lire("eve.1.log").unwrap_or_default(), lire("eve.log").unwrap_or_default())
+}
+
 /// Une ligne au journal (et à la console).
 pub fn ecrire(message: &str) {
     let (a, mo, j, h, mi, s) = maintenant();

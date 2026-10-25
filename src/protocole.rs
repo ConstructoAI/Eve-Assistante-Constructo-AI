@@ -130,8 +130,9 @@ pub enum Flux {
 pub enum Recu<'a> {
     /// L'ouverture de la session (à chaque tour) : les serveurs MCP et leur état, les outils offerts.
     Ouverture { session: String, modele: String, serveurs: Vec<(String, String)>, outils: Vec<String> },
-    /// Un message de l'Adjointe : son texte et ses appels d'outils (`(identifiant, nom, entrée)`).
-    Adjointe { textes: Vec<String>, outils: Vec<(String, String, &'a Value)> },
+    /// Un message de l'Adjointe : son texte et ses appels d'outils (`(identifiant, nom, entrée)`) ; `panne` : la sorte
+    /// d'erreur de l'API qu'il porte (son champ `error` : « authentication_failed », « rate_limit »…), vide sans elle.
+    Adjointe { textes: Vec<String>, outils: Vec<(String, String, &'a Value)>, panne: String },
     /// Les résultats d'outils : leur identifiant, et s'ils sont en erreur. Un outil que Claude Code rejette avant même
     /// le crochet de la garde (une entrée invalide, un outil annulé) revient en erreur sans avoir tourné.
     Resultats { outils: Vec<(String, bool)> },
@@ -145,6 +146,13 @@ pub enum Recu<'a> {
     Reponse { id: String, reussie: bool, erreur: String, corps: &'a Value },
     /// Claude Code abandonne une de ses demandes (le tour a été interrompu).
     Abandon { id: String },
+    /// La limite d'utilisation du compte (`rate_limit_event`) : son état (« allowed », « allowed_warning »,
+    /// « rejected »), l'instant où elle se rouvre (secondes Unix), sa sorte (« five_hour », « seven_day »…), la part
+    /// utilisée (de 0 à 1).
+    Limite { etat: String, reprise: Option<i64>, sorte: String, part: Option<f64> },
+    /// Claude Code réessaie un appel à l'API (`system/api_retry`) : la tentative, le nombre permis, la sorte d'erreur
+    /// (« overloaded », « rate_limit »…), et s'il n'a reçu aucune réponse du tout (le réseau).
+    Reessai { tentative: u64, permis: u64, panne: String, sans_reponse: bool },
     /// Les agents que Claude fait travailler en arrière-plan, chacun par sa description (`background_tasks_changed`,
     /// à chaque agent qui part ou qui finit) ; vide : tous ont fini.
     Agents(Vec<String>),
@@ -165,6 +173,21 @@ pub fn lire(v: &Value) -> Recu<'_> {
                 .map(|l| l.iter().map(|t| texte(t, "description").to_string()).collect())
                 .unwrap_or_default(),
         ),
+        "system" if texte(v, "subtype") == "api_retry" => Recu::Reessai {
+            tentative: v.get("attempt").and_then(Value::as_u64).unwrap_or(0),
+            permis: v.get("max_retries").and_then(Value::as_u64).unwrap_or(0),
+            panne: texte(v, "error").to_string(),
+            sans_reponse: v.get("no_response").is_some_and(|r| !r.is_null()),
+        },
+        "rate_limit_event" => {
+            let l = v.get("rate_limit_info").unwrap_or(&Value::Null);
+            Recu::Limite {
+                etat: texte(l, "status").to_string(),
+                reprise: l.get("resetsAt").and_then(Value::as_i64),
+                sorte: texte(l, "rateLimitType").to_string(),
+                part: l.get("utilization").and_then(Value::as_f64),
+            }
+        }
         "system" if texte(v, "subtype") == "init" => Recu::Ouverture {
             session: texte(v, "session_id").to_string(),
             modele: texte(v, "model").to_string(),
@@ -193,7 +216,7 @@ pub fn lire(v: &Value) -> Recu<'_> {
                     _ => {}
                 }
             }
-            Recu::Adjointe { textes, outils }
+            Recu::Adjointe { textes, outils, panne: texte(v, "error").to_string() }
         }
         "user" => {
             let outils = v
@@ -321,6 +344,32 @@ pub fn resume_outil(nom: &str, entree: &Value) -> String {
 
 #[cfg(test)]
 mod essais {
+    /// Les pannes, dans les formes du flux de Claude Code 2.1.310 (relevées dans son schéma).
+    #[test]
+    fn les_pannes_se_lisent() {
+        use super::{Recu, lire};
+        let v = serde_json::json!({ "type": "rate_limit_event", "uuid": "u", "session_id": "s",
+            "rate_limit_info": { "status": "rejected", "resetsAt": 1_793_000_000, "rateLimitType": "five_hour",
+            "utilization": 1.0 } });
+        let Recu::Limite { etat, reprise, sorte, part } = lire(&v) else { panic!("une limite") };
+        assert_eq!(
+            (etat.as_str(), reprise, sorte.as_str(), part),
+            ("rejected", Some(1_793_000_000), "five_hour", Some(1.0))
+        );
+        let v = serde_json::json!({ "type": "system", "subtype": "api_retry", "attempt": 2, "max_retries": 10,
+            "retry_delay_ms": 4000, "error_status": 529, "error": "overloaded" });
+        let Recu::Reessai { tentative, permis, panne, sans_reponse } = lire(&v) else { panic!("un nouvel essai") };
+        assert_eq!((tentative, permis, panne.as_str(), sans_reponse), (2, 10, "overloaded", false));
+        let v = serde_json::json!({ "type": "system", "subtype": "api_retry", "attempt": 1, "max_retries": 10,
+            "retry_delay_ms": 1000, "error_status": null, "error": "unknown",
+            "no_response": { "waited_ms": 30000, "retry_wait_ms": 1000 } });
+        assert!(matches!(lire(&v), Recu::Reessai { sans_reponse: true, .. }));
+        let v = serde_json::json!({ "type": "assistant", "error": "authentication_failed", "session_id": "s",
+            "parent_tool_use_id": null, "message": { "content": [{ "type": "text", "text": "Please run /login" }] } });
+        let Recu::Adjointe { panne, textes, .. } = lire(&v) else { panic!("un message") };
+        assert_eq!((panne.as_str(), textes.len()), ("authentication_failed", 1));
+    }
+
     use super::*;
 
     #[test]

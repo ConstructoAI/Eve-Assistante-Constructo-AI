@@ -14,6 +14,7 @@
 //! [`Ecran::abonner`]: crate::ecran::Ecran::abonner
 
 pub(crate) mod pieces;
+pub(crate) mod portrait;
 pub(crate) mod profils;
 pub(crate) mod theme;
 
@@ -104,6 +105,7 @@ pub mod icones {
     pub const CALENDRIER: char = '\u{E787}';
     pub const COURRIEL: char = '\u{E715}';
     pub const PIECE: char = '\u{E723}';
+    pub const COPIER: char = '\u{E8C8}';
     /// Les boutons de la fenêtre : les glyphes de ceux de Windows (ChromeMinimize, ChromeMaximize, ChromeRestore,
     /// ChromeClose).
     pub const REDUIRE: char = '\u{E921}';
@@ -209,6 +211,12 @@ pub(crate) struct Fenetre {
     etat: Value,
     rapport: Sender<Evt>,
     saisie: String,
+    /// Le portrait d'Eve (le thème « Constructo AI »), à la place de l'orbe quand il y en a un.
+    portrait: portrait::Portrait,
+    /// Le numéro de la dernière phrase mal entendue mise dans la saisie (`a_corriger` de l'état), et la saisie qui
+    /// doit prendre le clavier à la prochaine image.
+    corrigee: u64,
+    saisie_au_clavier: bool,
     /// Le micro ou l'orbe sont tenus ; l'orbe l'est à cette image ; la barre d'espace l'est (hors de la saisie).
     parle: bool,
     orbe_tenue: bool,
@@ -306,6 +314,9 @@ impl Fenetre {
             etat: Value::Null,
             rapport,
             saisie: String::new(),
+            portrait: portrait::Portrait::nouveau(crate::reglages::dossier_local()),
+            corrigee: 0,
+            saisie_au_clavier: false,
             parle: false,
             orbe_tenue: false,
             orbe: Orbe::nouvelle(),
@@ -570,14 +581,22 @@ impl Fenetre {
     /// fenêtre basse), 112 le temps d'une demande d'accord, pour lui laisser la place. Tenue, elle parle, comme la
     /// touche.
     fn orbe(&mut self, ui: &mut egui::Ui) {
+        let cote = self.cote_de_l_orbe(ui.ctx());
+        let (rect, rep) = ui.allocate_exact_size(vec2(cote, cote), Sense::click());
+        self.orbe_dans(ui, rect, rep);
+    }
+
+    /// Le côté de l'orbe en tête de la conversation : 236 points au plus (moins dans une fenêtre basse), 112 le temps
+    /// d'une demande d'accord ; le changement glisse.
+    fn cote_de_l_orbe(&self, ctx: &egui::Context) -> f32 {
         let accord = self.etat.get("accord").is_some_and(|a| !a.is_null());
         let grande = (self.hauteur * 0.26).clamp(150.0, 236.0);
-        let cote = ui.ctx().animate_value_with_time(
-            egui::Id::unique("cote-de-l-orbe"),
-            if accord { 112.0 } else { grande },
-            0.35,
-        );
-        let (rect, rep) = ui.allocate_exact_size(vec2(cote, cote), Sense::click());
+        ctx.animate_value_with_time(egui::Id::unique("cote-de-l-orbe"), if accord { 112.0 } else { grande }, 0.35)
+    }
+
+    /// L'orbe dessinée dans `rect`, qui répond par `rep` : tenue, elle parle, comme la touche. Le centre de commande la
+    /// pose au cœur du réseau, le thème clair dans sa bannière.
+    fn orbe_dans(&mut self, ui: &mut egui::Ui, rect: egui::Rect, rep: egui::Response) {
         self.orbe_tenue = rep.is_pointer_button_down_on();
         rep.on_hover_text("Tiens appuyé pour parler").on_hover_cursor(egui::CursorIcon::PointingHand);
         let etat = self.champ("etat").to_string();
@@ -660,7 +679,8 @@ impl Fenetre {
                 let ancien = l.get("ancien").and_then(Value::as_bool).unwrap_or(false);
                 let pieces: Vec<&str> =
                     l.get("pieces").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).collect();
-                let ligne = Ligne { de, texte, heure, ancien, pieces: &pieces, en_cours: false };
+                let tour = l.get("tour").and_then(Value::as_str).unwrap_or("");
+                let ligne = Ligne { de, texte, heure, ancien, pieces: &pieces, en_cours: false, tour };
                 match style {
                     Style::Bulles => bulle(ui, &ligne, cartes, &mut gestes),
                     Style::Flux => ligne_du_flux(ui, &ligne, cartes, &mut gestes),
@@ -668,7 +688,8 @@ impl Fenetre {
                 }
             }
             if let Some(t) = en_cours {
-                let ligne = Ligne { de: "eve", texte: t, heure: "", ancien: false, pieces: &[], en_cours: true };
+                let ligne =
+                    Ligne { de: "eve", texte: t, heure: "", ancien: false, pieces: &[], en_cours: true, tour: "" };
                 match style {
                     Style::Bulles => bulle(ui, &ligne, cartes, &mut gestes),
                     Style::Flux => ligne_du_flux(ui, &ligne, cartes, &mut gestes),
@@ -723,6 +744,9 @@ impl Fenetre {
                             .hint_text("Écris ta demande à Eve…")
                             .desired_width(largeur),
                     );
+                    if std::mem::take(&mut self.saisie_au_clavier) {
+                        champ.request_focus();
+                    }
                     let entree = champ.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     let pret = !self.saisie.trim().is_empty();
                     if (bouton_envoyer(ui, pret).clicked() || entree) && pret {
@@ -822,11 +846,7 @@ impl Fenetre {
         let cote = ui.ctx().animate_value_with_time(egui::Id::unique("cote-de-l-orbe-du-centre"), voulu, 0.35);
         let r_orbe = egui::Rect::from_center_size(Reseau::centre_de(rect), vec2(cote, cote));
         let rep = ui.interact(r_orbe, egui::Id::unique("orbe-du-centre"), Sense::click());
-        self.orbe_tenue = rep.is_pointer_button_down_on();
-        rep.on_hover_text("Tiens appuyé pour parler");
-        let etat = self.champ("etat").to_string();
-        let niveau = self.etat.get("niveau").and_then(Value::as_f64).unwrap_or(0.0) as f32;
-        self.orbe.dessiner(ui, r_orbe, &etat, niveau, temps);
+        self.orbe_dans(ui, r_orbe, rep);
         let aujourdhui = journal::date();
         let horodatage = journal::horodatage();
         let heure = horodatage.get(11..16).unwrap_or("").replace('-', ":");
@@ -852,7 +872,7 @@ impl Fenetre {
         let bloquee = self.reseau.compteurs().1 > 0
             || modes.demo
             || modes.rediffusion
-            || matches!(etat.as_str(), "ecoute" | "transcription" | "reflexion" | "parole" | "confirmation");
+            || matches!(self.champ("etat"), "ecoute" | "transcription" | "reflexion" | "parole" | "confirmation");
         let echeance = prochaine_echeance(&self.centre.echeances_lues(), &aujourdhui);
         let (heure_de_veille, date_longue) =
             (ambiance::heure_de_veille(&horodatage), ambiance::date_longue(&aujourdhui));
@@ -1175,6 +1195,7 @@ impl Fenetre {
         // Le thème de la fenêtre : le centre de commande, ou celui de Constructo AI ([`theme`]).
         rubrique(ui, "Thème");
         self.choix_du_theme(ui);
+        self.choix_du_portrait(ui);
         // Ce poste.
         rubrique(ui, "Sur ce poste");
         groupe(ui, |ui| {
@@ -1422,6 +1443,14 @@ impl eframe::App for Fenetre {
             self.etat = v;
             self.suivre_les_outils(ctx.input(|i| i.time));
             self.suivre_les_dossiers_des_profils();
+            // Une phrase mal entendue (le garde-fou de l'oreille) : dans la saisie, à corriger, une fois chacune.
+            if let Some(n) = self.etat["a_corriger"]["numero"].as_u64()
+                && n > self.corrigee
+            {
+                self.corrigee = n;
+                self.saisie = self.etat["a_corriger"]["texte"].as_str().unwrap_or("").to_string();
+                self.saisie_au_clavier = true;
+            }
         }
         if ctx.input(|i| i.viewport().close_requested()) && !self.fermee {
             self.fermee = true;
@@ -1475,10 +1504,7 @@ impl eframe::App for Fenetre {
                     Vec::new()
                 } else {
                     let local = crate::reglages::dossier_local();
-                    let lire = |nom: &str| {
-                        String::from_utf8_lossy(&std::fs::read(local.join(nom)).unwrap_or_default()).into_owned()
-                    };
-                    crate::reseau::journee(&(lire("eve.1.log") + &lire("eve.log")), &journal::date())
+                    crate::reseau::journee(&journal::lire_tout(&local), &journal::date())
                 };
                 self.reseau.rejouer(evenements, maintenant);
             }
@@ -2262,13 +2288,15 @@ pub(crate) struct Ligne<'a> {
     pub(crate) ancien: bool,
     pub(crate) pieces: &'a [&'a str],
     pub(crate) en_cours: bool,
+    /// Sous une réponse de Claude : ce que son tour a pris (« 12 s · 0,04 $ · Sonnet 5.5, moyen ») ; vide ailleurs.
+    pub(crate) tour: &'a str,
 }
 
 /// Une ligne du fil : la personne à droite, Eve à gauche (avec sa petite orbe), Eve-même (le système) au centre, une
 /// alerte en ambre ; une ligne d'une séance précédente, plus pâle. Les cartes d'Eve s'y dessinent ([`Cartes`]) ; les
 /// gestes qu'on y demande s'ajoutent à `gestes`.
 pub(crate) fn bulle(ui: &mut egui::Ui, l: &Ligne<'_>, cartes: &mut Cartes, gestes: &mut Vec<Geste>) {
-    let Ligne { de, texte, heure, ancien, pieces, en_cours } = *l;
+    let Ligne { de, texte, heure, ancien, pieces, en_cours, tour } = *l;
     let opacite = if ancien { 0.55 } else { 1.0 };
     let pale = |c: Color32| c.gamma_multiply(opacite);
     let max = (ui.available_width() * 0.84).min(620.0);
@@ -2321,11 +2349,124 @@ pub(crate) fn bulle(ui: &mut egui::Ui, l: &Ligne<'_>, cartes: &mut Cartes, geste
                             texte_d_eve(ui, texte, opacite, en_cours, cartes, gestes);
                             pieces_jointes(ui, pieces, opacite);
                         });
-                    heure_sous(ui, heure, opacite);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 10.0;
+                        if !heure.is_empty() {
+                            ui.label(RichText::new(heure).size(10.5).color(pale(couleurs::ENCRE_3)));
+                        }
+                        ce_qu_a_pris(ui, tour, pale(couleurs::ENCRE_3), FontId::proportional(10.5));
+                        if !en_cours {
+                            let police = FontId::proportional(10.5);
+                            bouton_copier(ui, texte, pale(couleurs::ENCRE_3), couleurs::ACCENT, police);
+                        }
+                    });
+                    ui.add_space(8.0);
                 });
             });
         }
     }
+}
+
+/// Sous une réponse de Claude : ce que son tour a pris (« 12 s · 0,04 $ »), discret ; le cerveau qui l'a faite, au
+/// survol. Rien sous une autre ligne (`tour` vide).
+pub(crate) fn ce_qu_a_pris(ui: &mut egui::Ui, tour: &str, encre: Color32, police: FontId) {
+    if tour.is_empty() {
+        return;
+    }
+    let (court, cerveau) = tour.rsplit_once(" · ").unwrap_or((tour, ""));
+    let bulle = format!("La durée de ce tour et son coût (au tarif de l'API) · {cerveau}");
+    ui.add(egui::Label::new(RichText::new(court).font(police).color(encre)).selectable(false)).on_hover_text(bulle);
+}
+
+/// Le presse-papiers d'un bouton « Copier » (`rep`, identifié par `id`) : au clic, `texte()` y va. Rend vrai une
+/// seconde et demie après, le temps de dire « Copié ».
+pub(crate) fn copier_au_clic(
+    ui: &egui::Ui,
+    rep: &egui::Response,
+    id: egui::Id,
+    texte: impl FnOnce() -> String,
+) -> bool {
+    let maintenant = ui.input(|i| i.time);
+    if rep.clicked() {
+        ui.ctx().copy_text(texte());
+        ui.ctx().data_mut(|d| d.insert_temp(id, maintenant));
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(1600));
+    }
+    ui.ctx().data(|d| d.get_temp::<f64>(id)).is_some_and(|t| maintenant - t < 1.5)
+}
+
+/// « Copier », sous une réponse d'Eve : son icône et son mot, discrets (`encre`), de la couleur d'`accent` au survol ;
+/// au clic, la réponse telle qu'elle se lit ([`texte_a_copier`]) dans le presse-papiers, et « Copié » un moment. Les
+/// trois styles du fil s'en servent.
+pub(crate) fn bouton_copier(ui: &mut egui::Ui, reponse: &str, encre: Color32, accent: Color32, police: FontId) {
+    let id = egui::Id::unique(("copier", reponse));
+    let p = ui.painter();
+    let icone = FontId::new(police.size, FontFamily::Name(ICONES.into()));
+    // La place de « Copié » et de « Copier » : la plus large des deux, pour que rien ne bouge au clic.
+    let g_mot = p.layout_no_wrap("Copier".into(), police.clone(), Color32::PLACEHOLDER);
+    let g_icone = p.layout_no_wrap(icones::COPIER.to_string(), icone.clone(), Color32::PLACEHOLDER);
+    let taille = vec2(g_icone.size().x + 4.0 + g_mot.size().x, g_mot.size().y.max(g_icone.size().y));
+    let (r, rep) = ui.allocate_exact_size(taille, Sense::click());
+    let copie = copier_au_clic(ui, &rep, id, || texte_a_copier(reponse));
+    if ui.is_rect_visible(r) {
+        let couleur = if copie || rep.hovered() { accent } else { encre };
+        let (code, mot) = if copie { (icones::OUI, "Copié") } else { (icones::COPIER, "Copier") };
+        let p = ui.painter();
+        let g_icone = p.layout_no_wrap(code.to_string(), icone, couleur);
+        let l_icone = g_icone.size().x;
+        p.galley(egui::pos2(r.left(), r.center().y - g_icone.size().y / 2.0), g_icone, couleur);
+        let g_mot = p.layout_no_wrap(mot.into(), police, couleur);
+        p.galley(egui::pos2(r.left() + l_icone + 4.0, r.center().y - g_mot.size().y / 2.0), g_mot, couleur);
+    }
+    rep.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Copier cette réponse");
+}
+
+/// Une réponse d'Eve pour le presse-papiers, telle qu'elle se lit : sans son markdown (le gras, le code, les titres),
+/// ses puces gardées, l'adresse d'un lien après son texte ; ses cartes en texte ([`cartes::en_texte`] : un tableau en
+/// colonnes séparées par des tabulations, qui se colle dans Excel cellule par cellule), un dessin par son titre, un
+/// bloc de code tel quel.
+pub(crate) fn texte_a_copier(texte: &str) -> String {
+    let mut morceaux: Vec<String> = Vec::new();
+    for bloc in decouper(texte, false) {
+        match bloc {
+            Bloc::Texte(lignes) => {
+                let lignes: Vec<String> = lignes
+                    .iter()
+                    .map(|l| {
+                        if l.trim() == "---" {
+                            return String::new();
+                        }
+                        let (mut job, mut liens) = (LayoutJob::default(), Liens::new());
+                        ligne_en_forme(&mut job, &mut liens, l, false, 1.0, &theme::SOMBRES);
+                        avec_adresses(&job.text, &liens)
+                    })
+                    .collect();
+                let t = lignes.join("\n");
+                if !t.trim().is_empty() {
+                    morceaux.push(t.trim_matches('\n').to_string());
+                }
+            }
+            Bloc::Code(code) => morceaux.push(code),
+            Bloc::Carte(json) => morceaux.push(crate::cartes::en_texte(&json).unwrap_or(json)),
+            Bloc::Dessin { svg, .. } => morceaux.push(format!("[Dessin : {}]", crate::cartes::titre_du_dessin(&svg))),
+        }
+    }
+    morceaux.join("\n\n")
+}
+
+/// Le texte d'une ligne mise en forme, chaque lien suivi de son adresse entre parenthèses — sauf s'il l'écrit déjà.
+fn avec_adresses(texte: &str, liens: &Liens) -> String {
+    let lettres: Vec<char> = texte.chars().collect();
+    let (mut sortie, mut i) = (String::new(), 0);
+    for (place, adresse) in liens {
+        sortie.extend(&lettres[i..place.end]);
+        if lettres[place.clone()].iter().collect::<String>() != *adresse {
+            sortie.push_str(&format!(" ({adresse})"));
+        }
+        i = place.end;
+    }
+    sortie.extend(&lettres[i..]);
+    sortie
 }
 
 /// La petite orbe d'Eve, devant ses bulles ; une cloche pour une alerte.
@@ -2517,6 +2658,15 @@ fn decouper(texte: &str, en_cours: bool) -> Vec<Bloc> {
     blocs
 }
 
+/// Les cartes d'une réponse (leur JSON), découpées comme la fenêtre les dessine : le chef y prend les rappels que
+/// Claude pose.
+pub(crate) fn cartes_de(texte: &str) -> Vec<String> {
+    decouper(texte, false)
+        .into_iter()
+        .filter_map(|b| if let Bloc::Carte(json) = b { Some(json) } else { None })
+        .collect()
+}
+
 /// Le texte d'Eve mis en forme comme dans la page : **gras**, `code`, « --- » (ce qui suit est le détail écrit, plus
 /// pâle), les blocs de code à chasse fixe, les cartes ([`Cartes`]) ; une puce pour « - ». Ses encres sont celles du
 /// thème du `Ui` ([`theme::encres`]).
@@ -2536,11 +2686,11 @@ fn texte_d_eve(
                 // Les lignes vides des bords s'ôtent.
                 let Some(a) = lignes.iter().position(|l| !l.trim().is_empty()) else { continue };
                 let b = lignes.iter().rposition(|l| !l.trim().is_empty()).unwrap_or(a);
-                let mut job = LayoutJob::default();
+                let (mut job, mut liens) = (LayoutJob::default(), Liens::new());
                 for l in &lignes[a..=b] {
                     if l.trim() == "---" {
                         if !job.text.is_empty() {
-                            ui.label(std::mem::take(&mut job));
+                            texte_avec_liens(ui, std::mem::take(&mut job), &std::mem::take(&mut liens), gestes);
                         }
                         filet(ui, e);
                         apres = true;
@@ -2549,10 +2699,10 @@ fn texte_d_eve(
                     if !job.text.is_empty() {
                         job.append("\n", 0.0, format_de_base(apres, opacite, e));
                     }
-                    ligne_en_forme(&mut job, l, apres, opacite, e);
+                    ligne_en_forme(&mut job, &mut liens, l, apres, opacite, e);
                 }
                 if !job.text.is_empty() {
-                    ui.label(job);
+                    texte_avec_liens(ui, job, &liens, gestes);
                 }
             }
             Bloc::Code(code) => {
@@ -2586,10 +2736,91 @@ fn format_de_base(apres: bool, opacite: f32, e: &theme::Encres) -> TextFormat {
     TextFormat { font_id: FontId::proportional(taille), color: encre.gamma_multiply(opacite), ..Default::default() }
 }
 
+/// Les liens d'un texte d'Eve mis en page : la place de chacun (en caractères, comme les curseurs d'egui) et son
+/// adresse — seulement `https://`, la seule que le chef ouvre.
+type Liens = Vec<(std::ops::Range<usize>, String)>;
+
+/// Un texte d'Eve et ses liens : au survol d'un lien, la main et son adresse (un texte de lien peut tromper, l'adresse
+/// non) ; au clic, le geste `ouvrir_lien`, que le chef ouvre dans le navigateur. Le texte reste sélectionnable.
+fn texte_avec_liens(ui: &mut egui::Ui, mut job: LayoutJob, liens: &Liens, gestes: &mut Vec<Geste>) {
+    if liens.is_empty() {
+        ui.label(job);
+        return;
+    }
+    job.wrap.max_width = ui.available_width();
+    let galee = ui.fonts_mut(|f| f.layout_job(job));
+    // Le clic seul, sans le focus : un texte qui a le focus se souligne tout entier.
+    let rep = ui.add(egui::Label::new(galee.clone()).sense(Sense::CLICK));
+    let sous = |pos: egui::Pos2| {
+        let i = caractere_sous(&galee, pos - rep.rect.min)?;
+        liens.iter().find(|(place, _)| place.contains(&i)).map(|(_, adresse)| adresse.clone())
+    };
+    if let Some(adresse) = rep.hover_pos().and_then(sous) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        if rep.clicked() {
+            gestes.push(Geste { action: "ouvrir_lien", valeur: Value::String(adresse) });
+        } else {
+            rep.on_hover_text_at_pointer(adresse);
+        }
+    }
+}
+
+/// Le caractère d'un texte mis en page sous le point `p` (relatif au texte), compté en caractères comme les curseurs
+/// d'egui (un saut de ligne compte pour un) ; rien entre deux lignes ni au-delà du bout d'une ligne.
+fn caractere_sous(galee: &egui::Galley, p: egui::Vec2) -> Option<usize> {
+    let mut debut = 0;
+    for rangee in &galee.rows {
+        if (rangee.min_y()..rangee.max_y()).contains(&p.y) {
+            let x = p.x - rangee.pos.x;
+            return rangee.row.glyphs.iter().position(|g| g.pos.x <= x && x < g.max_x()).map(|k| debut + k);
+        }
+        debut += rangee.char_count_including_newline().0;
+    }
+    None
+}
+
+/// Un morceau de texte ordinaire d'une ligne d'Eve : ses adresses nues (« https://… ») deviennent des liens. La
+/// ponctuation qui suit une adresse (« . », « , », « » », une parenthèse fermante sans son ouvrante) n'en est pas.
+fn ajouter_texte(job: &mut LayoutJob, liens: &mut Liens, texte: &str, format: &TextFormat, lien: &TextFormat) {
+    let mut reste = texte;
+    while let Some(debut) = reste.find("https://") {
+        ajouter(job, &reste[..debut], format);
+        let r = &reste[debut..];
+        let mut adresse = &r[..r.find(char::is_whitespace).unwrap_or(r.len())];
+        loop {
+            let ouvrantes = adresse.matches('(').count();
+            let fin = adresse.chars().last();
+            if fin.is_some_and(|c| ".,;:!?»\"'".contains(c))
+                || (fin == Some(')') && adresse.matches(')').count() > ouvrantes)
+            {
+                adresse = &adresse[..adresse.len() - fin.map_or(0, char::len_utf8)];
+            } else {
+                break;
+            }
+        }
+        if adresse.len() > "https://".len() {
+            lier(job, liens, adresse, adresse, lien);
+        } else {
+            ajouter(job, adresse, format);
+        }
+        reste = &r[adresse.len()..];
+    }
+    ajouter(job, reste, format);
+}
+
+/// Un lien ajouté à `job` : son texte au format des liens, et sa place retenue s'il s'ouvre (`https://`).
+fn lier(job: &mut LayoutJob, liens: &mut Liens, texte: &str, adresse: &str, format: &TextFormat) {
+    let debut = job.text.chars().count();
+    ajouter(job, texte, format);
+    if adresse.starts_with("https://") && !adresse.chars().any(char::is_control) {
+        liens.push((debut..job.text.chars().count(), adresse.to_string()));
+    }
+}
+
 /// Une ligne de texte d'Eve, ajoutée à `job` : ses **gras** en demi-gras, ses `code` à chasse fixe sur un fond, ses
-/// liens « [texte](adresse) » par leur seul texte, soulignés ; « - » ou « * » en tête devient une puce, « # » un titre.
-/// Un repère sans sa fin reste tel quel.
-fn ligne_en_forme(job: &mut LayoutJob, ligne: &str, apres: bool, opacite: f32, e: &theme::Encres) {
+/// liens « [texte](adresse) » par leur seul texte, soulignés, et ses adresses nues ([`ajouter_texte`]) — leur place va
+/// dans `liens` ; « - » ou « * » en tête devient une puce, « # » un titre. Un repère sans sa fin reste tel quel.
+fn ligne_en_forme(job: &mut LayoutJob, liens: &mut Liens, ligne: &str, apres: bool, opacite: f32, e: &theme::Encres) {
     let normal = format_de_base(apres, opacite, e);
     let taille = normal.font_id.size;
     let gras = TextFormat { font_id: FontId::new(taille, FontFamily::Name(SEMI.into())), ..normal.clone() };
@@ -2626,10 +2857,10 @@ fn ligne_en_forme(job: &mut LayoutJob, ligne: &str, apres: bool, opacite: f32, e
         // Le prochain repère : « ** », « ` » ou « [ ».
         let (g, c, l) = (reste.find("**"), reste.find('`'), reste.find('['));
         let Some(debut) = [g, c, l].into_iter().flatten().min() else {
-            ajouter(job, reste, base);
+            ajouter_texte(job, liens, reste, base, &lien);
             break;
         };
-        ajouter(job, &reste[..debut], base);
+        ajouter_texte(job, liens, &reste[..debut], base, &lien);
         let r = &reste[debut..];
         let (marque, format) = if Some(debut) == g { ("**", &gras) } else { ("`", &code) };
         if Some(debut) != l {
@@ -2643,7 +2874,7 @@ fn ligne_en_forme(job: &mut LayoutJob, ligne: &str, apres: bool, opacite: f32, e
             && let Some(fin) = r[milieu + 2..].find(')')
             && !r[milieu + 2..milieu + 2 + fin].contains(char::is_whitespace)
         {
-            ajouter(job, &r[1..milieu], &lien);
+            lier(job, liens, &r[1..milieu], &r[milieu + 2..milieu + 2 + fin], &lien);
             reste = &r[milieu + 2 + fin + 1..];
             continue;
         }
@@ -2671,7 +2902,7 @@ fn filet(ui: &mut egui::Ui, e: &theme::Encres) {
 /// Une ligne du fil, comme une entrée du flux du tableau : un liseré à gauche (cyan pour la personne, vert pour Eve,
 /// rouge pour une alerte), l'heure et qui parle en petites capitales, puis le texte ; Eve-même, au centre, en gris.
 fn ligne_du_flux(ui: &mut egui::Ui, l: &Ligne<'_>, cartes: &mut Cartes, gestes: &mut Vec<Geste>) {
-    let Ligne { de, texte, heure, ancien, pieces, en_cours } = *l;
+    let Ligne { de, texte, heure, ancien, pieces, en_cours, tour } = *l;
     let opacite = if ancien { 0.55 } else { 1.0 };
     if de == "systeme" {
         ui.vertical_centered(|ui| {
@@ -2696,8 +2927,14 @@ fn ligne_du_flux(ui: &mut egui::Ui, l: &Ligne<'_>, cartes: &mut Cartes, gestes: 
                     ui.label(RichText::new(heure).monospace().size(11.0).color(hud::GRIS.gamma_multiply(opacite)));
                 }
                 ui.label(centre::capitales(qui, 11.0, couleur.gamma_multiply(opacite)));
+                ce_qu_a_pris(ui, tour, hud::GRIS.gamma_multiply(opacite), FontId::monospace(10.5));
                 if en_cours {
                     ui.label(centre::capitales("· EN COURS", 11.0, hud::GRIS));
+                } else if de != "toi" {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let police = FontId::monospace(10.5);
+                        bouton_copier(ui, texte, hud::GRIS.gamma_multiply(opacite), hud::CYAN, police);
+                    });
                 }
             });
             if de == "toi" {
@@ -2903,10 +3140,63 @@ mod essais {
         assert_eq!(decouper("A\n```car", true), [texte(&["A"]), Bloc::Carte(String::new())], "« ```car » : une carte");
     }
 
+    /// Une ligne mise en forme, et ses liens.
+    fn en_forme(ligne: &str) -> (LayoutJob, Liens) {
+        let (mut job, mut liens) = (LayoutJob::default(), Liens::new());
+        ligne_en_forme(&mut job, &mut liens, ligne, false, 1.0, &theme::SOMBRES);
+        (job, liens)
+    }
+
+    #[test]
+    fn une_reponse_se_copie_comme_elle_se_lit() {
+        let reponse = "Voici le **budget** de la sortie :\n\n| Poste | Montant |\n|---|---:|\n| Autobus | 120,00 $ |\n| \
+                       Collation | 36,00 $ |\n\nEn tout : **156,00 $**, voir [la grille](https://exemple.ca/grille).\n\
+                       ---\nLu dans `budget.md`.";
+        assert_eq!(
+            texte_a_copier(reponse),
+            "Voici le budget de la sortie :\n\nPoste\tMontant\nAutobus\t120,00 $\nCollation\t36,00 $\n\nEn tout : \
+             156,00 $, voir la grille (https://exemple.ca/grille).\n\nLu dans budget.md."
+        );
+        // Les puces restent, un dessin se dit par son titre, une adresse nue ne se répète pas.
+        let reponse = "Le plan :\n- une https://exemple.ca\n```svg\n<svg><title>Plan de la maison</title></svg>\n```";
+        assert_eq!(texte_a_copier(reponse), "Le plan :\n•  une https://exemple.ca\n\n[Dessin : Plan de la maison]");
+    }
+
+    #[test]
+    fn les_liens_s_ouvrent_a_leur_place() {
+        // Un lien en markdown : son texte seul se voit, sa place va à son adresse.
+        let (job, liens) = en_forme("Le formulaire : [TP-1](https://www.revenuquebec.ca/tp1/) ici.");
+        assert_eq!(job.text, "Le formulaire : TP-1 ici.");
+        assert_eq!(liens, [(16..20, "https://www.revenuquebec.ca/tp1/".to_string())]);
+        // Une adresse nue : la ponctuation qui la suit n'en est pas, ni la parenthèse qui l'entoure ; une parenthèse
+        // qui lui appartient reste.
+        let (job, liens) =
+            en_forme("Voir https://exemple.ca/a. Et (https://exemple.ca/b), puis https://fr.wikipedia.org/wiki/X_(y).");
+        assert_eq!(
+            job.text,
+            "Voir https://exemple.ca/a. Et (https://exemple.ca/b), puis https://fr.wikipedia.org/wiki/X_(y)."
+        );
+        let adresses: Vec<&str> = liens.iter().map(|(_, a)| a.as_str()).collect();
+        assert_eq!(adresses, ["https://exemple.ca/a", "https://exemple.ca/b", "https://fr.wikipedia.org/wiki/X_(y)"]);
+        let texte: Vec<char> = job.text.chars().collect();
+        for (place, adresse) in &liens {
+            assert_eq!(texte[place.clone()].iter().collect::<String>(), *adresse, "la place est celle du texte");
+        }
+        // Les places comptent des caractères, pas des octets : un accent avant le lien ne les décale pas.
+        let (_, liens) = en_forme("Échéancier : https://exemple.ca");
+        assert_eq!(liens, [(13..31, "https://exemple.ca".to_string())]);
+        // Ni « http:// », ni « javascript: », ni « file: » ne s'ouvrent : leur texte se voit, sans lien.
+        let (job, liens) = en_forme("[a](http://exemple.ca) [b](javascript:alert) [c](file:///C:/x) https://");
+        assert_eq!(job.text, "a b c https://");
+        assert!(liens.is_empty(), "{liens:?}");
+        // Dans un `code`, une adresse reste du code.
+        let (_, liens) = en_forme("`https://exemple.ca`");
+        assert!(liens.is_empty());
+    }
+
     #[test]
     fn le_gras_et_le_code_se_mettent_en_forme() {
-        let mut job = LayoutJob::default();
-        ligne_en_forme(&mut job, "Le fichier `questions.js` contient **7 questions**.", false, 1.0, &theme::SOMBRES);
+        let (job, _) = en_forme("Le fichier `questions.js` contient **7 questions**.");
         assert_eq!(job.text, "Le fichier questions.js contient 7 questions.");
         let familles: Vec<FontFamily> = job.sections.iter().map(|s| s.format.font_id.family.clone()).collect();
         assert_eq!(
@@ -2919,17 +3209,14 @@ mod essais {
                 FontFamily::Proportional
             ]
         );
-        let mut job = LayoutJob::default();
-        ligne_en_forme(&mut job, "- une **puce** inachevée `ici", false, 1.0, &theme::SOMBRES);
+        let (job, _) = en_forme("- une **puce** inachevée `ici");
         assert_eq!(job.text, "•  une puce inachevée `ici", "un accent grave seul reste tel quel");
-        let mut job = LayoutJob::default();
-        let source = "Voir ([publicholidays.com](https://publicholidays.com/halloween/)) et [ceci] tel quel.";
-        ligne_en_forme(&mut job, source, false, 1.0, &theme::SOMBRES);
+        let (job, _) =
+            en_forme("Voir ([publicholidays.com](https://publicholidays.com/halloween/)) et [ceci] tel quel.");
         assert_eq!(job.text, "Voir (publicholidays.com) et [ceci] tel quel.", "un lien se dit par son texte");
         assert_eq!(job.sections.len(), 3);
         assert_eq!(job.sections[1].format.color, couleurs::ACCENT);
-        let mut job = LayoutJob::default();
-        ligne_en_forme(&mut job, "## Le budget", false, 1.0, &theme::SOMBRES);
+        let (job, _) = en_forme("## Le budget");
         assert_eq!(job.text, "Le budget");
         assert_eq!(job.sections[0].format.font_id.family, FontFamily::Name(SEMI.into()));
     }

@@ -90,6 +90,8 @@ pub struct EnFlux {
     dit: usize,
     /// Le tour a dépassé sa longueur : plus rien ne se dit.
     trop: bool,
+    /// Sans la limite de [`LONGUEUR_MAX`] : toutes les phrases, pour les pages de « la suite » ([`pages_pour_la_voix`]).
+    illimite: bool,
 }
 
 impl EnFlux {
@@ -233,7 +235,7 @@ impl EnFlux {
         }
         let t = if fin_de_ligne { ponctuer(t) } else { t.to_string() };
         let n = t.chars().count();
-        if self.dit > 0 && self.dit + n > LONGUEUR_MAX {
+        if !self.illimite && self.dit > 0 && self.dit + n > LONGUEUR_MAX {
             phrases.push("Le reste est à l'écran.".into());
             self.trop = true;
             return;
@@ -242,6 +244,439 @@ impl EnFlux {
         self.dit_message = true;
         phrases.push(t);
     }
+}
+
+/// Ce que la voix peut lire d'une réponse, en pages de [`LONGUEUR_MAX`] caractères au plus, faites de phrases
+/// entières : la première est ce que la voix en a dit ([`EnFlux`], qui s'arrête à la première phrase qui dépasserait) ;
+/// les suivantes, ce qui en restait — la fin d'une réponse trop longue, puis le détail écrit après les trois tirets.
+/// Les tableaux, les blocs de code et les cartes restent à l'écran. Pour « la suite » et « répète ».
+pub fn pages_pour_la_voix(texte: &str) -> Vec<String> {
+    // Le texte d'avant les trois tirets, et le détail d'après (des tirets en tête, avant tout texte, ne séparent rien).
+    let (mut avant, mut apres, mut passe, mut dans_code) = (Vec::new(), Vec::new(), false, false);
+    for ligne in texte.lines() {
+        let l = ligne.trim();
+        if l.starts_with("```") {
+            dans_code = !dans_code;
+        }
+        if !passe && !dans_code && est_un_separateur(l) && avant.iter().any(|x: &&str| !x.trim().is_empty()) {
+            passe = true;
+            continue;
+        }
+        if passe { apres.push(ligne) } else { avant.push(ligne) }
+    }
+    let toutes = |lignes: &[&str]| {
+        let mut f = EnFlux { illimite: true, ..EnFlux::default() };
+        let mut phrases = f.ajouter(&lignes.join("\n"));
+        phrases.extend(f.finir());
+        phrases
+    };
+    let mut pages = paginer(toutes(&avant));
+    pages.extend(paginer(toutes(&apres)));
+    pages
+}
+
+/// Des phrases réunies en pages : une page prend des phrases tant qu'elle ne dépasse pas [`LONGUEUR_MAX`] caractères
+/// (la règle de la voix en flux, qui compte ses phrases sans les espaces entre elles).
+fn paginer(phrases: Vec<String>) -> Vec<String> {
+    let (mut pages, mut page, mut n) = (Vec::new(), String::new(), 0);
+    for p in phrases {
+        let k = p.chars().count();
+        if n > 0 && n + k > LONGUEUR_MAX {
+            pages.push(std::mem::take(&mut page));
+            n = 0;
+        }
+        if !page.is_empty() {
+            page.push(' ');
+        }
+        page.push_str(&p);
+        n += k;
+    }
+    if !page.is_empty() {
+        pages.push(page);
+    }
+    pages
+}
+
+/// Ce qui a été dit (normalisé), sans le nom d'Eve en tête (« Eve, … » tapé, « ok Eve ») ni une politesse au bout
+/// (« s'il te plaît », « stp ») : la forme où se reconnaissent les commandes courtes.
+fn sans_politesse(n: &str) -> &str {
+    let n = ["hey eve ", "ok eve ", "dis eve ", "eve "].iter().find_map(|p| n.strip_prefix(p)).unwrap_or(n);
+    ["s il te plait", "s il vous plait", "stp", "svp", "merci"]
+        .iter()
+        .find_map(|p| n.strip_suffix(p).map(str::trim_end))
+        .unwrap_or(n)
+}
+
+/// La personne demande-t-elle la suite de la réponse que la voix n'a pas finie (« la suite », « lis le reste ») ?
+/// Jamais « continue » seul : on le dit à Claude pour qu'il poursuive un travail.
+pub fn demande_la_suite(dit: &str) -> bool {
+    let n = normaliser(dit);
+    [
+        "la suite", "suite", "et la suite", "lis la suite", "lis moi la suite", "dis la suite", "dis moi la suite",
+        "continue la lecture", "continue de lire", "lis le reste", "lis moi le reste", "dis le reste", "le reste",
+    ]
+    .contains(&sans_politesse(&n))
+}
+
+/// La personne demande-t-elle de répéter ce que la voix vient de dire (« répète », « pardon ? ») ? Une phrase courte
+/// seulement : « répète-moi les échéances » est une demande.
+pub fn demande_de_repeter(dit: &str) -> bool {
+    let n = normaliser(dit);
+    [
+        "repete", "repete ca", "repete le", "repete la", "tu peux repeter", "peux tu repeter", "redis le", "redis ca",
+        "redis", "pardon", "quoi", "comment", "j ai pas compris", "je n ai pas compris", "j ai pas entendu",
+        "je n ai pas entendu",
+    ]
+    .contains(&sans_politesse(&n))
+}
+
+/// La personne met-elle la sourdine (`Some(true)` : « sourdine », « mode silencieux ») ou la retire-t-elle
+/// (`Some(false)` : « parle », « tu peux parler ») ? Des phrases courtes seulement : « parle-moi de la météo » est une
+/// demande ; « silence », lui, arrête ce qui se dit ([`est_un_arret`]).
+pub fn reglage_de_la_sourdine(dit: &str) -> Option<bool> {
+    let n = normaliser(dit);
+    let n = sans_politesse(&n);
+    let mettre = ["sourdine", "en sourdine", "mets la sourdine", "mets toi en sourdine", "passe en sourdine"];
+    let mettre_aussi = ["mode silencieux", "mode silence", "ecris seulement", "reponds par ecrit"];
+    let retirer = [
+        "parle", "parle moi", "reparle", "tu peux parler", "tu peux reparler", "parle a voix haute",
+        "enleve la sourdine", "retire la sourdine", "sans sourdine", "plus de sourdine",
+    ];
+    if mettre.contains(&n) || mettre_aussi.contains(&n) {
+        Some(true)
+    } else if retirer.contains(&n) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Quand sonne un rappel dit : dans tant de secondes, ou à une heure — de ce jour (demain si elle est passée), ou de
+/// demain.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Quand {
+    Dans(u32),
+    A { heure: u32, minute: u32, demain: bool },
+}
+
+/// Un rappel dit, qu'Eve pose elle-même sans Claude : quand, et quoi rappeler (vide : une minuterie, ou un rappel sans
+/// sujet).
+#[derive(Debug, PartialEq)]
+pub struct RappelDit {
+    pub quand: Quand,
+    pub texte: String,
+    pub minuterie: bool,
+}
+
+/// Un mot de la phrase, normalisé ([`normaliser`]), et la place dans la phrase d'origine du mot écrit qui le porte
+/// (« d'appeler » porte « d » et « appeler »).
+type Mot = (String, usize, usize);
+
+fn mots_places(dit: &str) -> Vec<Mot> {
+    let mut mots = Vec::new();
+    let mut debut = None;
+    for (i, c) in dit.char_indices().chain(std::iter::once((dit.len(), ' '))) {
+        match (c.is_whitespace(), debut) {
+            (false, None) => debut = Some(i),
+            (true, Some(d)) => {
+                for m in normaliser(&dit[d..i]).split_whitespace() {
+                    mots.push((m.to_string(), d, i));
+                }
+                debut = None;
+            }
+            _ => {}
+        }
+    }
+    mots
+}
+
+/// Un nombre dit en chiffres ou en lettres (de un à soixante).
+fn nombre(m: &str) -> Option<u32> {
+    const LETTRES: [(&str, u32); 22] = [
+        ("un", 1),
+        ("une", 1),
+        ("deux", 2),
+        ("trois", 3),
+        ("quatre", 4),
+        ("cinq", 5),
+        ("six", 6),
+        ("sept", 7),
+        ("huit", 8),
+        ("neuf", 9),
+        ("dix", 10),
+        ("onze", 11),
+        ("douze", 12),
+        ("treize", 13),
+        ("quatorze", 14),
+        ("quinze", 15),
+        ("seize", 16),
+        ("vingt", 20),
+        ("trente", 30),
+        ("quarante", 40),
+        ("cinquante", 50),
+        ("soixante", 60),
+    ];
+    m.parse().ok().or_else(|| LETTRES.iter().find(|(l, _)| *l == m).map(|(_, n)| *n))
+}
+
+/// Une durée à partir du mot `i` (« 10 minutes », « une demi heure », « 1 heure et demie », « 2 h 15 ») : ses secondes,
+/// et le mot qui la suit.
+fn duree_dite(m: &[Mot], i: usize) -> Option<(u32, usize)> {
+    let mot = |k: usize| m.get(k).map(|x| x.0.as_str());
+    match (mot(i), mot(i + 1), mot(i + 2)) {
+        (Some("une"), Some("demi"), Some("heure")) => return Some((1800, i + 3)),
+        (Some("un"), Some("quart"), Some("d")) if mot(i + 3) == Some("heure") => return Some((900, i + 4)),
+        _ => {}
+    }
+    let n = nombre(mot(i)?)?;
+    let unite = match mot(i + 1)? {
+        "seconde" | "secondes" | "sec" => 1,
+        "minute" | "minutes" | "min" | "mn" => 60,
+        "heure" | "heures" | "h" => 3600,
+        _ => return None,
+    };
+    let (mut secondes, mut k) = (n * unite, i + 2);
+    if unite == 3600 {
+        match (mot(k), mot(k + 1)) {
+            (Some("et"), Some("demie" | "demi")) => (secondes, k) = (secondes + 1800, k + 2),
+            (Some("et"), Some("quart")) => (secondes, k) = (secondes + 900, k + 2),
+            (Some(x), _) if nombre(x).is_some_and(|x| x < 60) => {
+                secondes += nombre(x).unwrap_or(0) * 60;
+                k += if matches!(mot(k + 1), Some("minute" | "minutes" | "min")) { 2 } else { 1 };
+            }
+            _ => {}
+        }
+    }
+    (secondes > 0 && secondes <= 7 * 86_400).then_some((secondes, k))
+}
+
+/// Une heure à partir du mot `i` (« 16 h », « 16h30 », « 9 heures 15 », « 4 h de l'après-midi », « midi ») : l'heure,
+/// la minute, et le mot qui la suit. Un nombre seul (« à 4 ») ne suffit pas : trop vague, il va à Claude.
+fn heure_dite(m: &[Mot], i: usize) -> Option<(u32, u32, usize)> {
+    let mot = |k: usize| m.get(k).map(|x| x.0.as_str());
+    let (mut h, mut minute, mut k) = match mot(i)? {
+        "midi" => (12, 0, i + 1),
+        "minuit" => (0, 0, i + 1),
+        // « 16h30 », « 16h » : en un seul mot (pas « huit »).
+        x if x.starts_with(|c: char| c.is_ascii_digit()) && x.contains('h') => {
+            let (a, b) = x.split_once('h')?;
+            (a.parse().ok()?, if b.is_empty() { 0 } else { b.parse().ok()? }, i + 1)
+        }
+        x => {
+            let h = nombre(x)?;
+            match mot(i + 1)? {
+                "h" | "heure" | "heures" => match mot(i + 2).and_then(nombre) {
+                    Some(mi) if mi < 60 => (h, mi, i + 3),
+                    _ => (h, 0, i + 2),
+                },
+                // « 16 30 » : « 16:30 », dont les deux-points sont tombés.
+                y => (h, nombre(y).filter(|mi| *mi < 60)?, i + 2),
+            }
+        }
+    };
+    if matches!((mot(k), mot(k + 1)), (Some("et"), Some("demie" | "demi"))) {
+        (minute, k) = (30, k + 2);
+    }
+    // « de l'après-midi », « du soir » : l'après-midi ; « du matin » : tel quel.
+    let soir = [["de", "l", "apres", "midi"].as_slice(), &["du", "soir"]];
+    for s in soir {
+        if m.len() >= k + s.len() && m[k..k + s.len()].iter().map(|x| x.0.as_str()).eq(s.iter().copied()) {
+            if h < 12 {
+                h += 12;
+            }
+            k += s.len();
+        }
+    }
+    if m.len() >= k + 2 && m[k].0 == "du" && m[k + 1].0 == "matin" {
+        k += 2;
+    }
+    (h < 24 && minute < 60).then_some((h, minute, k))
+}
+
+/// Un moment dit à partir du mot `i` : « dans 10 minutes », « à 16 h », « demain à 9 h » ; et le mot qui le suit.
+fn moment_dit(m: &[Mot], i: usize) -> Option<(Quand, usize)> {
+    let mot = |k: usize| m.get(k).map(|x| x.0.as_str());
+    match mot(i)? {
+        "dans" => duree_dite(m, i + 1).map(|(s, k)| (Quand::Dans(s), k)),
+        "a" => heure_dite(m, i + 1).map(|(heure, minute, k)| (Quand::A { heure, minute, demain: false }, k)),
+        "demain" if mot(i + 1) == Some("a") => {
+            heure_dite(m, i + 2).map(|(heure, minute, k)| (Quand::A { heure, minute, demain: true }, k))
+        }
+        _ => None,
+    }
+}
+
+/// Ce qu'il faut rappeler : le texte d'origine des mots `de..a`, sans le mot qui l'introduit (« de », « d' »,
+/// « que », « pour ») ni la ponctuation des bords.
+fn sujet(dit: &str, m: &[Mot], de: usize, a: usize) -> String {
+    if de >= a {
+        return String::new();
+    }
+    // Jusqu'au mot `a`, ou jusqu'à la fin du dernier mot gardé (une politesse ôtée n'en est pas).
+    let fin = if a < m.len() { m[a].1 } else { m.last().map_or(dit.len(), |x| x.2) };
+    let mut t = dit[m[de].1..fin].trim();
+    for lien in ["d'", "d’", "de ", "qu'", "qu’", "que ", "pour "] {
+        if t.len() > lien.len() && t.get(..lien.len()).is_some_and(|x| x.eq_ignore_ascii_case(lien)) {
+            t = t[lien.len()..].trim_start();
+            break;
+        }
+    }
+    t.trim_matches(|c: char| c.is_whitespace() || ",.;:!?".contains(c)).to_string()
+}
+
+/// Un rappel ou une minuterie dits, que la voie rapide pose sans Claude : « minuterie 10 minutes », « rappelle-moi
+/// dans 20 minutes de sortir le gâteau », « rappelle-moi à 16 h d'appeler le plombier », « rappelle-moi d'appeler
+/// Marie demain à 9 h ». Tout ce qui ne se lit pas aussi sûrement (« à 4 », « vendredi ») va à Claude, qui pose le
+/// rappel par une carte.
+pub fn rappel_dit(dit: &str) -> Option<RappelDit> {
+    let mut m = mots_places(dit);
+    // Une politesse au bout ne change rien (« …, s'il te plaît »).
+    for p in [["s", "il", "te", "plait"].as_slice(), &["s", "il", "vous", "plait"], &["stp"], &["svp"], &["merci"]] {
+        if m.len() > p.len() && m[m.len() - p.len()..].iter().map(|x| x.0.as_str()).eq(p.iter().copied()) {
+            m.truncate(m.len() - p.len());
+        }
+    }
+    let debut =
+        m.iter().take(6).position(|x| matches!(x.0.as_str(), "minuterie" | "minuteur" | "rappelle" | "rappelles"))?;
+    if matches!(m[debut].0.as_str(), "minuterie" | "minuteur") {
+        let mut k = debut + 1;
+        if m.get(k).is_some_and(|x| x.0 == "de" || x.0 == "d") {
+            k += 1;
+        }
+        let (secondes, fin) = duree_dite(&m, k)?;
+        // « minuterie de 10 minutes pour les pâtes » : son sujet.
+        let texte = match m.get(fin) {
+            None => String::new(),
+            Some(x) if x.0 == "pour" => sujet(dit, &m, fin, m.len()),
+            Some(_) => return None,
+        };
+        return Some(RappelDit { quand: Quand::Dans(secondes), texte, minuterie: true });
+    }
+    // « rappelle-moi », « rappelle-nous » : le moment avant ce qu'il faut rappeler, ou après.
+    if !m.get(debut + 1).is_some_and(|x| x.0 == "moi" || x.0 == "nous") {
+        return None;
+    }
+    let apres = debut + 2;
+    if let Some((quand, k)) = moment_dit(&m, apres) {
+        return Some(RappelDit { quand, texte: sujet(dit, &m, k, m.len()), minuterie: false });
+    }
+    // Le premier moment qui va jusqu'au bout : « de téléphoner à Marie demain à 9 h » (pas « à 9 h » seul).
+    (apres + 1..m.len()).find_map(|k| {
+        let (quand, fin) = moment_dit(&m, k)?;
+        (fin == m.len()).then(|| RappelDit { quand, texte: sujet(dit, &m, apres, k), minuterie: false })
+    })
+}
+
+/// Ce que vaut une transcription, avant de partir à Claude (le garde-fou de l'oreille).
+#[derive(Debug, PartialEq)]
+pub enum Transcription {
+    /// Elle part : telle quelle, ou repliée (une boucle de Whisper, gardée une fois).
+    Juste(String),
+    /// Elle ne part pas : Eve dit qu'elle a mal entendu, et la met dans la saisie, à corriger ; la raison va au journal.
+    Douteuse { texte: String, raison: &'static str },
+    /// La voix d'Eve elle-même, revenue par le micro : elle s'ignore.
+    MaVoix,
+}
+
+/// Ce que Whisper rend d'un bruit, d'une toux ou d'une hésitation : rien à demander.
+const BRUITS: [&str; 21] = [
+    "cough", "toux", "tousse", "hmm", "hm", "mmh", "mm", "mmm", "euh", "heu", "hum", "ah", "oh", "bah", "pff", "pfff",
+    "rire", "rires", "musique", "applaudissements", "bruit",
+];
+
+/// Juge une transcription déjà nettoyée ([`nettoyer_transcription`]) avant qu'elle parte à Claude. `parole` et
+/// `calcul` : ses secondes de parole et de calcul (0 : inconnues) ; `dites` : les phrases qu'Eve disait pendant que le
+/// son se prenait (vide si elle se taisait : on répond souvent avec ses mots à elle). Les règles viennent du journal de
+/// l'Assistante (une vingtaine de phrases brouillées en deux jours, dont une boucle de trois mots qui a fait modifier
+/// un fichier) :
+/// - la voix d'Eve : la phrase entière (trois mots au moins) dans une phrase qu'elle disait, ou presque toute (six mots
+///   de suite au moins, les quatre cinquièmes de la phrase) ;
+/// - un bruit seul (« Cough », « euh »), une seule lettre, ou des lettres d'une autre écriture que la latine ;
+/// - une boucle (deux mots ou plus, répétés trois fois de suite ; un mot, quatre fois) se replie : douteuse s'il n'en
+///   reste que trois mots ou moins ;
+/// - plus de cinq mots par seconde de parole (on en dit trois au plus) ;
+/// - un calcul de plus de six secondes et de plus du triple de la parole (une boucle qui n'a pas encore été repliée).
+pub fn juger_la_transcription(
+    texte: &str,
+    parole: f32,
+    calcul: f32,
+    sur_la_carte: bool,
+    dites: &[String],
+) -> Transcription {
+    let douteuse = |raison| Transcription::Douteuse { texte: texte.to_string(), raison };
+    let n = normaliser(texte);
+    let mots: Vec<&str> = n.split_whitespace().collect();
+    if mots.len() >= 3 {
+        for d in dites {
+            let d = normaliser(d);
+            let commune = plus_longue_suite_commune(&mots, &d.split_whitespace().collect::<Vec<_>>());
+            if contient(&d, &n) || (commune >= 6 && commune as f32 >= 0.8 * mots.len() as f32) {
+                return Transcription::MaVoix;
+            }
+        }
+    }
+    if mots.is_empty() || BRUITS.contains(&n.as_str()) || (mots.len() == 1 && n.chars().count() == 1) {
+        return douteuse("un bruit, rien de clair");
+    }
+    let latin = |c: char| c.is_ascii() || ('\u{00C0}'..='\u{024F}').contains(&c) || "’«»—–…".contains(c);
+    if texte.chars().any(|c| c.is_alphabetic() && !latin(c)) {
+        return douteuse("une autre écriture");
+    }
+    let replie = replier_les_boucles(texte);
+    let plie = replie.split_whitespace().count() < texte.split_whitespace().count();
+    let mots_replies = normaliser(&replie).split_whitespace().count();
+    let repliee = |raison| Transcription::Douteuse { texte: replie.clone(), raison };
+    if plie && mots_replies <= 3 {
+        return repliee("une boucle de l'oreille");
+    }
+    if parole >= 1.0 && mots_replies as f32 / parole > 5.0 {
+        return repliee("trop de mots pour sa durée");
+    }
+    if sur_la_carte && !plie && calcul > 6.0 && calcul > 3.0 * parole && parole > 0.0 {
+        return douteuse("l'oreille a peiné");
+    }
+    Transcription::Juste(if plie { replie } else { texte.trim().to_string() })
+}
+
+/// La plus longue suite de mots que `a` et `b` ont en commun, telle quelle.
+fn plus_longue_suite_commune(a: &[&str], b: &[&str]) -> usize {
+    let mut meilleure = 0;
+    for i in 0..a.len() {
+        for j in 0..b.len() {
+            let k = a[i..].iter().zip(&b[j..]).take_while(|(x, y)| x == y).count();
+            meilleure = meilleure.max(k);
+        }
+    }
+    meilleure
+}
+
+/// Une transcription où Whisper a bouclé (« 2, ok. 2, ok. 2, ok. ») : chaque suite de deux mots ou plus répétée trois
+/// fois de suite (un mot, quatre fois), gardée une fois. Les mots se comparent normalisés ; ceux qui restent gardent
+/// leur forme.
+fn replier_les_boucles(texte: &str) -> String {
+    let mut mots: Vec<&str> = texte.split_whitespace().collect();
+    loop {
+        let normes: Vec<String> = mots.iter().map(|m| normaliser(m)).collect();
+        let mut repli = None;
+        'cherche: for taille in 1..=8.min(mots.len() / 3) {
+            let fois_min = if taille == 1 { 4 } else { 3 };
+            for debut in 0..mots.len() {
+                let mut fois = 1;
+                while debut + (fois + 1) * taille <= mots.len()
+                    && normes[debut + fois * taille..debut + (fois + 1) * taille] == normes[debut..debut + taille]
+                {
+                    fois += 1;
+                }
+                if fois >= fois_min && normes[debut..debut + taille].iter().any(|m| !m.is_empty()) {
+                    repli = Some((debut, taille, fois));
+                    break 'cherche;
+                }
+            }
+        }
+        let Some((debut, taille, fois)) = repli else { break };
+        mots.drain(debut + taille..debut + fois * taille);
+    }
+    mots.join(" ")
 }
 
 /// La fin de la première phrase complète de `s` (l'index qui suit sa ponctuation et ses guillemets fermants), si l'on
@@ -546,6 +981,25 @@ pub fn demande_les_nouvelles(dit: &str) -> bool {
     ["quoi de neuf", "du nouveau", "quoi de nouveau", "des nouvelles", "les nouvelles"].iter().any(|e| contient(&n, e))
 }
 
+/// La personne demande-t-elle le point du jour (« Eve, le point », « fais-moi le point ») ? Eve le fait elle-même,
+/// d'après son tableau de bord, sans Claude.
+pub fn demande_le_point(dit: &str) -> bool {
+    let n = normaliser(dit);
+    [
+        "le point",
+        "point",
+        "fais le point",
+        "fais moi le point",
+        "le point du jour",
+        "point du jour",
+        "fais moi le point du jour",
+        "fais moi le point de la journee",
+        "le point de la journee",
+        "mon point du jour",
+    ]
+    .contains(&sans_politesse(&n))
+}
+
 /// La personne demande-t-elle le résumé de la journée d'Eve (ce qu'elle a écrit, créé, modifié, supprimé) ?
 pub fn demande_le_resume(dit: &str) -> bool {
     let n = normaliser(dit);
@@ -556,6 +1010,55 @@ pub fn demande_le_resume(dit: &str) -> bool {
     ]
     .iter()
     .any(|e| contient(&n, e))
+}
+
+/// Ce qu'Eve dit d'une panne de Claude, d'après sa sorte (le champ `error` de Claude Code, ou « reseau » quand l'API
+/// ne répond pas du tout) : à l'écran ce qu'il faut faire, à voix haute l'essentiel. `reprise` : l'heure où la limite
+/// se rouvre (« 15 h 20 »), si elle est connue ; `sur_opus` : Sonnet est une issue (on le choisit dans les réglages,
+/// sans Claude). `None` : une sorte qu'Eve ne sait pas dire mieux que « il y a eu un problème ».
+pub fn phrase_de_panne(panne: &str, reprise: Option<&str>, sur_opus: bool) -> Option<(String, String)> {
+    let pareil = |t: &str| (t.to_string(), t.to_string());
+    Some(match panne {
+        "authentication_failed" | "oauth_org_not_allowed" => (
+            "Claude Code n'est plus connecté à ton compte. Pour le reconnecter : ouvre un terminal, tape « claude », \
+             puis « /login »."
+                .to_string(),
+            "Claude Code n'est plus connecté à ton compte. Le détail est à l'écran.".to_string(),
+        ),
+        "billing_error" => pareil("Ton compte Claude a un problème de facturation : vérifie-le sur claude.ai."),
+        "account_on_hold" => pareil("Ton compte Claude est suspendu : vérifie-le sur claude.ai."),
+        "verification_required" => pareil("Claude demande une vérification de ton compte, sur claude.ai."),
+        "rate_limit" => {
+            let quand = reprise.map(|r| format!(" jusqu'à {r}")).unwrap_or_default();
+            let issue = if sur_opus { " Tu peux choisir Sonnet dans Réglages, Cerveau." } else { "" };
+            pareil(&format!("Ma limite d'utilisation de Claude est atteinte{quand}.{issue}"))
+        }
+        "overloaded" => pareil("Les serveurs de Claude sont surchargés. Redemande-moi dans un moment."),
+        "server_error" => pareil("Claude a un problème de son côté. Redemande-moi dans un moment."),
+        "model_not_found" => (
+            "Le modèle choisi n'est pas disponible : choisis Sonnet dans Réglages › Cerveau.".to_string(),
+            "Le modèle choisi n'est pas disponible. Le détail est à l'écran.".to_string(),
+        ),
+        "max_output_tokens" => pareil("Ma réponse était trop longue : elle a été coupée."),
+        "reseau" => pareil("Je n'arrive pas à joindre Claude : vérifie la connexion Internet."),
+        _ => return None,
+    })
+}
+
+/// La personne demande-t-elle ce qu'Eve a coûté (« combien tu m'as coûté aujourd'hui ? ») ? Eve répond elle-même,
+/// d'après son journal. Elle doit parler d'Eve ou de Claude : « combien m'a coûté la toiture ? » est une demande.
+pub fn demande_le_cout(dit: &str) -> bool {
+    let n = normaliser(dit);
+    n.split_whitespace().count() <= 12
+        && [
+            "combien tu m as coute", "combien m as tu coute", "combien tu as coute", "combien tu me coutes",
+            "combien tu coutes", "combien me coutes tu", "combien coutes tu", "ce que tu m as coute",
+            "ton cout du jour", "ton cout aujourd hui", "combien claude m a coute", "combien claude a coute",
+            "combien a coute claude", "combien m a coute claude", "cout de claude", "couts de claude",
+            "depense en claude", "depenses en claude",
+        ]
+        .iter()
+        .any(|e| contient(&n, e))
 }
 
 /// La personne demande-t-elle d'annuler la dernière modification de fichiers ? « Annule » seul, ou « annule ça »,
@@ -640,6 +1143,224 @@ pub fn nettoyer_transcription(texte: &str) -> String {
 
 #[cfg(test)]
 mod essais {
+    #[test]
+    fn les_rappels_dits_se_lisent() {
+        let r = |t: &str| rappel_dit(t).unwrap_or_else(|| panic!("« {t} »"));
+        let a = |heure, minute, demain| Quand::A { heure, minute, demain };
+        assert_eq!(
+            r("Minuterie 10 minutes."),
+            RappelDit { quand: Quand::Dans(600), texte: String::new(), minuterie: true }
+        );
+        assert_eq!(r("Mets une minuterie de cinq minutes, s'il te plaît").quand, Quand::Dans(300));
+        let pates = r("Minuterie de 12 minutes pour les pâtes");
+        assert_eq!((pates.quand, pates.texte.as_str()), (Quand::Dans(720), "les pâtes"));
+        let g = r("Rappelle-moi dans 20 minutes de sortir le gâteau du four.");
+        assert_eq!((g.quand, g.texte.as_str(), g.minuterie), (Quand::Dans(1200), "sortir le gâteau du four", false));
+        let p = r("Eve, rappelle-moi à 16 h d'appeler le plombier");
+        assert_eq!((p.quand, p.texte.as_str()), (a(16, 0, false), "appeler le plombier"));
+        let m = r("Rappelle-moi de téléphoner à Marie demain à 9 h 30, s'il te plaît");
+        assert_eq!((m.quand, m.texte.as_str()), (a(9, 30, true), "téléphoner à Marie"));
+        let m = r("Rappelle-moi de téléphoner à Marie à 16 h");
+        assert_eq!((m.quand, m.texte.as_str()), (a(16, 0, false), "téléphoner à Marie"));
+        assert_eq!(r("rappelle-moi à 16h30 que le camion arrive").texte, "le camion arrive");
+        assert_eq!(r("Rappelle-moi à 4 h de l'après-midi de passer chez Pierre").quand, a(16, 0, false));
+        assert_eq!(r("Rappelle-moi à 4 h de l'après-midi de passer chez Pierre").texte, "passer chez Pierre");
+        assert_eq!(r("Rappelle-moi dans une demi-heure").quand, Quand::Dans(1800));
+        assert_eq!(r("rappelle-moi dans 1 heure et demie de rappeler le client").quand, Quand::Dans(5400));
+        assert_eq!(r("Rappelle-moi à huit heures de sortir le chien").quand, a(8, 0, false));
+        assert_eq!(r("Rappelle-moi à midi de manger").quand, a(12, 0, false));
+        // Ce qui ne se lit pas aussi sûrement va à Claude.
+        for t in [
+            "Rappelle-moi à 4 de sortir le chien",
+            "Rappelle-moi vendredi d'appeler le notaire",
+            "Quelle heure est-il ?",
+            "Peux-tu me rappeler demain ?",
+            "Minuterie",
+            "Rappelle-moi le nom du plombier",
+            "Minuterie de 10 minutes et après fais le café",
+        ] {
+            assert_eq!(rappel_dit(t), None, "« {t} »");
+        }
+    }
+
+    #[test]
+    fn le_garde_fou_de_l_oreille() {
+        let juste = |t: &str| Transcription::Juste(t.to_string());
+        let doute = |t: &str| match juger_la_transcription(t, 3.0, 0.8, true, &[]) {
+            Transcription::Douteuse { raison, .. } => raison,
+            autre => panic!("« {t} » : {autre:?}"),
+        };
+        // Les phrases ordinaires passent, les courtes aussi.
+        for t in ["Oui", "Non merci", "Ajoute du lait à l'épicerie.", "Qu'est-ce que j'ai demain ?"] {
+            assert_eq!(juger_la_transcription(t, 2.0, 0.6, true, &[]), juste(t), "{t}");
+        }
+        // Une boucle se replie ; douteuse s'il n'en reste presque rien (la forme du journal : « 2, ok. » trois fois).
+        assert_eq!(doute("2, ok. 2, ok. 2, ok."), "une boucle de l'oreille");
+        assert_eq!(
+            juger_la_transcription(
+                "Ajoute du lait à l'épicerie. Ajoute du lait à l'épicerie. Ajoute du lait à l'épicerie.",
+                3.0,
+                9.0,
+                true,
+                &[]
+            ),
+            juste("Ajoute du lait à l'épicerie.")
+        );
+        // Un bruit, une lettre, une autre écriture.
+        assert_eq!(doute("Cough"), "un bruit, rien de clair");
+        assert_eq!(doute("Euh..."), "un bruit, rien de clair");
+        assert_eq!(doute("E."), "un bruit, rien de clair");
+        assert_eq!(doute("Спасибо"), "une autre écriture");
+        // Quarante mots en 2,8 s : inventés.
+        let quarante = ["mot"; 40].iter().enumerate().map(|(k, m)| format!("{m}{k}")).collect::<Vec<_>>().join(" ");
+        assert_eq!(
+            juger_la_transcription(&quarante, 2.8, 1.0, true, &[]),
+            Transcription::Douteuse { texte: quarante.clone(), raison: "trop de mots pour sa durée" }
+        );
+        // Une oreille qui a peiné (11 s de calcul pour 2,6 s de parole) : sur la carte, une boucle ; sur le processeur,
+        // une phrase courte en prend déjà sept (le journal du 23 octobre, avant la carte).
+        assert!(matches!(
+            juger_la_transcription("Dis-moi la météo de demain", 2.6, 11.2, true, &[]),
+            Transcription::Douteuse { raison: "l'oreille a peiné", .. }
+        ));
+        assert_eq!(juger_la_transcription("C'est Léa", 2.5, 8.9, false, &[]), juste("C'est Léa"));
+        // La voix d'Eve, revenue par le micro : la phrase entière dans ce qu'elle disait, ou presque toute.
+        let dites = vec!["Je m'en occupe, je regarde ton agenda de la semaine.".to_string()];
+        assert_eq!(juger_la_transcription("je regarde ton agenda", 1.5, 0.5, true, &dites), Transcription::MaVoix);
+        assert_eq!(
+            juger_la_transcription("Je regarde ton agenda de la semaine prochaine", 3.0, 0.8, true, &dites),
+            Transcription::MaVoix
+        );
+        assert_eq!(
+            juger_la_transcription("Ton agenda", 1.0, 0.4, true, &dites),
+            juste("Ton agenda"),
+            "deux mots : trop peu"
+        );
+        // Une réponse qui reprend ses mots n'est pas sa voix.
+        let dites = vec!["Veux-tu que je l'ajoute à ta liste d'épicerie ?".to_string()];
+        let reponse = "Oui, ajoute-le à ta liste d'épicerie";
+        assert_eq!(juger_la_transcription(reponse, 2.2, 0.6, true, &dites), juste(reponse));
+        assert_eq!(
+            replier_les_boucles("très très très bien"),
+            "très très très bien",
+            "un mot, trois fois : du français"
+        );
+    }
+
+    /// Le garde-fou sur un vrai journal (`EVE_JOURNAL` : son chemin) : ce qu'il aurait fait de chaque transcription.
+    /// `cargo test --release --lib -- --ignored le_garde_fou_sur_un_journal --nocapture`.
+    #[test]
+    #[ignore]
+    fn le_garde_fou_sur_un_journal() {
+        let Some(chemin) = std::env::var_os("EVE_JOURNAL") else { return };
+        let journal = String::from_utf8_lossy(&std::fs::read(chemin).unwrap_or_default()).into_owned();
+        let (mut justes, mut repliees, mut douteuses, mut carte) = (0, 0, 0, false);
+        for ligne in journal.lines() {
+            if ligne.contains(" oreille : Whisper ") {
+                carte = ligne.contains("sur la carte graphique");
+            }
+            let Some((_, apres)) = ligne.split_once(" entendu (") else { continue };
+            let Some((mesures, texte)) = apres.split_once(") : ") else { continue };
+            let Some((parole, calcul)) = mesures.split_once(" s de parole, ") else { continue };
+            let (parole, calcul) =
+                (parole.parse().unwrap_or(0.0), calcul.trim_end_matches(" s").parse().unwrap_or(0.0));
+            let t = nettoyer_transcription(texte);
+            if t.is_empty() {
+                continue;
+            }
+            match juger_la_transcription(&t, parole, calcul, carte, &[]) {
+                Transcription::Juste(j) if j == t => justes += 1,
+                Transcription::Juste(j) => {
+                    repliees += 1;
+                    println!("repliée ({parole} s, {calcul} s) : {t}\n    → {j}");
+                }
+                Transcription::Douteuse { raison, .. } => {
+                    douteuses += 1;
+                    println!("douteuse, {raison} ({parole} s, {calcul} s) : {t}");
+                }
+                Transcription::MaVoix => {}
+            }
+        }
+        println!("{justes} justes, {repliees} repliées, {douteuses} douteuses");
+    }
+
+    #[test]
+    fn la_suite_reprend_ou_la_voix_s_est_arretee() {
+        let phrases: Vec<String> = (1..=30).map(|k| format!("Voici la phrase numéro {k} de la réponse.")).collect();
+        let texte =
+            format!("{}\n\n| a | b |\n|---|---|\n| 1 | 2 |\n---\nLe détail : une note écrite.", phrases.join(" "));
+        let pages = pages_pour_la_voix(&texte);
+        // La première page est ce que la voix a dit en flux, sans « Le reste est à l'écran. ».
+        let mut f = EnFlux::default();
+        let mut dit = f.ajouter(&texte);
+        dit.extend(f.finir());
+        assert_eq!(dit.last().map(String::as_str), Some("Le reste est à l'écran."));
+        assert_eq!(pages[0], dit[..dit.len() - 1].join(" "));
+        // Chaque phrase une fois, le tableau à l'écran seulement, puis le détail, dans sa page.
+        let tout = pages.join(" ");
+        for p in &phrases {
+            assert_eq!(tout.matches(p.as_str()).count(), 1, "{p}");
+        }
+        assert!(!tout.contains('|'));
+        assert_eq!(pages.len(), 3);
+        assert_eq!(pages[2], "Le détail : une note écrite.");
+        assert_eq!(pages_pour_la_voix("Court."), ["Court."]);
+        assert!(pages_pour_la_voix("| a | b |\n|---|---|\n| 1 | 2 |").is_empty());
+    }
+
+    #[test]
+    fn la_suite_repete_et_la_sourdine_se_reconnaissent() {
+        assert!(demande_la_suite("La suite."));
+        assert!(demande_la_suite("Lis-moi la suite, s'il te plaît"));
+        assert!(!demande_la_suite("Continue"), "« continue » : pour Claude");
+        assert!(!demande_la_suite("La suite du projet de toiture ?"));
+        assert!(demande_de_repeter("Répète !"));
+        assert!(demande_de_repeter("Pardon ?"));
+        assert!(!demande_de_repeter("Répète-moi les échéances de la semaine"));
+        assert_eq!(reglage_de_la_sourdine("Sourdine"), Some(true));
+        assert_eq!(reglage_de_la_sourdine("Mode silencieux"), Some(true));
+        assert_eq!(reglage_de_la_sourdine("Parle."), Some(false));
+        assert_eq!(reglage_de_la_sourdine("Tu peux parler, stp"), Some(false));
+        assert_eq!(reglage_de_la_sourdine("Parle-moi de la météo"), None);
+        assert!(est_un_arret("Silence !"), "« silence » arrête ce qui se dit, sans la sourdine");
+        assert_eq!(reglage_de_la_sourdine("Silence !"), None);
+    }
+
+    #[test]
+    fn les_pannes_se_disent() {
+        let (ecrit, dit) = phrase_de_panne("authentication_failed", None, false).unwrap();
+        assert!(ecrit.contains("/login") && dit.ends_with("Le détail est à l'écran."));
+        assert_eq!(
+            phrase_de_panne("rate_limit", Some("15 h 20"), true).unwrap().1,
+            "Ma limite d'utilisation de Claude est atteinte jusqu'à 15 h 20. Tu peux choisir Sonnet dans Réglages, Cerveau."
+        );
+        assert_eq!(
+            phrase_de_panne("rate_limit", None, false).unwrap().1,
+            "Ma limite d'utilisation de Claude est atteinte."
+        );
+        assert!(phrase_de_panne("reseau", None, false).unwrap().0.contains("connexion Internet"));
+        assert_eq!(phrase_de_panne("unknown", None, false), None);
+        assert_eq!(phrase_de_panne("", None, false), None);
+    }
+
+    #[test]
+    fn le_point_se_reconnait() {
+        assert!(demande_le_point("Le point."));
+        assert!(demande_le_point("Fais-moi le point, s'il te plaît"));
+        assert!(demande_le_point("Eve, fais-moi le point"), "tapé avec le nom d'Eve");
+        assert!(demande_la_suite("Ok Eve, la suite"));
+        assert!(!demande_le_point("Le point sur le chantier de la rue Principale"), "un autre point : pour Claude");
+    }
+
+    #[test]
+    fn la_question_du_cout_se_reconnait() {
+        assert!(demande_le_cout("Combien tu m'as coûté aujourd'hui ?"));
+        assert!(demande_le_cout("combien tu coûtes ?"));
+        assert!(demande_le_cout("Combien Claude a coûté aujourd'hui"));
+        assert!(!demande_le_cout("Combien m'a coûté la toiture ?"), "le coût d'autre chose : une demande");
+        assert!(!demande_le_cout("Combien ça coûte, un abonnement Claude Max ?"));
+    }
+
     #[test]
     fn le_resume_et_l_annulation_se_reconnaissent() {
         assert!(demande_le_resume("Eve, fais-moi le résumé de ma journée"));

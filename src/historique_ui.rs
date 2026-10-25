@@ -523,11 +523,19 @@ impl Historique {
                         ancien: false,
                         pieces: &pieces,
                         en_cours: false,
+                        tour: "",
                     };
                     natif::bulle(ui, &toi, cartes, &mut gestes);
                     let reponse = if e.reponse.trim().is_empty() { "(sans réponse)" } else { e.reponse.as_str() };
-                    let eve =
-                        Ligne { de: "eve", texte: reponse, heure: "", ancien: false, pieces: &[], en_cours: false };
+                    let eve = Ligne {
+                        de: "eve",
+                        texte: reponse,
+                        heure: "",
+                        ancien: false,
+                        pieces: &[],
+                        en_cours: false,
+                        tour: "",
+                    };
                     natif::bulle(ui, &eve, cartes, &mut gestes);
                     if !e.issue.is_empty() {
                         issue(ui, &e.issue);

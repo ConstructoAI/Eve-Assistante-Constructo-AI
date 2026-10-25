@@ -85,6 +85,8 @@ impl Cerveau {
         consigne.push_str(&consigne_du_modele(&l.modele, &l.effort));
         consigne.push_str("\n\n");
         consigne.push_str(&consigne_des_dessins());
+        consigne.push_str("\n\n");
+        consigne.push_str(&consigne_des_rappels(&crate::reglages::dossier_local()));
         let mut c = Command::new(&l.claude);
         c.current_dir(&l.dossier)
             .args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"])
@@ -516,6 +518,27 @@ pub fn consigne_des_dessins() -> String {
          les dessine pas). Simple et lisible : il s'écrit pendant qu'on attend, quelques dizaines d'éléments suffisent. \
          Un graphique : ses axes, ses valeurs écrites, de vraies données.",
         police = crate::cartes::POLICE_DES_DESSINS
+    )
+}
+
+/// La ligne qui ouvre la partie « RAPPELS » de la consigne.
+const ENTETE_RAPPELS: &str = "RAPPELS";
+
+/// La partie « RAPPELS » de la consigne, que reçoit toute Eve : Claude pose un rappel par une carte, qu'Eve sonne à
+/// l'heure dite, et lit ou retire les rappels dans `rappels.json` du dossier local (`local`). Elle vit avec le programme
+/// qui les sonne (`rappels.rs`).
+pub fn consigne_des_rappels(local: &Path) -> String {
+    format!(
+        "{ENTETE_RAPPELS}\n\
+         - Eve sait sonner un rappel ou une minuterie à l'heure dite, même si elle a redémarré entre-temps, même la nuit. \
+         L'heure de la demande est en tête de chaque message ([Eve : …]) : compte à partir d'elle.\n\
+         - Pour en poser un : dis en une phrase ce que tu as noté et pour quand, puis, après les trois tirets, une carte \
+         ```carte {{\"type\":\"rappel\",\"a\":\"AAAA-MM-JJ HH:MM\",\"texte\":\"appeler le notaire\"}}``` — l'heure \
+         locale, et le texte court qu'Eve dira après « Rappel : ». Une carte par rappel ; jamais un rappel promis sans \
+         sa carte.\n\
+         - Les rappels vivent dans {fichier} (une liste JSON : id, a, texte, dit, minuterie) : lis-le pour dire ceux qui \
+         viennent ; pour en retirer ou en déplacer un, récris ce fichier (Eve le relit).",
+        fichier = local.join("rappels.json").display()
     )
 }
 

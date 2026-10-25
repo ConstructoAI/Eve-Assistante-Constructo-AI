@@ -57,6 +57,18 @@ LUI PARLER
   (« Eve, scanne… »).
 · Elle dessine dans sa fenêtre, comme Claude dans claude.ai : « Eve, dessine-moi le plan du sous-sol », « fais-moi un
   schéma », « montre-moi un graphique de… ». Le dessin s'ouvre en grand ou s'enregistre (PNG ou SVG) d'un clic.
+· Sans attendre Claude, tout de suite : « minuterie 10 minutes », « rappelle-moi dans 20 minutes de… », « rappelle-moi
+  à 16 h d'appeler le plombier » (elle sonne à l'heure dite, même après un redémarrage ; un rappel plus vague, comme
+  « vendredi », passe par Claude, qui le pose aussi) ; « le point » (l'agenda, les échéances, la décision du jour, les
+  rappels) ; « la suite » (ce que sa voix n'a pas lu d'une longue réponse), « répète », « sourdine » et « parle » ;
+  « combien tu m'as coûté aujourd'hui ? ».
+· Dans sa fenêtre : un lien s'ouvre d'un clic ; « Copier » sous chaque réponse (un tableau se colle en colonnes dans
+  Excel) ; une capture d'écran se colle (Ctrl+V) comme une pièce jointe ; sous chaque réponse, sa durée et son coût.
+  Une phrase mal entendue ne part pas : Eve le dit, et la met dans la saisie, à corriger.
+· Une conversation par jour : un redémarrage dans la journée reprend celle du jour ; chaque matin, une neuve.
+· Dans le thème clair de Constructo AI, son portrait peut prendre la place de l'orbe : Réglages › Thème › Portrait
+  d'Eve, « Choisir une image… » — une photo, ou une image détourée (un PNG au fond transparent), dont la tête sort du
+  cercle.
 · Ce qui ne se défait pas attend « je confirme », de vive voix ou d'un clic : une suppression demandée à la voix, et
   toute écriture dans Constructo AI (voir plus bas). Un simple « oui » ne suffit pas. Elle ne lit jamais ses propres
   jetons ni tes fichiers de clés (.env).

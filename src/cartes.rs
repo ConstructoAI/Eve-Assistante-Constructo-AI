@@ -256,14 +256,26 @@ impl Cartes {
             match carte {
                 None if en_cours => en_preparation(ui, "Carte en préparation…"),
                 None => bloc_brut(ui, json, id),
-                Some(Carte::Agenda(a)) => cadre(ui, icones::CALENDRIER, &a.titre, "", |ui| agenda(ui, a, id)),
+                // L'agenda, le tableau et le brouillon se copient d'un clic dans leur tête ([`en_texte`]).
+                Some(Carte::Agenda(a)) => {
+                    cadre(ui, icones::CALENDRIER, &a.titre, "", Some(json), |ui| agenda(ui, a, id));
+                }
                 Some(Carte::Tableau(t)) => {
                     let n = t.lignes.len() as u64;
                     let meta = if n == 0 { String::new() } else { nombre_de(n, "ligne") };
-                    cadre(ui, pictos::TABLEAU, &t.titre, &meta, |ui| tableau(ui, t, mesures, mises_en_page, id));
+                    let contenu = |ui: &mut egui::Ui| tableau(ui, t, mesures, mises_en_page, id);
+                    cadre(ui, pictos::TABLEAU, &t.titre, &meta, Some(json), contenu);
                 }
-                Some(Carte::Brouillon(b)) => geste = cadre(ui, icones::COURRIEL, &b.titre, "", |ui| brouillon(ui, b)),
+                Some(Carte::Brouillon(b)) => {
+                    geste = cadre(ui, icones::COURRIEL, &b.titre, "", Some(json), |ui| brouillon(ui, b));
+                }
                 Some(Carte::Apercu(c)) => geste = apercu(ui, c, apercus, racines, lecture, temps, id),
+                Some(Carte::Rappel { a, texte }) => {
+                    cadre(ui, icones::CLOCHE, "Rappel", &quand_du_rappel(a), None, |ui| {
+                        let encre = teintes(ui).encre;
+                        ui.add(egui::Label::new(RichText::new(texte.as_str()).size(13.5).color(encre)).wrap());
+                    });
+                }
             }
             ui.add_space(2.0);
         });
@@ -352,6 +364,11 @@ enum Carte {
     Tableau(Tableau),
     Brouillon(Brouillon),
     Apercu(CarteApercu),
+    /// Un rappel que Claude a posé (le chef l'a mis dans `rappels.json`) : son heure, « AAAA-MM-JJ HH:MM », et son texte.
+    Rappel {
+        a: String,
+        texte: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -488,8 +505,48 @@ fn lire_carte(json: &str) -> Option<Carte> {
             let titre = ou(champ("titre"), if nom.is_empty() { "Aperçu" } else { &nom });
             Carte::Apercu(CarteApercu { titre, sorte: sorte_de_fichier(&nom), chemin, nom })
         }
+        "rappel" => Carte::Rappel { a: champ("a"), texte: champ("texte") },
         _ => return None,
     })
+}
+
+/// Une carte en texte, pour le presse-papiers : un tableau en colonnes séparées par des tabulations, en-tête et pied
+/// compris (il se colle dans Excel cellule par cellule) ; un agenda, son titre, puis un jour par paragraphe et un
+/// événement par ligne ; un brouillon, son destinataire, son objet et son extrait ; un aperçu, son titre et son chemin.
+/// `None` : une carte qui ne se lit pas.
+pub fn en_texte(json: &str) -> Option<String> {
+    // Dans une cellule, une tabulation ou un saut de ligne changerait de case ou de rangée.
+    let cellule = |c: &str| c.replace(['\t', '\r', '\n'], " ");
+    let rangee = |r: &[String]| r.iter().map(|c| cellule(c)).collect::<Vec<_>>().join("\t");
+    Some(match lire_carte(json)? {
+        Carte::Tableau(t) => {
+            let entete = (!t.colonnes.is_empty()).then(|| rangee(&t.colonnes));
+            entete.into_iter().chain(t.lignes.iter().chain(&t.pieds).map(|r| rangee(r))).collect::<Vec<_>>().join("\n")
+        }
+        Carte::Agenda(a) => {
+            let mut paragraphes = vec![a.titre.clone()];
+            for j in &a.jours {
+                let mut lignes: Vec<String> = (!j.jour.is_empty()).then(|| j.jour.clone()).into_iter().collect();
+                for e in &j.evenements {
+                    let quand = if e.heure.is_empty() { String::new() } else { format!("{} · ", e.heure) };
+                    let detail = if e.detail.is_empty() { String::new() } else { format!(" — {}", e.detail) };
+                    lignes.push(format!("{quand}{}{detail}", e.titre));
+                }
+                paragraphes.push(lignes.join("\n"));
+            }
+            paragraphes.join("\n\n")
+        }
+        Carte::Brouillon(b) => format!("{}\nÀ : {}\nObjet : {}\n\n{}", b.titre, b.a, b.objet, b.extrait),
+        Carte::Apercu(c) => format!("{} : {}", c.titre, c.chemin),
+        Carte::Rappel { a, texte } => format!("Rappel, {} : {texte}", quand_du_rappel(&a)),
+    })
+}
+
+/// L'heure d'une carte « rappel », telle qu'on la dit (« 16 h », « demain à 9 h ») ; telle qu'écrite si elle ne se lit
+/// pas.
+fn quand_du_rappel(a: &str) -> String {
+    crate::rappels::heure_ecrite(a)
+        .map_or_else(|| a.to_string(), |a| crate::rappels::heure_dite(&a, &crate::journal::date()))
 }
 
 /// Une valeur d'une carte, en texte, quelle qu'elle soit (`txt` dans la page) : rien pour `null`, le JSON d'un objet.
@@ -1143,6 +1200,13 @@ fn entite(nom: &str) -> Option<String> {
     Some(c.to_string())
 }
 
+/// Une image du disque (PNG, JPEG, GIF, WebP), décodée par Windows dans son bon sens, son grand côté dans `limite` :
+/// le portrait d'Eve.
+pub(crate) fn image_du_disque(chemin: &Path, limite: usize) -> Result<egui::ColorImage, String> {
+    let octets = std::fs::read(chemin).map_err(|e| e.to_string())?;
+    systeme::image(&octets, limite).map(|(image, _)| image).map_err(|p| p.message())
+}
+
 /// Ce que Windows sait lire lui-même (WinRT) : les images, dans leur bon sens, et la première page d'un PDF.
 #[cfg(windows)]
 mod systeme {
@@ -1427,7 +1491,7 @@ fn apercu(
     let (sorte, chemin) = match juge {
         Ok(x) => x,
         Err(p) => {
-            cadre(ui, picto, &c.titre, "", |ui| avis(ui, &p));
+            cadre(ui, picto, &c.titre, "", None, |ui| avis(ui, &p));
             return None;
         }
     };
@@ -1457,7 +1521,7 @@ fn apercu(
     let precision = a.precision(sorte, &c.nom);
     let ouvrable = a.ouvrable();
     let mut ouvrir = false;
-    cadre(ui, picto, &c.titre, &precision, |ui| {
+    cadre(ui, picto, &c.titre, &precision, None, |ui| {
         ouvrir = match &a.etat {
             Etat::Attente => {
                 attente(ui, "Lecture de l'aperçu…");
@@ -1657,8 +1721,8 @@ fn carte_dessin(
     enregistre: &Arc<Mutex<Option<(u64, String)>>>,
     id: egui::Id,
 ) -> Option<Geste> {
-    let (mut ouvrir, mut enregistrer) = (false, false);
-    cadre(ui, pictos::DESSIN, &d.titre, "", |ui| {
+    let (mut ouvrir, mut enregistrer, mut copier) = (false, false, false);
+    cadre(ui, pictos::DESSIN, &d.titre, "", None, |ui| {
         let dispo = ui.available_width();
         let taille = match &d.etat {
             EtatDessin::Image { intrinseque, .. } => remplir(*intrinseque, vec2(dispo, haut_max(ui))),
@@ -1687,6 +1751,7 @@ fn carte_dessin(
                     ui.spacing_mut().item_spacing.x = 8.0;
                     ouvrir |= bouton_lien(ui, pictos::OUVRIR, "Ouvrir en grand").clicked();
                     enregistrer = bouton_lien(ui, pictos::ENREGISTRER, "Enregistrer").clicked();
+                    copier = bouton_lien(ui, icones::COPIER, "Copier l'image").clicked();
                 });
                 let fait = enregistre.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 if let Some((_, message)) = fait.filter(|(c, _)| *c == cle) {
@@ -1706,6 +1771,9 @@ fn carte_dessin(
     });
     if enregistrer {
         enregistrer_le_dessin(&d.titre, d.svg.clone(), cle, enregistre.clone(), ui.ctx().clone());
+    }
+    if copier {
+        copier_le_dessin(d.svg.clone(), cle, enregistre.clone(), ui.ctx().clone());
     }
     if !ouvrir {
         return None;
@@ -1772,7 +1840,7 @@ fn svg_complet(svg: &str) -> Cow<'_, str> {
 }
 
 /// Le titre d'un dessin : son premier « <title> », sinon « Dessin ».
-fn titre_du_dessin(svg: &str) -> String {
+pub(crate) fn titre_du_dessin(svg: &str) -> String {
     let titre = svg
         .find("<title")
         .and_then(|i| svg[i..].find('>').map(|j| i + j + 1))
@@ -1827,6 +1895,26 @@ fn enregistrer_le_dessin(
     });
 }
 
+/// « Copier l'image » : le dessin rendu comme pour « Enregistrer » en PNG ([`PNG_COTE`] pixels, sur du blanc), dans
+/// un fil, puis au presse-papiers en image (il se colle dans un courriel, Word ou Paint) ; ce qu'il en est se dit sous
+/// lui.
+fn copier_le_dessin(svg: Arc<str>, cle: u64, avis: Arc<Mutex<Option<(u64, String)>>>, ctx: egui::Context) {
+    thread::spawn(move || {
+        let rendu = panic::catch_unwind(AssertUnwindSafe(|| toile_du_dessin(&svg, f32::INFINITY, PNG_COTE)));
+        let message = match rendu {
+            Ok(Ok((toile, _))) => {
+                let taille = [toile.width() as usize, toile.height() as usize];
+                ctx.copy_image(egui::ColorImage::from_rgba_premultiplied(taille, toile.data()));
+                "Image copiée : colle-la avec Ctrl+V.".to_string()
+            }
+            Ok(Err(p)) => format!("Le dessin ne se copie pas : {}", p.message()),
+            Err(_) => "Le dessin ne se copie pas : son SVG ne se lit pas.".to_string(),
+        };
+        *avis.lock().unwrap_or_else(|e| e.into_inner()) = Some((cle, message));
+        ctx.request_repaint();
+    });
+}
+
 /// Le fichier choisi pour enregistrer un dessin, avec son extension : celle qu'on a tapée (.png ou .svg), sinon celle
 /// du type choisi dans la boîte (1 : PNG, 2 : SVG).
 fn avec_extension(chemin: PathBuf, type_choisi: u32) -> PathBuf {
@@ -1846,17 +1934,23 @@ fn ecrire_le_dessin(chemin: &Path, svg: &str) -> Result<(), String> {
     std::fs::write(chemin, octets).map_err(|e| e.to_string())
 }
 
-/// Le dessin en PNG, sur du blanc, [`PNG_COTE`] pixels de grand côté : de quoi l'imprimer ou l'envoyer.
+/// Le dessin en PNG, sur du blanc, [`PNG_COTE`] pixels de grand côté : de quoi l'imprimer ou l'envoyer. Sur du blanc,
+/// chaque pixel est opaque : ses couleurs prémultipliées sont ses couleurs.
 fn png_du_dessin(svg: &str) -> Result<Vec<u8>, String> {
     let (toile, _) = toile_du_dessin(svg, f32::INFINITY, PNG_COTE).map_err(|p| p.message())?;
+    png_rgba(toile.width(), toile.height(), toile.data())
+}
+
+/// Une image en PNG : `rgba`, ses pixels rangée par rangée, quatre octets chacun, non prémultipliés. Pour un dessin
+/// enregistré et pour une capture d'écran collée dans la fenêtre.
+pub(crate) fn png_rgba(largeur: u32, hauteur: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     let mut octets = Vec::new();
     {
-        let mut e = png::Encoder::new(&mut octets, toile.width(), toile.height());
+        let mut e = png::Encoder::new(&mut octets, largeur, hauteur);
         e.set_color(png::ColorType::Rgba);
         e.set_depth(png::BitDepth::Eight);
         let mut w = e.write_header().map_err(|e| e.to_string())?;
-        // Sur du blanc, chaque pixel est opaque : ses couleurs prémultipliées sont ses couleurs.
-        w.write_image_data(toile.data()).map_err(|e| e.to_string())?;
+        w.write_image_data(rgba).map_err(|e| e.to_string())?;
         w.finish().map_err(|e| e.to_string())?;
     }
     Ok(octets)
@@ -1865,12 +1959,13 @@ fn png_du_dessin(svg: &str) -> Result<Vec<u8>, String> {
 // ---- Le cadre et les autres cartes ---------------------------------------------------------------------------------
 
 /// Le cadre commun des cartes (K2) : l'icône dans un carré arrondi, le titre, au besoin une précision à droite, puis
-/// le contenu.
+/// le contenu. `copie` : le JSON d'une carte qui se copie ([`en_texte`]) — une icône au bout de la tête.
 fn cadre<R>(
     ui: &mut egui::Ui,
     code: char,
     titre: &str,
     precision: &str,
+    copie: Option<&str>,
     contenu: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
     let t = teintes(ui);
@@ -1881,21 +1976,26 @@ fn cadre<R>(
         .inner_margin(Margin { left: 12, right: 12, top: 10, bottom: 12 })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            tete(ui, code, titre, precision);
+            tete(ui, code, titre, precision, copie);
             ui.add_space(9.0);
             contenu(ui)
         })
         .inner
 }
 
-/// La tête d'une carte : la tuile, le titre (sur plusieurs lignes s'il le faut), la précision.
-fn tete(ui: &mut egui::Ui, code: char, titre: &str, precision: &str) {
+/// Le côté de l'icône « Copier » d'une tête de carte.
+const COPIE: f32 = 24.0;
+
+/// La tête d'une carte : la tuile, le titre (sur plusieurs lignes s'il le faut), la précision ; au bout, l'icône
+/// « Copier » d'une carte qui se copie (`copie`, son JSON) : son texte au presse-papiers, et une coche un moment.
+fn tete(ui: &mut egui::Ui, code: char, titre: &str, precision: &str, copie: Option<&str>) {
     let t = teintes(ui);
     let dispo = ui.available_width();
     let p = ui.painter();
     let g_precision =
         (!precision.is_empty()).then(|| p.layout_no_wrap(precision.to_string(), FontId::proportional(11.5), t.encre_3));
-    let reserve = g_precision.as_ref().map_or(0.0, |g| g.size().x + 12.0);
+    let l_copie = if copie.is_some() { COPIE + 6.0 } else { 0.0 };
+    let reserve = g_precision.as_ref().map_or(0.0, |g| g.size().x + 12.0) + l_copie;
     let l_titre = (dispo - TUILE - 10.0 - reserve).max(60.0);
     let g_titre = p.layout(titre.to_string(), FontId::new(14.0, famille(natif::SEMI)), t.encre, l_titre);
     let ligne = g_titre.rows.first().map_or(18.0, |l| l.rect().height());
@@ -1912,11 +2012,24 @@ fn tete(ui: &mut egui::Ui, code: char, titre: &str, precision: &str) {
         StrokeKind::Inside,
     );
     let icone = FontId::new(13.0, famille(natif::ICONES));
-    p.text(tuile.center(), Align2::CENTER_CENTER, code, icone, t.accent);
+    p.text(tuile.center(), Align2::CENTER_CENTER, code, icone.clone(), t.accent);
     p.galley(pos2(r.left() + TUILE + 10.0, r.top() + decalage), g_titre, t.encre);
     if let Some(g) = g_precision {
-        p.galley(pos2(r.right() - g.size().x, tuile.center().y - g.size().y / 2.0), g, t.encre_3);
+        p.galley(pos2(r.right() - l_copie - g.size().x, tuile.center().y - g.size().y / 2.0), g, t.encre_3);
     }
+    let Some(json) = copie else { return };
+    let place = Rect::from_center_size(pos2(r.right() - COPIE / 2.0, tuile.center().y), Vec2::splat(COPIE));
+    let rep = ui.interact(place, ui.scope_id().with(("copier-la-carte", json)), Sense::click());
+    let copie = natif::copier_au_clic(ui, &rep, rep.id, || en_texte(json).unwrap_or_default());
+    let p = ui.painter();
+    if rep.hovered() {
+        p.rect_filled(place, 6.0, t.accent.gamma_multiply(0.13));
+    }
+    let (code, encre) = if copie { (icones::OUI, t.accent) } else { (icones::COPIER, t.encre_3) };
+    let encre = if rep.hovered() { t.accent } else { encre };
+    p.text(place.center(), Align2::CENTER_CENTER, code, icone, encre);
+    let bulle = if copie { "Copié" } else { "Copier (un tableau se colle dans Excel)" };
+    rep.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(bulle);
 }
 
 /// Ce qu'une carte dit quand elle n'a rien.
@@ -2514,6 +2627,28 @@ mod essais {
 
     fn carte(json: &str) -> Carte {
         lire_carte(json).unwrap_or_else(|| panic!("la carte se lit : {json}"))
+    }
+
+    #[test]
+    fn une_carte_se_copie_en_texte() {
+        // Un tableau en colonnes pour Excel : une tabulation dans une cellule n'en fait pas deux ; le pied suit.
+        let t = r#"{"type":"tableau","titre":"Factures","colonnes":["Client","Montant"],
+                    "lignes":[["A\tB","1 200 $"],["C","300 $"]],"pied":["Total","1 500 $"]}"#;
+        assert_eq!(en_texte(t).unwrap(), "Client\tMontant\nA B\t1 200 $\nC\t300 $\nTotal\t1 500 $");
+        let a = r#"{"type":"agenda","titre":"Demain","jours":[{"jour":"lun. 26 oct.","evenements":[
+                    {"heure":"9 h","titre":"Dentiste","detail":"Clinique Exemple"},"Collecte"]}]}"#;
+        assert_eq!(en_texte(a).unwrap(), "Demain\n\nlun. 26 oct.\n9 h · Dentiste — Clinique Exemple\nCollecte");
+        let b = r#"{"type":"brouillon","a":["x@exemple.ca","y@exemple.ca"],"objet":"Soumission","extrait":"Bonjour"}"#;
+        assert_eq!(
+            en_texte(b).unwrap(),
+            "Brouillon prêt dans Outlook\nÀ : x@exemple.ca, y@exemple.ca\nObjet : Soumission\n\nBonjour"
+        );
+        assert_eq!(
+            en_texte(r#"{"type":"apercu","chemin":"C:\\Exemple\\plan.pdf"}"#).unwrap(),
+            "plan.pdf : C:\\Exemple\\plan.pdf"
+        );
+        assert_eq!(en_texte("{pas du json"), None);
+        assert_eq!(titre_du_dessin("<svg><title>Plan &amp; coupe</title></svg>"), "Plan & coupe");
     }
 
     #[test]
