@@ -55,6 +55,8 @@ LUI PARLER
   sur ton ordinateur, travailler à plusieurs en parallèle, se servir de Chrome, des connecteurs de ton compte claude.ai,
   des serveurs MCP de ton poste et de Constructo AI ; regarder une pièce jointe ou une page photographiée avec la caméra
   (« Eve, scanne… »).
+· Elle dessine dans sa fenêtre, comme Claude dans claude.ai : « Eve, dessine-moi le plan du sous-sol », « fais-moi un
+  schéma », « montre-moi un graphique de… ». Le dessin s'ouvre en grand ou s'enregistre (PNG ou SVG) d'un clic.
 · Ce qui ne se défait pas attend « je confirme », de vive voix ou d'un clic : une suppression demandée à la voix, et
   toute écriture dans Constructo AI (voir plus bas). Un simple « oui » ne suffit pas. Elle ne lit jamais ses propres
   jetons ni tes fichiers de clés (.env).

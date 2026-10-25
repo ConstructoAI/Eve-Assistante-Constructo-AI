@@ -659,8 +659,9 @@ mod en_ligne {
 /// anime.gif, image.webp, plan.svg, soumission.pdf, page.html ; gros.png est trop gros) ; les autres chemins se
 /// refusent (absent, hors du dossier, réseau, « .. », la jonction `lien`, relatif). Les scènes : tout (d'office),
 /// agenda, tableau, brouillon, apercus (les images), plans (le SVG, le PDF), pages (la page HTML, le WebP, le GIF),
-/// refus et chemins (ce qui ne s'affiche pas), divers. Un clic sur une carte affiche le geste qu'elle rend, et rien
-/// d'autre : l'essai n'a pas de chef.
+/// refus et chemins (ce qui ne s'affiche pas), dessins (les blocs « ```svg » d'Eve), divers. Un clic sur une carte
+/// affiche le geste qu'elle rend, et rien d'autre : l'essai n'a pas de chef (« Enregistrer » un dessin ouvre la vraie
+/// boîte de Windows).
 pub fn cartes(args: &[String]) -> i32 {
     use eframe::egui;
     let dossier =
@@ -671,7 +672,8 @@ pub fn cartes(args: &[String]) -> i32 {
         .filter(|e| scene == "tout" || e.scene.split(' ').any(|s| s == scene))
         .collect();
     if exemples.is_empty() {
-        let scenes = "tout, vitrine, agenda, tableau, brouillon, apercus, plans, pages, refus, chemins, divers";
+        let scenes =
+            "tout, vitrine, agenda, tableau, brouillon, apercus, plans, pages, refus, chemins, dessins, divers";
         eprintln!("scène inconnue : {scene} ({scenes})");
         return 2;
     }
@@ -697,11 +699,13 @@ pub fn cartes(args: &[String]) -> i32 {
     }
 }
 
-/// Une bulle de l'essai : sa scène, la phrase qui précède la carte, la carte, Eve l'écrit-elle encore, son opacité.
+/// Une bulle de l'essai : sa scène, la phrase qui précède la carte, la carte (son JSON, ou le SVG d'un dessin), Eve
+/// l'écrit-elle encore, son opacité.
 struct ExempleDeCarte {
     scene: &'static str,
     avant: &'static str,
-    json: String,
+    contenu: String,
+    dessin: bool,
     en_cours: bool,
     opacite: f32,
 }
@@ -714,7 +718,22 @@ fn exemples_de_cartes(dossier: &std::path::Path) -> Vec<ExempleDeCarte> {
     let f = |nom: &str| dossier.join(nom).display().to_string();
     let apercu =
         |titre: &str, chemin: String| json!({ "type": "apercu", "titre": titre, "chemin": chemin }).to_string();
-    let ex = |scene, avant, json: String| ExempleDeCarte { scene, avant, json, en_cours: false, opacite: 1.0 };
+    let ex = |scene, avant, contenu: String| ExempleDeCarte {
+        scene,
+        avant,
+        contenu,
+        dessin: false,
+        en_cours: false,
+        opacite: 1.0,
+    };
+    let dessin = |scene, avant, svg: &str, en_cours| ExempleDeCarte {
+        scene,
+        avant,
+        contenu: svg.to_string(),
+        dessin: true,
+        en_cours,
+        opacite: 1.0,
+    };
     let factures = json!({
         "type": "tableau",
         "titre": "Factures à vérifier",
@@ -801,6 +820,19 @@ fn exemples_de_cartes(dossier: &std::path::Path) -> Vec<ExempleDeCarte> {
         "id": "00000000A1B2C3D4E5F60718293A4B5C"
     })
     .to_string();
+    // La carte de la capture du 24 octobre : sa note au pied s'étirait dans la colonne « Jour ».
+    let meteo = json!({
+        "type": "tableau",
+        "titre": "Météo des trois jours, 24 au 26 octobre 2026",
+        "colonnes": ["Jour", "Min / max", "Conditions", "Précipitations"],
+        "lignes": [
+            ["Samedi 24", "0 / 11 °C", "Ensoleillé", "0 mm"],
+            ["Dimanche 25", "3 / 14 °C", "Soleil, doux", "0 mm"],
+            ["Lundi 26", "3 / 10 °C", "Nuageux, bruine l'après-midi", "1 mm"]
+        ],
+        "pied": ["Prévisions de wttr.in, consultées le samedi 24 octobre 2026. Au-delà du lundi 26, prévision non trouvée."]
+    })
+    .to_string();
     let inconnue = json!({ "type": "graphique", "titre": "Ventes par mois", "donnees": [12, 18, 9] }).to_string();
     let illisible = r#"{"type":"tableau","colonnes":["A","B"],"lignes":[["1","2"]"#.to_string();
     let fond_d_ecran = r"C:\Windows\Web\Wallpaper\Windows\img0.jpg".to_string();
@@ -808,6 +840,7 @@ fn exemples_de_cartes(dossier: &std::path::Path) -> Vec<ExempleDeCarte> {
         ex("agenda vitrine", "Voici ta journée de demain.", demain),
         ex("agenda", "Toutes les sortes de la semaine.", semaine),
         ex("tableau vitrine", "Deux factures attendent.", factures.clone()),
+        ex("tableau", "La météo des trois jours.", meteo),
         ex("tableau", "Le détail des achats.", long),
         ex("brouillon vitrine", "Le brouillon est prêt.", brouillon),
         ex("apercus", "Le graphique des ventes.", apercu("Graphique des ventes", f("image.png"))),
@@ -825,19 +858,26 @@ fn exemples_de_cartes(dossier: &std::path::Path) -> Vec<ExempleDeCarte> {
         ex("chemins", "Par une jonction vers dehors.", apercu("Par le lien", f(r"lien\img0.jpg"))),
         ex("chemins", "Un document Word.", apercu("Rapport", f("rapport.docx"))),
         ex("chemins", "Un chemin relatif.", apercu("Plan", "plan.svg".into())),
+        dessin("dessins vitrine", "Voici le plan du rez-de-chaussée.", DESSIN_PLAN, false),
+        dessin("dessins", "Tes dépenses d'octobre, par catégorie.", DESSIN_GRAPHIQUE, false),
+        dessin("dessins", "Un dessin plus haut que large, écrit comme dans une page web.", DESSIN_HAUT, false),
+        dessin("dessins divers", "Un dessin qui ne se lit pas : son SVG tel quel.", r#"<svg><rect width="10""#, false),
+        dessin("dessins divers", "Eve le dessine encore.", r#"<svg xmlns="http://www.w3.org/2000/svg""#, true),
         ex("divers", "Une carte illisible : son JSON tel quel.", illisible),
         ex("divers", "Une sorte de carte inconnue.", inconnue),
         ExempleDeCarte {
             scene: "divers",
             avant: "Eve l'écrit encore.",
-            json: r#"{"type":"tableau","titre":"Factures à vér"#.into(),
+            contenu: r#"{"type":"tableau","titre":"Factures à vér"#.into(),
+            dessin: false,
             en_cours: true,
             opacite: 1.0,
         },
         ExempleDeCarte {
             scene: "divers",
             avant: "Une ligne de la séance précédente.",
-            json: factures,
+            contenu: factures,
+            dessin: false,
             en_cours: false,
             opacite: 0.55,
         },
@@ -845,6 +885,52 @@ fn exemples_de_cartes(dossier: &std::path::Path) -> Vec<ExempleDeCarte> {
         ex("divers", "", json!({ "type": "tableau", "titre": "Rien à montrer" }).to_string()),
     ]
 }
+
+/// Les dessins de l'essai, comme Claude les écrit d'après la consigne (« DESSINS ») : un plan, avec ses pièces, leurs
+/// aplats et leurs cotes ; un graphique à barres, ses axes et ses valeurs écrites.
+const DESSIN_PLAN: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500" font-family="Segoe UI">
+<title>Plan du rez-de-chaussée</title>
+<rect x="43" y="43" width="354" height="254" fill="#2563EB" fill-opacity="0.15"/>
+<rect x="403" y="43" width="354" height="254" fill="#059669" fill-opacity="0.15"/>
+<rect x="43" y="303" width="714" height="154" fill="#D97706" fill-opacity="0.15"/>
+<rect x="40" y="40" width="720" height="420" fill="none" stroke="#1F2937" stroke-width="6"/>
+<line x1="400" y1="40" x2="400" y2="300" stroke="#1F2937" stroke-width="4"/>
+<line x1="40" y1="300" x2="760" y2="300" stroke="#1F2937" stroke-width="4"/>
+<path d="M 330 300 A 50 50 0 0 1 380 250" fill="none" stroke="#DC2626" stroke-width="2" stroke-dasharray="6 4"/>
+<text x="220" y="170" font-size="22" text-anchor="middle" fill="#1F2937">Salon</text>
+<text x="220" y="198" font-size="15" text-anchor="middle" fill="#6B7280">4,2 × 3,8 m</text>
+<text x="580" y="170" font-size="22" text-anchor="middle" fill="#1F2937">Cuisine</text>
+<text x="580" y="198" font-size="15" text-anchor="middle" fill="#6B7280">4,2 × 3,8 m</text>
+<text x="400" y="385" font-size="22" text-anchor="middle" fill="#1F2937">Chambres et salle de bain</text>
+</svg>"##;
+
+const DESSIN_GRAPHIQUE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" font-family="Segoe UI">
+<title>Dépenses d'octobre, par catégorie</title>
+<line x1="90" y1="380" x2="760" y2="380" stroke="#1F2937" stroke-width="2"/>
+<line x1="90" y1="50" x2="90" y2="380" stroke="#1F2937" stroke-width="2"/>
+<g font-size="14" fill="#6B7280" text-anchor="end">
+<text x="80" y="385">0 $</text><text x="80" y="207">500 $</text><text x="80" y="57">900 $</text>
+</g>
+<rect x="130" y="89" width="110" height="291" fill="#2563EB"/>
+<rect x="290" y="270" width="110" height="110" fill="#059669"/>
+<rect x="450" y="167" width="110" height="213" fill="#D97706"/>
+<rect x="610" y="327" width="110" height="53" fill="#7C3AED"/>
+<g font-size="16" fill="#1F2937" text-anchor="middle">
+<text x="185" y="80">820 $</text><text x="345" y="261">310 $</text><text x="505" y="158">600 $</text><text x="665" y="318">150 $</text>
+<text x="185" y="405">Épicerie</text><text x="345" y="405">Essence</text><text x="505" y="405">Garderie</text><text x="665" y="405">Loisirs</text>
+</g>
+</svg>"##;
+
+/// Un dessin écrit comme dans une page web (sans espace de noms), plus haut que large : il prend la hauteur de la
+/// conversation, pas toute sa largeur.
+const DESSIN_HAUT: &str = r##"<svg viewBox="0 0 400 700">
+<title>L'arbre de la cour</title>
+<rect x="180" y="420" width="40" height="230" fill="#92400E"/>
+<circle cx="200" cy="300" r="170" fill="#059669" fill-opacity="0.3" stroke="#059669" stroke-width="4"/>
+<circle cx="140" cy="260" r="16" fill="#DC2626"/><circle cx="250" cy="330" r="16" fill="#DC2626"/>
+<line x1="20" y1="650" x2="380" y2="650" stroke="#1F2937" stroke-width="3"/>
+<text x="200" y="690" font-size="26" text-anchor="middle">Le pommier</text>
+</svg>"##;
 
 struct EssaiDesCartes {
     cartes: crate::cartes::Cartes,
@@ -930,7 +1016,11 @@ fn bulle_d_essai(
                         let encre = couleurs::ENCRE.gamma_multiply(e.opacite);
                         ui.label(RichText::new(e.avant).size(14.0).color(encre));
                     }
-                    geste = cartes.dessiner(ui, &e.json, e.en_cours, e.opacite);
+                    geste = if e.dessin {
+                        cartes.dessin(ui, &e.contenu, !e.en_cours, e.opacite)
+                    } else {
+                        cartes.dessiner(ui, &e.contenu, e.en_cours, e.opacite)
+                    };
                 });
         });
     });

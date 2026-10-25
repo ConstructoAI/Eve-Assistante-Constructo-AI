@@ -288,8 +288,9 @@
   .ag-titre { font-size: 14px; font-weight: 700; line-height: 1.4; }
   .ag-detail { font-size: 12.5px; line-height: 1.4; color: var(--ink-2); }
   .ag-ev.ferie .ag-titre { font-weight: 600; color: var(--ink-2); }
+  /* Le tableau se montre tout entier (c'est le fil qui défile) ; trop large, il défile en largeur dans sa carte. */
   .carte-defile {
-    overflow: auto; max-height: 340px; margin: 0 -12px -10px; padding: 0 12px 10px;
+    overflow-x: auto; overflow-y: hidden; margin: 0 -12px -10px; padding: 0 12px 10px;
     scrollbar-width: thin; scrollbar-color: var(--rule-strong) transparent;
   }
   .carte table {
@@ -306,6 +307,7 @@
   .carte tbody td { border-bottom: 1px solid var(--rule); }
   .carte tbody tr:last-child td { border-bottom: 0; }
   .carte tfoot td { font-weight: 700; border-top: 1.5px solid var(--rule-strong); padding-top: 7px; padding-bottom: 0; }
+  .carte tfoot td.note { font-weight: 400; font-size: 12.5px; color: var(--ink-2); }
   .carte .nombre { text-align: right; white-space: nowrap; }
   .br-champs { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 10px; margin: 0 0 8px; font-size: 13.5px; line-height: 1.4; }
   .br-champs dt { padding-top: 2px; font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--ink-3); }
@@ -320,7 +322,13 @@
   .ap-image { display: block; max-width: 100%; max-height: 360px; margin: 0 auto 8px; border-radius: 6px; background: #fff; }
   .ap-cadre { display: block; width: 100%; height: 360px; margin-bottom: 8px; border: 1px solid var(--rule); border-radius: 6px; background: #fff; }
   .ap-erreur { margin: 0 0 8px; font-size: 13px; color: var(--ink-3); }
+  /* Un dessin d'Eve : une image (jamais une page : ni script ni lien n'y vivent), sur une feuille blanche. */
+  .dessin-feuille {
+    display: block; width: 100%; height: auto; max-height: 85vh; object-fit: contain; margin: 0 0 8px;
+    border-radius: 6px; background: #fff;
+  }
   .br-ouvrir { display: inline-flex; align-items: center; gap: 7px; border-color: var(--accent); color: var(--accent); }
+  a.br-ouvrir { text-decoration: none; }
   .br-ouvrir svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
   .carte.preparation {
     display: flex; align-items: center; min-height: 44px; background: transparent; border-style: dashed;
@@ -2562,12 +2570,14 @@ function changer(cle, valeur) {
   return true;
 }
 
-// ---- Le texte d'Eve : un peu de markdown, et des cartes --------------------------------------------------------
-// Un bloc « ```carte » suivi d'un objet JSON et fermé par « ``` » se dessine en carte ; un autre bloc « ``` » reste du
-// texte à chasse fixe ; le reste est du texte (gras, code, séparateur « --- » : ce qui le suit est le détail écrit).
+// ---- Le texte d'Eve : un peu de markdown, des cartes et des dessins ---------------------------------------------
+// Un bloc « ```carte » suivi d'un objet JSON et fermé par « ``` » se dessine en carte ; un bloc « ```svg » en dessin
+// (un SVG dans un bloc « ```xml », « ```html » ou sans nom aussi) ; un autre bloc « ``` » reste du texte à chasse fixe ;
+// le reste est du texte (gras, code, séparateur « --- » : ce qui le suit est le détail écrit).
 const OUVRE = /^\s*```\s*([\p{L}\w-]*)\s*$/u;
 const OUVRE_CARTE = /^\s*```\s*carte\s*(\{.*)$/u;
 const FERME = /^\s*```\s*$/;
+const estUnSvg = (t) => { const s = t.trimStart(); return s.startsWith("<svg") || (s.startsWith("<?xml") && s.includes("<svg")); };
 function decouper(texte, enCours) {
   const lignes = String(texte ?? "").replace(/\r\n?/g, "\n").split("\n");
   const blocs = [];
@@ -2575,7 +2585,7 @@ function decouper(texte, enCours) {
   const vider = () => { if (tampon.length) blocs.push({ sorte: "texte", lignes: tampon }); tampon = []; };
   for (let i = 0; i < lignes.length; i++) {
     const l = lignes[i], derniere = i === lignes.length - 1;
-    let m = OUVRE_CARTE.exec(l), carte = true, contenu = [];
+    let m = OUVRE_CARTE.exec(l), carte = true, svg = false, info = "carte", contenu = [];
     if (m) {
       // « ```carte {…} ``` » sur une seule ligne, ou le JSON qui commence sur la ligne d'ouverture.
       const reste = m[1].trimEnd();
@@ -2583,9 +2593,10 @@ function decouper(texte, enCours) {
       if (reste.endsWith("```")) { blocs.push({ sorte: "carte", ferme: true, contenu: reste.slice(0, -3), brut: l }); continue; }
       contenu.push(reste);
     } else if ((m = OUVRE.exec(l))) {
-      const info = m[1].toLowerCase();
-      // Pendant l'écriture, « ``` » ou « ```car » sur la dernière ligne annonce déjà une carte.
+      info = m[1].toLowerCase();
+      // Pendant l'écriture, « ``` » ou « ```car » sur la dernière ligne annonce déjà une carte, « ```s » un dessin.
       carte = info === "carte" || (enCours && derniere && "carte".startsWith(info));
+      svg = !carte && (info === "svg" || (enCours && derniere && "svg".startsWith(info)));
       vider();
     } else {
       // Pendant l'écriture, une clôture qui n'a encore qu'un ou deux accents graves ne s'affiche pas.
@@ -2598,11 +2609,13 @@ function decouper(texte, enCours) {
       const k = lignes[i];
       brut.push(k);
       if (FERME.test(k)) { ferme = true; break; }
-      // « …} ``` » : la clôture collée à la fin du JSON.
-      if (carte && /```\s*$/.test(k)) { contenu.push(k.replace(/```\s*$/, "")); ferme = true; break; }
+      // « …} ``` », « </svg>``` » : la clôture collée à la fin du JSON ou du dessin.
+      if ((carte || svg) && /```\s*$/.test(k)) { contenu.push(k.replace(/```\s*$/, "")); ferme = true; break; }
       contenu.push(k);
     }
-    blocs.push({ sorte: carte ? "carte" : "code", ferme, contenu: contenu.join("\n"), brut: brut.join("\n") });
+    const texteDuBloc = contenu.join("\n");
+    const dessin = svg || (!carte && ["", "xml", "html"].includes(info) && estUnSvg(texteDuBloc));
+    blocs.push({ sorte: carte ? "carte" : dessin ? "dessin" : "code", ferme, contenu: texteDuBloc, brut: brut.join("\n") });
   }
   vider();
   return blocs;
@@ -2634,6 +2647,8 @@ function morceauxEve(texte, enCours) {
         fabriquer: () => { const d = el("div", "texte"); d.innerHTML = r.html; return d; } });
     } else if (b.sorte === "carte") {
       sortie.push({ cle: "c" + (b.ferme ? 1 : 0) + (enCours ? 1 : 0) + b.brut, large: true, fabriquer: () => fabriquerCarte(b, enCours) });
+    } else if (b.sorte === "dessin") {
+      sortie.push({ cle: "d" + (b.ferme ? 1 : 0) + (enCours ? 1 : 0) + b.brut, large: true, fabriquer: () => fabriquerDessin(b, enCours) });
     } else {
       sortie.push({ cle: "k" + b.brut, large: true, fabriquer: () => el("pre", "bloc-brut", b.contenu) });
     }
@@ -2648,6 +2663,8 @@ const PICTOS = {
   brouillon: '<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="m3.8 6.8 8.2 6 8.2-6"/></svg>',
   image: '<svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="10" r="1.8"/><path d="m4 18 5.5-5 4 3.5 2.5-2 4 3.5"/></svg>',
   ouvrir: '<svg viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M19 14v4.5a1.5 1.5 0 0 1-1.5 1.5h-12A1.5 1.5 0 0 1 4 18.5v-12A1.5 1.5 0 0 1 5.5 5H10"/></svg>',
+  dessin: '<svg viewBox="0 0 24 24"><path d="M12 3.5a8.5 8.5 0 1 0 0 17c1 0 1.5-.7 1.5-1.5 0-.9-.9-1.5-.9-2.4 0-.9.7-1.6 1.6-1.6h2.3a4 4 0 0 0 4-4C20.5 7 16.7 3.5 12 3.5Z"/><circle cx="7.6" cy="11" r=".9"/><circle cx="10.3" cy="7.4" r=".9"/><circle cx="14.6" cy="7.6" r=".9"/></svg>',
+  enregistrer: '<svg viewBox="0 0 24 24"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19.5h14"/></svg>',
 };
 // Les sortes d'événements du calendrier d'Entrepreneur Général.
 const SORTES = { confirme: "Confirmé", attente: "À confirmer", appel: "Appel à faire", echeance: "Échéance", gros: "Jalon", ferie: "Férié" };
@@ -2716,10 +2733,17 @@ function carteTableau(d) {
     if (balise === "th") x.scope = "col";
     return x;
   };
-  const rangees = (parent, liste, balise) => {
+  const rangees = (parent, liste, balise, pied) => {
     for (const l of liste) {
       const tr = el("tr");
-      for (let k = 0; k < n; k++) tr.append(cellule(balise, l[k] || "", k));
+      if (pied && n > 1 && l.length === 1) {
+        // Une note au pied (une seule case : « Source : … ») prend toute la largeur, pas la première colonne seule.
+        const td = el("td", "note", l[0]);
+        td.colSpan = n;
+        tr.append(td);
+      } else {
+        for (let k = 0; k < n; k++) tr.append(cellule(balise, l[k] || "", k));
+      }
       parent.append(tr);
     }
   };
@@ -2728,7 +2752,7 @@ function carteTableau(d) {
   const corps = el("tbody");
   rangees(corps, lignes, "td");
   table.append(corps);
-  if (pieds.length) { const t = el("tfoot"); rangees(t, pieds, "td"); table.append(t); }
+  if (pieds.length) { const t = el("tfoot"); rangees(t, pieds, "td", true); table.append(t); }
   // Trop large pour la fenêtre : le tableau défile dans sa carte, jamais la page.
   const defile = el("div", "carte-defile");
   defile.append(table);
@@ -2792,6 +2816,40 @@ function carteApercu(d) {
   return c;
 }
 const FABRIQUES = new Map([["agenda", carteAgenda], ["tableau", carteTableau], ["brouillon", carteBrouillon], ["apercu", carteApercu]]);
+// Un dessin d'Eve (« ```svg ») : sur une feuille blanche, de toute la largeur de sa carte. Une image seulement : dans
+// une balise img, ni script ni lien ne vivent. Claude l'écrit souvent comme dans une page, sans l'espace de noms du
+// SVG ; il s'ajoute (comme dans la fenêtre native, cartes.rs). « Enregistrer » le télécharge en SVG.
+function svgComplet(svg) {
+  const debut = svg.indexOf("<svg");
+  if (debut < 0) return svg;
+  const fin = svg.indexOf(">", debut);
+  const balise = svg.slice(debut, fin < 0 ? svg.length : fin);
+  let ajout = "";
+  if (!balise.includes("xmlns=")) ajout += ' xmlns="http://www.w3.org/2000/svg"';
+  if (svg.includes("xlink:") && !balise.includes("xmlns:xlink")) ajout += ' xmlns:xlink="http://www.w3.org/1999/xlink"';
+  return svg.slice(0, debut + 4) + ajout + svg.slice(debut + 4);
+}
+function fabriquerDessin(b, enCours) {
+  if (!b.ferme && enCours) return el("div", "carte preparation", "Dessin en préparation…");
+  const svg = svgComplet(b.contenu.trim());
+  const doc = new DOMParser().parseFromString(svg, "image/svg+xml");
+  if (doc.documentElement?.nodeName !== "svg" || doc.querySelector("parsererror")) return el("pre", "bloc-brut", b.brut);
+  const titre = doc.querySelector("title")?.textContent.replace(/\s+/g, " ").trim() || "Dessin";
+  const c = cadre("dessin", titre, PICTOS.dessin);
+  const url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+  const i = el("img", "dessin-feuille");
+  i.alt = titre;
+  i.src = url;
+  const a = el("a", "bouton petit br-ouvrir");
+  a.href = url;
+  a.download = (titre.replace(/[<>:"/\\|?*\u0000-\u001f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 60) || "Dessin") + ".svg";
+  const icone = el("span");
+  icone.setAttribute("aria-hidden", "true");
+  icone.innerHTML = PICTOS.enregistrer;
+  a.append(icone, "Enregistrer");
+  c.append(i, a);
+  return c;
+}
 // Une carte illisible (JSON faux, sorte inconnue) s'affiche telle quelle ; une carte pas encore fermée s'annonce.
 function fabriquerCarte(b, enCours) {
   if (!b.ferme) return enCours ? el("div", "carte preparation", "Carte en préparation…") : el("pre", "bloc-brut", b.brut);

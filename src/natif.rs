@@ -2388,12 +2388,20 @@ fn points_de_suspension(ui: &mut egui::Ui) {
     ui.add_space(8.0);
 }
 
-/// Un bloc du texte d'Eve : du texte, un bloc de code, ou une carte (son JSON).
+/// Un bloc du texte d'Eve : du texte, un bloc de code, une carte (son JSON), ou un dessin (son SVG ; `fini` : sa
+/// clôture est lue, ou la réponse est finie).
 #[derive(Debug, PartialEq)]
 enum Bloc {
     Texte(Vec<String>),
     Code(String),
     Carte(String),
+    Dessin { svg: String, fini: bool },
+}
+
+/// Un texte qui est un SVG : il commence par sa balise, au besoin après la déclaration XML.
+fn est_un_svg(t: &str) -> bool {
+    let t = t.trim_start();
+    t.starts_with("<svg") || (t.starts_with("<?xml") && t.contains("<svg"))
 }
 
 /// Un tableau en markdown au début de `lignes` : son en-tête, sa ligne de tirets, ses rangées ; rendu en carte
@@ -2418,9 +2426,10 @@ fn tableau_markdown(lignes: &[&str]) -> Option<(String, usize)> {
 }
 
 /// Le texte d'Eve en blocs, comme la page (`decouper` dans `eve.html`) : « ```carte » ouvre une carte (son JSON sur la
-/// même ligne ou les suivantes, sa clôture au besoin collée à la fin), un autre « ``` » un bloc de code, le reste est
-/// du texte. Pendant l'écriture (`en_cours`), une clôture naissante en dernière ligne ne s'affiche pas, et « ``` »
-/// ou « ```car » en dernière ligne annonce déjà une carte.
+/// même ligne ou les suivantes, sa clôture au besoin collée à la fin), « ```svg » un dessin — un SVG dans un bloc
+/// « ```xml », « ```html » ou sans nom en est un aussi —, un autre « ``` » un bloc de code, le reste est du texte.
+/// Pendant l'écriture (`en_cours`), une clôture naissante en dernière ligne ne s'affiche pas, « ``` » ou « ```car » en
+/// dernière ligne annonce déjà une carte, « ```s » un dessin.
 fn decouper(texte: &str, en_cours: bool) -> Vec<Bloc> {
     let lignes: Vec<&str> = texte.lines().collect();
     let mut blocs = Vec::new();
@@ -2456,6 +2465,8 @@ fn decouper(texte: &str, en_cours: bool) -> Vec<Bloc> {
         }
         let carte =
             json_ici.is_some() || mot.is_some_and(|m| m == "carte" || (en_cours && derniere && "carte".starts_with(m)));
+        let svg = !carte
+            && mot.is_some_and(|m| m.eq_ignore_ascii_case("svg") || (en_cours && derniere && "svg".starts_with(m)));
         let mut contenu: Vec<&str> = Vec::new();
         if let Some(j) = json_ici {
             if let Some(seul) = j.trim_end().strip_suffix("```") {
@@ -2466,21 +2477,36 @@ fn decouper(texte: &str, en_cours: bool) -> Vec<Bloc> {
             contenu.push(j);
         }
         i += 1;
+        let mut ferme = false;
         while i < lignes.len() {
             let k = lignes[i];
             i += 1;
             if k.trim() == "```" {
+                ferme = true;
                 break;
             }
-            // « …} ``` » : la clôture collée à la fin du JSON.
-            if carte && let Some(avant) = k.trim_end().strip_suffix("```") {
+            // « …} ``` », « </svg>``` » : la clôture collée à la fin du JSON ou du dessin.
+            if (carte || svg)
+                && let Some(avant) = k.trim_end().strip_suffix("```")
+            {
                 contenu.push(avant);
+                ferme = true;
                 break;
             }
             contenu.push(k);
         }
         let contenu = contenu.join("\n");
-        blocs.push(if carte { Bloc::Carte(contenu) } else { Bloc::Code(contenu) });
+        let dessin = svg
+            || (!carte
+                && mot.is_some_and(|m| matches!(m.to_ascii_lowercase().as_str(), "" | "xml" | "html"))
+                && est_un_svg(&contenu));
+        blocs.push(if carte {
+            Bloc::Carte(contenu)
+        } else if dessin {
+            Bloc::Dessin { svg: contenu, fini: ferme || !en_cours }
+        } else {
+            Bloc::Code(contenu)
+        });
     }
     if !tampon.is_empty() {
         blocs.push(Bloc::Texte(tampon));
@@ -2540,6 +2566,11 @@ fn texte_d_eve(
             }
             Bloc::Carte(json) => {
                 if let Some(g) = cartes.dessiner(ui, &json, en_cours, opacite) {
+                    gestes.push(g);
+                }
+            }
+            Bloc::Dessin { svg, fini } => {
+                if let Some(g) = cartes.dessin(ui, &svg, fini, opacite) {
                     gestes.push(g);
                 }
             }
@@ -2824,6 +2855,32 @@ mod essais {
         assert_eq!(v["lignes"][1], serde_json::json!(["1 nov.", "Heure"]));
         assert_eq!(blocs[2], texte(&["Fin."]));
         assert_eq!(decouper("| a | b |\nsuite", false), [texte(&["| a | b |", "suite"])]);
+    }
+
+    #[test]
+    fn un_bloc_svg_est_un_dessin() {
+        let texte = |l: &[&str]| Bloc::Texte(l.iter().map(|s| s.to_string()).collect());
+        let dessin = |svg: &str, fini: bool| Bloc::Dessin { svg: svg.to_string(), fini };
+        let svg = "<svg viewBox=\"0 0 10 10\">\n<rect width=\"10\" height=\"10\"/>\n</svg>";
+        assert_eq!(
+            decouper(&format!("Voici le plan.\n---\n```svg\n{svg}\n```\nFin."), false),
+            [texte(&["Voici le plan.", "---"]), dessin(svg, true), texte(&["Fin."])]
+        );
+        // Un SVG dans un bloc « ```xml », « ```html » ou sans nom est un dessin aussi ; une autre page reste du code.
+        for nom in ["xml", "html", "", "SVG"] {
+            assert_eq!(decouper(&format!("```{nom}\n{svg}\n```"), false), [dessin(svg, true)], "« {nom} »");
+        }
+        let declare = format!("<?xml version=\"1.0\"?>\n{svg}");
+        assert_eq!(decouper(&format!("```xml\n{declare}\n```"), false), [dessin(&declare, true)]);
+        assert_eq!(decouper("```html\n<p>Bonjour</p>\n```", false), [Bloc::Code("<p>Bonjour</p>".into())]);
+        // La clôture collée à la fin du dessin.
+        assert_eq!(decouper("```svg\n<svg></svg>```\nB", false), [dessin("<svg></svg>", true), texte(&["B"])]);
+        // Pendant l'écriture : pas fini tant que sa clôture n'est pas lue ; « ```s » l'annonce déjà ; la réponse finie,
+        // un dessin sans clôture se dessine quand même.
+        assert_eq!(decouper("```svg\n<svg viewBox", true), [dessin("<svg viewBox", false)]);
+        assert_eq!(decouper("A\n```sv", true), [texte(&["A"]), dessin("", false)]);
+        assert_eq!(decouper(&format!("```svg\n{svg}"), false), [dessin(svg, true)]);
+        assert_eq!(decouper("A\n```car", true), [texte(&["A"]), Bloc::Carte(String::new())], "« ```car » : une carte");
     }
 
     #[test]

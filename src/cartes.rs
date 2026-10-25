@@ -3,11 +3,17 @@
 //! fichier du poste. La page d'Edge les dessinait (`page\eve.html` : `carteAgenda`, `carteTableau`, `carteBrouillon`,
 //! `carteApercu`) ; la fenêtre native les dessine ici, avec le même contenu et les mêmes règles, dans son propre style.
 //! Leurs formats : `docs\fenetre-native.md`, § 2.6 et 2.7. Le découpage du texte en blocs est celui de `natif.rs`.
+//! Une carte se montre tout entière : c'est la conversation qui défile, jamais la carte (un tableau ne défile qu'en
+//! largeur, quand ses colonnes ne tiennent pas).
+//!
+//! Claude dessine aussi, comme dans claude.ai : un bloc « ```svg » de sa réponse devient un dessin (`Cartes::dessin`),
+//! sur une feuille blanche, de toute la largeur de la conversation, qu'on ouvre en grand ou qu'on enregistre (PNG ou
+//! SVG). Le dessin se fait dans le fil des aperçus, par resvg, à la largeur où il s'affiche.
 //!
 //! Le module ne parle pas au chef : un clic rend un [`Geste`] (l'action et sa valeur, celles de la page), que la
 //! fenêtre lui transmet. Ce qui dure d'une image à l'autre vit dans [`Cartes`] : les cartes déjà lues (le JSON ne se
-//! relit pas à chaque image, un tableau ne se remesure pas), les aperçus et leurs textures, le fil qui lit les
-//! fichiers.
+//! relit pas à chaque image, un tableau ne se remesure pas), les aperçus et les dessins avec leurs textures, le fil qui
+//! lit les fichiers et dessine les SVG.
 //!
 //! L'aperçu lit un fichier : jamais dans l'image, toujours dans ce fil ; 25 Mo au plus ; et seulement un fichier local,
 //! sous le dossier de travail ou le dossier local d'Eve. C'est le correctif n° 5 de l'analyse : la page ouvrait
@@ -15,12 +21,13 @@
 //! chemin se juge deux fois : sur sa forme d'abord, sans toucher au disque (un chemin réseau est refusé avant toute
 //! ouverture) ; puis, dans le fil, sur ce qu'il désigne vraiment, les jonctions et les liens résolus par Windows.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Read;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread;
 use std::time::SystemTime;
 
@@ -36,13 +43,22 @@ use crate::natif::{self, couleurs, icone, icones, melange, semi};
 
 /// Un aperçu : 25 Mo au plus, comme celui de la page (`ecran.rs`).
 const APERCU_MAX: u64 = 25 * 1024 * 1024;
-/// La hauteur d'un aperçu dans sa carte, comme dans la page (`.ap-image`, `.ap-cadre`).
+/// La hauteur d'une image dans sa carte, au moins (`.ap-image`, `.ap-cadre` dans la page) : une conversation plus haute
+/// en donne davantage ([`haut_max`]).
 const APERCU_HAUT: f32 = 360.0;
-/// La hauteur d'un tableau avant qu'il défile dans sa carte (`.carte-defile`).
-const TABLEAU_HAUT: f32 = 340.0;
 /// Le grand côté d'une texture d'aperçu : de quoi remplir une carte sur un écran à 200 %, sans charger une vieille
 /// carte graphique.
 const TEXTURE_MAX: usize = 2048;
+/// Un dessin : 512 Ko de SVG au plus. Claude en écrit quelques-uns, pendant qu'on attend ; au-delà, ce n'est plus un
+/// dessin de réponse.
+const DESSIN_MAX: usize = 512 * 1024;
+/// Un dessin se rend à la largeur où il s'affiche, arrondie au palier du dessus (en pixels) : une fenêtre qu'on étire
+/// ne le redessine qu'à chaque palier franchi.
+const PALIER: u32 = 256;
+/// La police d'un texte de dessin qui n'en nomme pas : celle de la fenêtre (resvg prendrait Times New Roman).
+pub const POLICE_DES_DESSINS: &str = "Segoe UI";
+/// Le grand côté d'un dessin enregistré en PNG : de quoi l'imprimer ou l'envoyer.
+const PNG_COTE: usize = 2048;
 /// Tant qu'un aperçu est à l'écran, son fichier se revérifie à ce rythme : Claude réécrit souvent le même plan, et la
 /// carte montre alors la nouvelle version (la page gardait l'ancienne).
 const REVERIFIER: f64 = 2.0;
@@ -150,6 +166,9 @@ mod pictos {
     pub const OUVRIR: char = '\u{E8A7}';
     pub const BOUCLIER: char = '\u{E730}';
     pub const INFO: char = '\u{E946}';
+    /// La palette d'un dessin, la disquette d'« Enregistrer ».
+    pub const DESSIN: char = '\u{E790}';
+    pub const ENREGISTRER: char = '\u{E74E}';
 }
 
 // ---- Ce que rend une carte, et ce qui dure ------------------------------------------------------------------------
@@ -162,12 +181,18 @@ pub struct Geste {
     pub valeur: Value,
 }
 
-/// Ce qui dure d'une image à l'autre : les cartes déjà lues, les aperçus et leurs textures, les lectures en cours.
+/// Ce qui dure d'une image à l'autre : les cartes déjà lues, les aperçus et les dessins avec leurs textures, les
+/// lectures en cours.
 pub struct Cartes {
     /// Les cartes déjà analysées, par l'empreinte de leur JSON.
     modeles: HashMap<u64, Modele>,
     /// Les aperçus, par le chemin qu'écrit la carte.
     apercus: HashMap<String, Apercu>,
+    /// Les dessins, par l'empreinte de leur SVG.
+    dessins: HashMap<u64, Dessin>,
+    /// Ce qu'a donné le dernier « Enregistrer » d'un dessin (l'empreinte du dessin, et la phrase à montrer sous lui) :
+    /// la boîte de dialogue tient dans son fil, qui le dépose ici.
+    enregistre: Arc<Mutex<Option<(u64, String)>>>,
     /// Les dossiers d'où un aperçu se lit, normalisés : le premier jugement, sur la forme du chemin.
     racines: Vec<Chemin>,
     /// Le dossier local du spécialiste, toujours parmi eux.
@@ -186,9 +211,11 @@ impl Cartes {
         let mut cartes = Cartes {
             modeles: HashMap::new(),
             apercus: HashMap::new(),
+            dessins: HashMap::new(),
+            enregistre: Arc::default(),
             racines: Vec::new(),
             local,
-            lecture: Lecture { racines: Arc::default(), envoi: None, rendus: Arc::default() },
+            lecture: Lecture { racines: Arc::default(), envoi: None, rendus: Arc::default(), dessins: Arc::default() },
             menage: u64::MAX,
             occurrences: HashMap::new(),
         };
@@ -227,7 +254,7 @@ impl Cartes {
             ui.add_space(2.0);
             let Modele { carte, mesures, mises_en_page, .. } = modele;
             match carte {
-                None if en_cours => en_preparation(ui),
+                None if en_cours => en_preparation(ui, "Carte en préparation…"),
                 None => bloc_brut(ui, json, id),
                 Some(Carte::Agenda(a)) => cadre(ui, icones::CALENDRIER, &a.titre, "", |ui| agenda(ui, a, id)),
                 Some(Carte::Tableau(t)) => {
@@ -237,6 +264,32 @@ impl Cartes {
                 }
                 Some(Carte::Brouillon(b)) => geste = cadre(ui, icones::COURRIEL, &b.titre, "", |ui| brouillon(ui, b)),
                 Some(Carte::Apercu(c)) => geste = apercu(ui, c, apercus, racines, lecture, temps, id),
+            }
+            ui.add_space(2.0);
+        });
+        geste
+    }
+
+    /// Dessine le dessin `svg` (un bloc « ```svg » de la réponse) dans la bulle d'Eve. `fini` : sa clôture est lue (tant
+    /// qu'Eve l'écrit, « Dessin en préparation… ») ; `opacite` : comme pour une carte. Rend le geste qu'un clic demande.
+    pub fn dessin(&mut self, ui: &mut egui::Ui, svg: &str, fini: bool, opacite: f32) -> Option<Geste> {
+        let temps = ui.input(|i| i.time);
+        self.ranger(ui.ctx(), temps);
+        let cle = empreinte_du_texte(svg);
+        let fois = self.occurrences.entry(cle).or_insert(0);
+        *fois += 1;
+        let id = ui.scope_id().with(("dessin", cle, *fois));
+        let Cartes { dessins, lecture, local, enregistre, .. } = self;
+        let mut geste = None;
+        ui.vertical(|ui| {
+            ui.multiply_opacity(opacite);
+            ui.add_space(2.0);
+            if fini {
+                let d = dessins.entry(cle).or_insert_with(|| Dessin::nouveau(svg, temps));
+                d.vu = temps;
+                geste = carte_dessin(ui, cle, d, lecture, local, enregistre, id);
+            } else {
+                en_preparation(ui, "Dessin en préparation…");
             }
             ui.add_space(2.0);
         });
@@ -257,8 +310,15 @@ impl Cartes {
                 a.recevoir(ctx, &cle, lu);
             }
         }
+        let dessins = std::mem::take(&mut *self.lecture.dessins.lock().unwrap_or_else(|e| e.into_inner()));
+        for (cle, rendu) in dessins {
+            if let Some(d) = self.dessins.get_mut(&cle) {
+                d.recevoir(ctx, cle, rendu);
+            }
+        }
         self.modeles.retain(|_, m| temps - m.vu < OUBLIER_CARTE);
         self.apercus.retain(|_, a| a.en_lecture || temps - a.vu < OUBLIER);
+        self.dessins.retain(|_, d| d.en_lecture || temps - d.vu < OUBLIER);
     }
 }
 
@@ -731,7 +791,7 @@ enum Lu {
     Echec { probleme: Probleme, existe: bool, empreinte: Option<Empreinte> },
 }
 
-/// Ce qu'un aperçu dit quand il ne s'affiche pas.
+/// Ce qu'un aperçu ou un dessin dit quand il ne s'affiche pas.
 #[derive(Debug, Clone, PartialEq)]
 enum Probleme {
     Refuse(Refus),
@@ -740,12 +800,20 @@ enum Probleme {
     Illisible,
     PdfIllisible,
     SorteInconnue,
+    /// Un dessin dont le SVG ne se lit pas, ou trop gros (sa taille, en octets).
+    DessinIllisible,
+    DessinTropGros(usize),
 }
 
 impl Probleme {
     fn message(&self) -> String {
         let debut = "L'aperçu ne s'affiche pas : ";
         match self {
+            Probleme::DessinIllisible => "Ce dessin ne s'affiche pas : son SVG ne se lit pas.".to_string(),
+            Probleme::DessinTropGros(n) => format!(
+                "Ce dessin ne s'affiche pas : son SVG est trop gros ({}, quand un dessin en prend 512 Ko au plus).",
+                taille_lisible(*n as u64)
+            ),
             Probleme::Refuse(Refus::Reseau) => format!("{debut}Eve n'ouvre pas de fichier sur le réseau."),
             Probleme::Refuse(Refus::Dehors) => {
                 format!("{debut}Eve n'ouvre que les fichiers de son dossier de travail.")
@@ -770,53 +838,97 @@ impl Probleme {
         match self {
             Probleme::Refuse(_) => (pictos::BOUCLIER, couleurs::AMBRE),
             Probleme::SorteInconnue => (pictos::INFO, couleurs::ENCRE_3),
-            Probleme::TropGros(_) => (icones::ALERTE, couleurs::AMBRE),
+            Probleme::TropGros(_) | Probleme::DessinTropGros(_) => (icones::ALERTE, couleurs::AMBRE),
             _ => (icones::ALERTE, couleurs::ENCRE_3),
         }
     }
 }
 
-/// Le fil qui lit les fichiers des aperçus : il naît à la première lecture et dépose ce qu'il a lu dans `rendus`.
+/// Ce que la fenêtre demande au fil de dessiner : un dessin d'Eve, à `largeur` pixels.
+struct DemandeDeDessin {
+    cle: u64,
+    svg: Arc<str>,
+    largeur: u32,
+    /// Le grand côté d'une texture.
+    limite: usize,
+    ctx: egui::Context,
+}
+
+/// Ce que le fil rend d'un dessin : l'image et sa taille d'origine (son viewBox) ; `None` s'il ne se lit pas.
+type DessinRendu = Option<(egui::ColorImage, Vec2)>;
+
+/// Un travail du fil : lire l'aperçu d'un fichier, ou dessiner un SVG d'Eve.
+enum Travail {
+    Apercu(Demande),
+    Dessin(DemandeDeDessin),
+}
+
+/// Le fil qui lit les fichiers des aperçus et dessine les dessins : il naît au premier travail et dépose ce qu'il a fait
+/// dans `rendus` et `dessins`.
 struct Lecture {
     /// Les dossiers permis, tels quels : le fil les résout sur le disque.
     racines: Arc<Vec<PathBuf>>,
-    envoi: Option<mpsc::Sender<Demande>>,
+    envoi: Option<mpsc::Sender<Travail>>,
     rendus: Arc<Mutex<Vec<(String, Lu)>>>,
+    dessins: Arc<Mutex<Vec<(u64, DessinRendu)>>>,
 }
 
 impl Lecture {
     /// Confie une lecture au fil ; `false` s'il ne la prend pas (il n'a pas pu naître, ou s'est arrêté).
     fn demander(&mut self, d: Demande) -> bool {
+        self.confier(Travail::Apercu(d))
+    }
+
+    /// Confie un dessin au fil ; `false` s'il ne le prend pas.
+    fn dessiner(&mut self, d: DemandeDeDessin) -> bool {
+        self.confier(Travail::Dessin(d))
+    }
+
+    fn confier(&mut self, t: Travail) -> bool {
         if self.envoi.is_none() {
-            let (envoi, recu) = mpsc::channel::<Demande>();
-            let (racines, rendus) = (self.racines.clone(), self.rendus.clone());
+            let (envoi, recu) = mpsc::channel::<Travail>();
+            let (racines, rendus, dessins) = (self.racines.clone(), self.rendus.clone(), self.dessins.clone());
             let ne = thread::Builder::new()
                 .name("eve-apercus".into())
-                .spawn(move || lire_sans_fin(&recu, &racines, &rendus));
+                .spawn(move || lire_sans_fin(&recu, &racines, &rendus, &dessins));
             if ne.is_err() {
                 return false;
             }
             self.envoi = Some(envoi);
         }
-        self.envoi.as_ref().is_some_and(|e| e.send(d).is_ok())
+        self.envoi.as_ref().is_some_and(|e| e.send(t).is_ok())
     }
 }
 
-/// Le fil : une lecture après l'autre, chacune rendue à la fenêtre, qui se redessine.
-fn lire_sans_fin(recu: &mpsc::Receiver<Demande>, racines: &[PathBuf], rendus: &Mutex<Vec<(String, Lu)>>) {
+/// Le fil : un travail après l'autre, chacun rendu à la fenêtre, qui se redessine. Un dessin qui panique (un SVG piégé)
+/// devient un dessin illisible, sans emporter le fil.
+fn lire_sans_fin(
+    recu: &mpsc::Receiver<Travail>,
+    racines: &[PathBuf],
+    rendus: &Mutex<Vec<(String, Lu)>>,
+    dessins: &Mutex<Vec<(u64, DessinRendu)>>,
+) {
     #[cfg(windows)]
     systeme::initialiser();
-    let mut polices = None;
-    for d in recu {
-        let lu = lire(&d, racines, &mut polices);
-        rendus.lock().unwrap_or_else(|e| e.into_inner()).push((d.cle.clone(), lu));
-        d.ctx.request_repaint();
+    for t in recu {
+        match t {
+            Travail::Apercu(d) => {
+                let lu = lire(&d, racines);
+                rendus.lock().unwrap_or_else(|e| e.into_inner()).push((d.cle.clone(), lu));
+                d.ctx.request_repaint();
+            }
+            Travail::Dessin(d) => {
+                let rendu = panic::catch_unwind(AssertUnwindSafe(|| dessin_en_pixels(&d.svg, d.largeur, d.limite)));
+                dessins.lock().unwrap_or_else(|e| e.into_inner()).push((d.cle, rendu.ok().and_then(Result::ok)));
+                d.ctx.request_repaint();
+            }
+        }
     }
 }
 
 /// Une lecture : le second jugement du chemin, sur ce qu'il désigne vraiment ; la taille ; puis le fichier, lu et
 /// dessiné. Un dessin qui panique (un SVG piégé) devient un fichier illisible, sans emporter le fil.
-fn lire(d: &Demande, racines: &[PathBuf], polices: &mut Option<Arc<fontdb::Database>>) -> Lu {
+fn lire(d: &Demande, racines: &[PathBuf]) -> Lu {
     let echec = |probleme, existe, empreinte| Lu::Echec { probleme, existe, empreinte };
     // Le chemin résolu (jonctions et liens compris) doit rester local et sous une racine elle aussi résolue.
     let reel = match resoudre(&d.chemin) {
@@ -844,7 +956,7 @@ fn lire(d: &Demande, racines: &[PathBuf], polices: &mut Option<Arc<fontdb::Datab
     if lu.is_err() || octets.len() as u64 > APERCU_MAX {
         return echec(Probleme::Illisible, true, None);
     }
-    match panic::catch_unwind(AssertUnwindSafe(|| rendre(d.sorte, &octets, d.limite, polices))) {
+    match panic::catch_unwind(AssertUnwindSafe(|| rendre(d.sorte, &octets, d.limite))) {
         Ok(Ok(Rendu::Image { image, intrinseque, pages })) => Lu::Image { image, intrinseque, pages, empreinte },
         Ok(Ok(Rendu::Page { titre, extrait })) => Lu::Page { titre, extrait, empreinte },
         Ok(Err(p)) => echec(p, true, Some(empreinte)),
@@ -859,12 +971,7 @@ enum Rendu {
     Page { titre: String, extrait: String },
 }
 
-fn rendre(
-    sorte: SorteFichier,
-    octets: &[u8],
-    limite: usize,
-    polices: &mut Option<Arc<fontdb::Database>>,
-) -> Result<Rendu, Probleme> {
+fn rendre(sorte: SorteFichier, octets: &[u8], limite: usize) -> Result<Rendu, Probleme> {
     match sorte {
         SorteFichier::Image => systeme::image(octets, limite).map(|(image, [l, h])| Rendu::Image {
             image,
@@ -872,7 +979,7 @@ fn rendre(
             pages: 1,
         }),
         SorteFichier::Pdf => systeme::pdf(octets, limite),
-        SorteFichier::Svg => svg(octets, limite, polices),
+        SorteFichier::Svg => svg(octets, limite),
         SorteFichier::Page => {
             let (titre, extrait) = vignette_html(&String::from_utf8_lossy(octets));
             Ok(Rendu::Page { titre, extrait })
@@ -880,26 +987,42 @@ fn rendre(
     }
 }
 
-/// Un SVG dessiné par resvg, à deux fois sa taille (un écran à 200 %) sans dépasser la texture. Son texte prend les
-/// polices du poste, chargées une fois pour toutes.
-fn svg(octets: &[u8], limite: usize, polices: &mut Option<Arc<fontdb::Database>>) -> Result<Rendu, Probleme> {
-    use resvg::{tiny_skia, usvg};
-    let base = polices.get_or_insert_with(|| {
-        let mut base = fontdb::Database::new();
-        base.load_system_fonts();
-        Arc::new(base)
-    });
-    let options = usvg::Options {
-        fontdb: base.clone(),
-        // Aucun autre fichier : par défaut, resvg lit l'image d'un « <image href="…"> » n'importe où sur le poste, ou
-        // sur le réseau (Windows s'y authentifierait). Seules restent les images incrustées dans le SVG.
+/// Les polices du poste, pour le texte des SVG : chargées une fois pour toutes, au premier SVG (une fraction de
+/// seconde), dans le fil qui le dessine.
+fn polices() -> Arc<fontdb::Database> {
+    static POLICES: OnceLock<Arc<fontdb::Database>> = OnceLock::new();
+    POLICES
+        .get_or_init(|| {
+            let mut base = fontdb::Database::new();
+            base.load_system_fonts();
+            Arc::new(base)
+        })
+        .clone()
+}
+
+/// Les options de resvg : les polices du poste, et `police` pour un texte qui n'en nomme pas (sinon celle de resvg) ;
+/// aucun autre fichier — par défaut, resvg lit l'image d'un « <image href="…"> » n'importe où sur le poste, ou sur le
+/// réseau (Windows s'y authentifierait). Seules restent les images incrustées dans le SVG.
+fn options_svg(police: Option<&str>) -> resvg::usvg::Options<'static> {
+    use resvg::usvg;
+    let mut options = usvg::Options {
+        fontdb: polices(),
         image_href_resolver: usvg::ImageHrefResolver {
             resolve_data: usvg::ImageHrefResolver::default_data_resolver(),
             resolve_string: Box::new(|_, _| None),
         },
         ..usvg::Options::default()
     };
-    let arbre = usvg::Tree::from_data(octets, &options).map_err(|_| Probleme::Illisible)?;
+    if let Some(p) = police {
+        options.font_family = p.to_string();
+    }
+    options
+}
+
+/// Un SVG dessiné par resvg, à deux fois sa taille (un écran à 200 %) sans dépasser la texture.
+fn svg(octets: &[u8], limite: usize) -> Result<Rendu, Probleme> {
+    use resvg::{tiny_skia, usvg};
+    let arbre = usvg::Tree::from_data(octets, &options_svg(None)).map_err(|_| Probleme::Illisible)?;
     let (l, h) = (arbre.size().width(), arbre.size().height());
     let k = 2.0f32.min(limite as f32 / l.max(h));
     let cote = |x: f32| ((x * k).round() as u32).clamp(1, limite as u32);
@@ -1023,6 +1146,8 @@ fn entite(nom: &str) -> Option<String> {
 /// Ce que Windows sait lire lui-même (WinRT) : les images, dans leur bon sens, et la première page d'un PDF.
 #[cfg(windows)]
 mod systeme {
+    use std::path::PathBuf;
+
     use eframe::egui::{ColorImage, vec2};
     use windows::Data::Pdf::{PdfDocument, PdfPageRenderOptions};
     use windows::Graphics::Imaging::{
@@ -1122,11 +1247,72 @@ mod systeme {
         let (image, _) = pixels(&sortie, limite)?;
         Ok(Rendu::Image { image, intrinseque: vec2(l, h), pages })
     }
+
+    /// La boîte « Enregistrer sous » de Windows, pour un dessin : `nom` proposé, en PNG d'office, ou en SVG ; modale
+    /// au-dessus de la fenêtre `proprietaire` (0 : d'aucune). Elle tient dans le fil qui l'appelle, COM en appartement
+    /// (STA, ce qu'elle veut), comme celle des pièces jointes. Rend le fichier choisi, avec son extension ; rien si on
+    /// l'annule ; ce qui l'empêche de s'ouvrir.
+    pub fn enregistrer_sous(proprietaire: isize, nom: &str) -> Result<Option<PathBuf>, String> {
+        use std::os::windows::ffi::OsStringExt;
+
+        use windows::Win32::Foundation::{ERROR_CANCELLED, HWND};
+        use windows::Win32::System::Com::{
+            CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance, CoInitializeEx,
+            CoTaskMemFree, CoUninitialize,
+        };
+        use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+        use windows::Win32::UI::Shell::{
+            FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR, FOS_OVERWRITEPROMPT, FileSaveDialog, IFileSaveDialog,
+            SIGDN_FILESYSPATH,
+        };
+        use windows::core::{PCWSTR, w};
+
+        let nom: Vec<u16> = nom.encode_utf16().chain([0]).collect();
+        // SAFETY : COM pour ce fil, défait à la fin si l'initialisation a réussi.
+        let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
+        let choisi = || -> windows::core::Result<(PathBuf, u32)> {
+            // SAFETY : la boîte de dialogue et son résultat ne vivent que dans cette fermeture, avant que COM se défasse ;
+            // le nom proposé vit jusqu'à la fin de la fonction ; celui que rend Windows se libère par CoTaskMemFree, une
+            // fois lu.
+            unsafe {
+                let dialogue: IFileSaveDialog = CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER)?;
+                dialogue
+                    .SetOptions(dialogue.GetOptions()? | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR | FOS_OVERWRITEPROMPT)?;
+                let types = [
+                    COMDLG_FILTERSPEC { pszName: w!("Image PNG"), pszSpec: w!("*.png") },
+                    COMDLG_FILTERSPEC { pszName: w!("Dessin SVG"), pszSpec: w!("*.svg") },
+                ];
+                dialogue.SetFileTypes(&types)?;
+                dialogue.SetFileTypeIndex(1)?;
+                dialogue.SetDefaultExtension(w!("png"))?;
+                dialogue.SetFileName(PCWSTR(nom.as_ptr()))?;
+                dialogue.Show((proprietaire != 0).then_some(HWND(proprietaire as *mut core::ffi::c_void)))?;
+                let choisi = dialogue.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?;
+                let chemin = PathBuf::from(std::ffi::OsString::from_wide(choisi.as_wide()));
+                CoTaskMemFree(Some(choisi.0 as *const core::ffi::c_void));
+                Ok((chemin, dialogue.GetFileTypeIndex()?))
+            }
+        };
+        let choisi = choisi();
+        if com.is_ok() {
+            // SAFETY : l'initialisation de ce fil a réussi ; ce qui était de COM s'en est allé avec la fermeture.
+            unsafe { CoUninitialize() };
+        }
+        match choisi {
+            Ok((chemin, type_choisi)) => Ok(Some(super::avec_extension(chemin, type_choisi))),
+            // Annulée, elle rend une erreur : rien n'est choisi.
+            Err(e) if e.code() == windows::core::HRESULT::from_win32(ERROR_CANCELLED.0) => Ok(None),
+            Err(e) => Err(e.message()),
+        }
+    }
 }
 
-/// Ailleurs que sous Windows, ni les images ni le PDF ne se lisent ici (le SVG et la page HTML, si).
+/// Ailleurs que sous Windows, ni les images ni le PDF ne se lisent ici (le SVG et la page HTML, si), et un dessin ne
+/// s'enregistre pas.
 #[cfg(not(windows))]
 mod systeme {
+    use std::path::PathBuf;
+
     use eframe::egui::ColorImage;
 
     use super::{Probleme, Rendu};
@@ -1137,6 +1323,10 @@ mod systeme {
 
     pub fn pdf(_: &[u8], _: usize) -> Result<Rendu, Probleme> {
         Err(Probleme::PdfIllisible)
+    }
+
+    pub fn enregistrer_sous(_: isize, _: &str) -> Result<Option<PathBuf>, String> {
+        Ok(None)
     }
 }
 
@@ -1270,10 +1460,13 @@ fn apercu(
     cadre(ui, picto, &c.titre, &precision, |ui| {
         ouvrir = match &a.etat {
             Etat::Attente => {
-                attente(ui);
+                attente(ui, "Lecture de l'aperçu…");
                 false
             }
-            Etat::Image { texture, intrinseque, .. } => image(ui, texture, *intrinseque, sorte, ouvrable, id),
+            Etat::Image { texture, intrinseque, .. } => {
+                let taille = ajuster(*intrinseque, vec2(ui.available_width(), haut_max(ui)));
+                image(ui, texture, taille, sorte == SorteFichier::Pdf, ouvrable, id)
+            }
             Etat::Page { titre, extrait, .. } => vignette(ui, titre, extrait, &c.nom, ouvrable),
             Etat::Echec { probleme, .. } => {
                 avis(ui, probleme);
@@ -1289,24 +1482,21 @@ fn apercu(
     ouvrir.then(|| Geste { action: "ouvrir_fichier", valeur: Value::String(chemin.chemin().display().to_string()) })
 }
 
-/// Une image dans sa carte (AP1, AP2 ; AP3 pour la page d'un PDF) : à sa taille, sans l'agrandir, 360 points de haut
-/// au plus, centrée, sur du blanc (un dessin transparent se lit) ; une page de PDF a l'ombre d'une feuille. Rend
-/// `true` si on clique dessus.
+/// Une image dans sa carte (AP1, AP2 ; AP3 pour la page d'un PDF ; un dessin), à `taille`, centrée, sur du blanc (un
+/// dessin transparent se lit) ; une page de PDF (`feuille`) a l'ombre d'une feuille. Rend `true` si on clique dessus.
 fn image(
     ui: &mut egui::Ui,
     texture: &egui::TextureHandle,
-    intrinseque: Vec2,
-    sorte: SorteFichier,
+    taille: Vec2,
+    feuille: bool,
     clic: bool,
     id: egui::Id,
 ) -> bool {
     let dispo = ui.available_width();
-    let taille = ajuster(intrinseque, vec2(dispo, APERCU_HAUT));
     let (zone, _) = ui.allocate_exact_size(vec2(dispo, taille.y), Sense::hover());
     let r = Rect::from_center_size(zone.center(), taille);
     // Seule l'image s'ouvre au clic, pas les marges d'une page plus étroite que la carte.
     let rep = ui.interact(r, id.with("image"), if clic { Sense::click() } else { Sense::hover() });
-    let feuille = sorte == SorteFichier::Pdf;
     let rayon = if feuille { 3.0 } else { 6.0 };
     let p = ui.painter();
     if feuille {
@@ -1326,6 +1516,23 @@ fn ajuster(taille: Vec2, boite: Vec2) -> Vec2 {
     }
     let k = (boite.x / taille.x).min(boite.y / taille.y).min(1.0);
     (taille * k).max(Vec2::splat(1.0))
+}
+
+/// La taille d'un dessin dans `boite` : toute sa largeur (un dessin se redessine net à toute taille), ses proportions
+/// gardées, sans dépasser sa hauteur.
+fn remplir(taille: Vec2, boite: Vec2) -> Vec2 {
+    if taille.x <= 0.0 || taille.y <= 0.0 {
+        return vec2(boite.x, boite.y.min(200.0));
+    }
+    let k = (boite.x / taille.x).min(boite.y / taille.y);
+    (taille * k).max(Vec2::splat(1.0))
+}
+
+/// La hauteur d'une image ou d'un dessin dans sa carte, au plus : presque toute la conversation visible (elle se voit
+/// d'un coup, sans défiler), 360 points au moins.
+fn haut_max(ui: &egui::Ui) -> f32 {
+    let visible = ui.clip_rect().height();
+    if visible.is_finite() { (visible * 0.85).max(APERCU_HAUT) } else { APERCU_HAUT }
 }
 
 /// La vignette d'une page HTML (AP4) : egui n'a pas de moteur de page, la carte la dessine donc en clair, comme une
@@ -1359,13 +1566,13 @@ fn vignette(ui: &mut egui::Ui, titre: &str, extrait: &str, nom: &str, clic: bool
     clic && rep.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Ouvrir en grand").clicked()
 }
 
-/// L'aperçu se lit : un creux, et un tourniquet.
-fn attente(ui: &mut egui::Ui) {
+/// L'aperçu se lit, le dessin se dessine : un creux, un tourniquet, et `texte`.
+fn attente(ui: &mut egui::Ui, texte: &str) {
     let t = teintes(ui);
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 120.0), Sense::hover());
     let p = ui.painter();
     p.rect_filled(r, 6.0, t.creux);
-    let g = p.layout_no_wrap("Lecture de l'aperçu…".into(), FontId::proportional(12.5), t.encre_3);
+    let g = p.layout_no_wrap(texte.to_string(), FontId::proportional(12.5), t.encre_3);
     let x = r.center().x - (16.0 + 8.0 + g.size().x) / 2.0;
     p.galley(pos2(x + 24.0, r.center().y - g.size().y / 2.0), g, t.encre_3);
     let tourniquet = Rect::from_min_size(pos2(x, r.center().y - 8.0), vec2(16.0, 16.0));
@@ -1385,6 +1592,274 @@ fn avis(ui: &mut egui::Ui, probleme: &Probleme) {
             ui.add(egui::Label::new(message).wrap());
         });
     });
+}
+
+// ---- Les dessins ---------------------------------------------------------------------------------------------------
+
+/// Un dessin d'Eve, d'une image à l'autre : son SVG ([`svg_complet`]), son titre, ce qu'on en montre, et le rendu
+/// demandé au fil.
+struct Dessin {
+    svg: Arc<str>,
+    titre: String,
+    etat: EtatDessin,
+    /// La largeur, en pixels, du dernier rendu demandé : un autre ne se demande que s'il en faut un plus large, ou un
+    /// deux fois plus étroit (les mipmaps réduisent le reste sans flou).
+    demandee: Option<u32>,
+    en_lecture: bool,
+    vu: f64,
+}
+
+enum EtatDessin {
+    Attente,
+    Image { texture: egui::TextureHandle, intrinseque: Vec2 },
+    Echec(Probleme),
+}
+
+impl Dessin {
+    fn nouveau(svg: &str, temps: f64) -> Dessin {
+        let svg = svg_complet(svg.trim());
+        let etat = if svg.len() > DESSIN_MAX {
+            EtatDessin::Echec(Probleme::DessinTropGros(svg.len()))
+        } else {
+            EtatDessin::Attente
+        };
+        let titre = titre_du_dessin(&svg);
+        Dessin { svg: Arc::from(svg.as_ref()), titre, etat, demandee: None, en_lecture: false, vu: temps }
+    }
+
+    fn recevoir(&mut self, ctx: &egui::Context, cle: u64, rendu: DessinRendu) {
+        self.en_lecture = false;
+        self.etat = match rendu {
+            Some((image, intrinseque)) => {
+                let options = egui::TextureOptions {
+                    mipmap_mode: Some(egui::TextureFilter::Linear),
+                    ..egui::TextureOptions::LINEAR
+                };
+                let texture = ctx.load_texture(format!("dessin:{cle:016x}"), image, options);
+                EtatDessin::Image { texture, intrinseque }
+            }
+            None => EtatDessin::Echec(Probleme::DessinIllisible),
+        };
+    }
+}
+
+/// La carte d'un dessin : son titre ; le dessin sur une feuille blanche (comme un aperçu : tout ce que Claude dessine
+/// pour une page se lit, son texte noir compris), de toute la largeur de la carte, ses proportions gardées, presque
+/// toute la conversation visible au plus ; « Ouvrir en grand » (le programme du poste, par un fichier du dossier
+/// local) et « Enregistrer » (la boîte « Enregistrer sous » de Windows, en PNG ou en SVG). Le dessin se rend dans le
+/// fil des aperçus, à la largeur où il s'affiche, quand il est à l'écran ou presque.
+fn carte_dessin(
+    ui: &mut egui::Ui,
+    cle: u64,
+    d: &mut Dessin,
+    lecture: &mut Lecture,
+    local: &Path,
+    enregistre: &Arc<Mutex<Option<(u64, String)>>>,
+    id: egui::Id,
+) -> Option<Geste> {
+    let (mut ouvrir, mut enregistrer) = (false, false);
+    cadre(ui, pictos::DESSIN, &d.titre, "", |ui| {
+        let dispo = ui.available_width();
+        let taille = match &d.etat {
+            EtatDessin::Image { intrinseque, .. } => remplir(*intrinseque, vec2(dispo, haut_max(ui))),
+            _ => vec2(dispo, 120.0),
+        };
+        let place = Rect::from_min_size(ui.cursor().min, vec2(dispo, taille.y));
+        if ui.is_rect_visible(place.expand(200.0)) && !d.en_lecture && !matches!(d.etat, EtatDessin::Echec(_)) {
+            let limite = ui.input(|i| i.max_texture_side).min(TEXTURE_MAX);
+            let voulue = palier(taille.x * ui.ctx().pixels_per_point(), limite);
+            if d.demandee.is_none_or(|l| voulue > l || voulue * 2 < l) {
+                d.demandee = Some(voulue);
+                let svg = d.svg.clone();
+                d.en_lecture =
+                    lecture.dessiner(DemandeDeDessin { cle, svg, largeur: voulue, limite, ctx: ui.ctx().clone() });
+                if !d.en_lecture {
+                    d.etat = EtatDessin::Echec(Probleme::DessinIllisible);
+                }
+            }
+        }
+        match &d.etat {
+            EtatDessin::Attente => attente(ui, "Le dessin s'affiche…"),
+            EtatDessin::Image { texture, .. } => {
+                ouvrir = image(ui, texture, taille, false, true, id);
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ouvrir |= bouton_lien(ui, pictos::OUVRIR, "Ouvrir en grand").clicked();
+                    enregistrer = bouton_lien(ui, pictos::ENREGISTRER, "Enregistrer").clicked();
+                });
+                let fait = enregistre.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                if let Some((_, message)) = fait.filter(|(c, _)| *c == cle) {
+                    ui.add_space(6.0);
+                    ui.add(egui::Label::new(RichText::new(message).size(12.0).color(teintes(ui).encre_3)).wrap());
+                }
+            }
+            EtatDessin::Echec(p) => {
+                avis(ui, p);
+                // Ce qui cloche se voit dans le SVG lui-même.
+                if *p == Probleme::DessinIllisible {
+                    ui.add_space(8.0);
+                    bloc_brut(ui, &d.svg, id);
+                }
+            }
+        }
+    });
+    if enregistrer {
+        enregistrer_le_dessin(&d.titre, d.svg.clone(), cle, enregistre.clone(), ui.ctx().clone());
+    }
+    if !ouvrir {
+        return None;
+    }
+    match dessin_dans_un_fichier(local, &d.titre, cle, &d.svg) {
+        Ok(chemin) => Some(Geste { action: "ouvrir_fichier", valeur: Value::String(chemin.display().to_string()) }),
+        Err(e) => {
+            let message = format!("Le dessin ne s'ouvre pas : {e}");
+            *enregistre.lock().unwrap_or_else(|e| e.into_inner()) = Some((cle, message));
+            None
+        }
+    }
+}
+
+/// La largeur d'un rendu, en pixels : celle qu'il prend à l'écran, arrondie au palier du dessus, dans la limite des
+/// textures.
+fn palier(pixels: f32, limite: usize) -> u32 {
+    let pixels = pixels.max(1.0).ceil() as u32;
+    (pixels.div_ceil(PALIER) * PALIER).min(limite.max(1) as u32)
+}
+
+/// Un dessin d'Eve en pixels, pour l'écran : `largeur` pixels de large (sa hauteur suit), le grand côté dans `limite` ;
+/// et sa taille d'origine.
+fn dessin_en_pixels(svg: &str, largeur: u32, limite: usize) -> Result<(egui::ColorImage, Vec2), Probleme> {
+    let (toile, intrinseque) = toile_du_dessin(svg, largeur as f32, limite)?;
+    let taille = [toile.width() as usize, toile.height() as usize];
+    Ok((egui::ColorImage::from_rgba_premultiplied(taille, toile.data()), intrinseque))
+}
+
+/// Un dessin rendu par resvg sur une feuille blanche : `largeur` pixels de large au plus, le grand côté dans `limite`,
+/// ses proportions gardées ; son texte dans les polices du poste, Segoe UI d'office.
+fn toile_du_dessin(svg: &str, largeur: f32, limite: usize) -> Result<(resvg::tiny_skia::Pixmap, Vec2), Probleme> {
+    use resvg::{tiny_skia, usvg};
+    let options = options_svg(Some(POLICE_DES_DESSINS));
+    let arbre = usvg::Tree::from_str(svg, &options).map_err(|_| Probleme::DessinIllisible)?;
+    let (l, h) = (arbre.size().width(), arbre.size().height());
+    let k = (largeur / l).min(limite as f32 / l.max(h));
+    let cote = |x: f32| ((x * k).round() as u32).clamp(1, limite as u32);
+    let (lp, hp) = (cote(l), cote(h));
+    let mut toile = tiny_skia::Pixmap::new(lp, hp).ok_or(Probleme::DessinIllisible)?;
+    toile.fill(tiny_skia::Color::WHITE);
+    resvg::render(&arbre, tiny_skia::Transform::from_scale(lp as f32 / l, hp as f32 / h), &mut toile.as_mut());
+    Ok((toile, vec2(l, h)))
+}
+
+/// Le SVG d'un dessin tel que le lisent les programmes du poste : Claude l'écrit souvent comme dans une page web, sans
+/// l'espace de noms du SVG, sans lequel un navigateur n'ouvre pas le fichier (resvg s'en passe) ; il s'ajoute, et
+/// celui de xlink si le dessin s'en sert.
+fn svg_complet(svg: &str) -> Cow<'_, str> {
+    let Some(debut) = svg.find("<svg") else { return Cow::Borrowed(svg) };
+    let balise = &svg[debut..svg[debut..].find('>').map_or(svg.len(), |i| debut + i)];
+    let mut ajout = String::new();
+    if !balise.contains("xmlns=") {
+        ajout.push_str(" xmlns=\"http://www.w3.org/2000/svg\"");
+    }
+    if svg.contains("xlink:") && !balise.contains("xmlns:xlink") {
+        ajout.push_str(" xmlns:xlink=\"http://www.w3.org/1999/xlink\"");
+    }
+    if ajout.is_empty() {
+        return Cow::Borrowed(svg);
+    }
+    let apres = debut + "<svg".len();
+    Cow::Owned(format!("{}{ajout}{}", &svg[..apres], &svg[apres..]))
+}
+
+/// Le titre d'un dessin : son premier « <title> », sinon « Dessin ».
+fn titre_du_dessin(svg: &str) -> String {
+    let titre = svg
+        .find("<title")
+        .and_then(|i| svg[i..].find('>').map(|j| i + j + 1))
+        .and_then(|debut| svg[debut..].find("</title").map(|fin| nettoyer(&svg[debut..debut + fin])))
+        .unwrap_or_default();
+    if titre.is_empty() { "Dessin".to_string() } else { titre }
+}
+
+/// Un nom de fichier tiré du titre d'un dessin : sans ce que Windows refuse dans un nom, 60 caractères au plus ;
+/// « Dessin » s'il ne reste rien.
+fn nom_de_fichier(titre: &str) -> String {
+    let propre: String =
+        titre.chars().map(|c| if c.is_control() || "<>:\"/\\|?*".contains(c) { ' ' } else { c }).collect();
+    let nom: String = propre.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(60).collect();
+    let nom = nom.trim_end_matches(['.', ' ']);
+    if nom.is_empty() || nom_reserve(nom) { "Dessin".to_string() } else { nom.to_string() }
+}
+
+/// Le dessin dans un fichier du dossier local (`dessins\`), pour l'ouvrir en grand dans le programme du poste : son nom
+/// vient de son titre et de son empreinte (le même dessin, le même fichier).
+fn dessin_dans_un_fichier(local: &Path, titre: &str, cle: u64, svg: &str) -> std::io::Result<PathBuf> {
+    let dossier = local.join("dessins");
+    std::fs::create_dir_all(&dossier)?;
+    let chemin = dossier.join(format!("{} {:06x}.svg", nom_de_fichier(titre), cle & 0xFF_FFFF));
+    std::fs::write(&chemin, svg)?;
+    Ok(chemin)
+}
+
+/// « Enregistrer » : la boîte « Enregistrer sous » de Windows, dans son fil, attachée à la fenêtre d'Eve ; le dessin
+/// s'écrit en PNG ou en SVG, selon le nom choisi ; ce qu'il en est se dit sous lui. Annulée, elle ne dit rien.
+fn enregistrer_le_dessin(
+    titre: &str,
+    svg: Arc<str>,
+    cle: u64,
+    avis: Arc<Mutex<Option<(u64, String)>>>,
+    ctx: egui::Context,
+) {
+    let nom = nom_de_fichier(titre);
+    let proprietaire = natif::pieces::fenetre_d_eve();
+    thread::spawn(move || {
+        let message = match systeme::enregistrer_sous(proprietaire, &nom) {
+            Ok(None) => return,
+            Ok(Some(chemin)) => match panic::catch_unwind(AssertUnwindSafe(|| ecrire_le_dessin(&chemin, &svg))) {
+                Ok(Ok(())) => format!("Enregistré : {}", chemin.display()),
+                Ok(Err(e)) => format!("Le dessin ne s'enregistre pas : {e}"),
+                Err(_) => "Le dessin ne s'enregistre pas : son SVG ne se lit pas.".to_string(),
+            },
+            Err(e) => format!("La boîte « Enregistrer sous » ne s'ouvre pas : {e}"),
+        };
+        *avis.lock().unwrap_or_else(|e| e.into_inner()) = Some((cle, message));
+        ctx.request_repaint();
+    });
+}
+
+/// Le fichier choisi pour enregistrer un dessin, avec son extension : celle qu'on a tapée (.png ou .svg), sinon celle
+/// du type choisi dans la boîte (1 : PNG, 2 : SVG).
+fn avec_extension(chemin: PathBuf, type_choisi: u32) -> PathBuf {
+    let connue = chemin.extension().is_some_and(|e| e.eq_ignore_ascii_case("png") || e.eq_ignore_ascii_case("svg"));
+    if connue {
+        return chemin;
+    }
+    let mut nom = chemin.into_os_string();
+    nom.push(if type_choisi == 2 { ".svg" } else { ".png" });
+    PathBuf::from(nom)
+}
+
+/// Le dessin dans `chemin` : en SVG si son nom finit par « .svg », en PNG sinon.
+fn ecrire_le_dessin(chemin: &Path, svg: &str) -> Result<(), String> {
+    let en_svg = chemin.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg"));
+    let octets = if en_svg { svg.as_bytes().to_vec() } else { png_du_dessin(svg)? };
+    std::fs::write(chemin, octets).map_err(|e| e.to_string())
+}
+
+/// Le dessin en PNG, sur du blanc, [`PNG_COTE`] pixels de grand côté : de quoi l'imprimer ou l'envoyer.
+fn png_du_dessin(svg: &str) -> Result<Vec<u8>, String> {
+    let (toile, _) = toile_du_dessin(svg, f32::INFINITY, PNG_COTE).map_err(|p| p.message())?;
+    let mut octets = Vec::new();
+    {
+        let mut e = png::Encoder::new(&mut octets, toile.width(), toile.height());
+        e.set_color(png::ColorType::Rgba);
+        e.set_depth(png::BitDepth::Eight);
+        let mut w = e.write_header().map_err(|e| e.to_string())?;
+        // Sur du blanc, chaque pixel est opaque : ses couleurs prémultipliées sont ses couleurs.
+        w.write_image_data(toile.data()).map_err(|e| e.to_string())?;
+        w.finish().map_err(|e| e.to_string())?;
+    }
+    Ok(octets)
 }
 
 // ---- Le cadre et les autres cartes ---------------------------------------------------------------------------------
@@ -1652,7 +2127,8 @@ fn brouillon(ui: &mut egui::Ui, b: &Brouillon) -> Option<Geste> {
         .then(|| Geste { action: "ouvrir_brouillon", valeur: Value::String(b.id.clone()) })
 }
 
-/// Une carte illisible (K6) : son JSON tel quel, en bloc brut, défilant au-delà de 240 points.
+/// Une carte illisible (K6), un dessin qui ne se lit pas : son texte tel quel, en bloc brut, défilant au-delà de 224
+/// points — le seul défilement dans une carte : ce texte ne sert qu'à voir ce qui cloche.
 fn bloc_brut(ui: &mut egui::Ui, json: &str, id: egui::Id) {
     let t = teintes(ui);
     egui::Frame::new()
@@ -1662,22 +2138,27 @@ fn bloc_brut(ui: &mut egui::Ui, json: &str, id: egui::Id) {
         .inner_margin(Margin::symmetric(10, 8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            egui::ScrollArea::vertical().id_salt(id.with("brut")).max_height(224.0).show(ui, |ui| {
-                let texte = RichText::new(json.trim()).monospace().size(11.5).color(t.encre_2);
-                ui.add(egui::Label::new(texte).wrap());
-            });
+            // Sa hauteur, même au bas d'une longue conversation : dans la conversation qui défile, egui ne donne à une
+            // zone qui défile que la place restée visible au-dessus d'elle, et l'écrasait à 64 points.
+            egui::ScrollArea::vertical().id_salt(id.with("brut")).max_height(224.0).min_scrolled_height(224.0).show(
+                ui,
+                |ui| {
+                    let texte = RichText::new(json.trim()).monospace().size(11.5).color(t.encre_2);
+                    ui.add(egui::Label::new(texte).wrap());
+                },
+            );
         });
 }
 
-/// Une carte qu'Eve écrit encore (F11) : un cadre pointillé, « Carte en préparation… ».
-fn en_preparation(ui: &mut egui::Ui) {
+/// Une carte ou un dessin qu'Eve écrit encore (F11) : un cadre pointillé, et `texte` (« Carte en préparation… »).
+fn en_preparation(ui: &mut egui::Ui, texte: &str) {
     let t = teintes(ui);
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::hover());
     let p = ui.painter();
     p.extend(egui::Shape::dashed_line(&contour_arrondi(r.shrink(0.5), 10.0), (1.0, t.filet_fort), 5.0, 4.0));
     let x = r.left() + 14.0;
-    let texte = FontId::new(13.0, famille(natif::SEMI));
-    p.text(pos2(x + 24.0, r.center().y), Align2::LEFT_CENTER, "Carte en préparation…", texte, t.encre_3);
+    let police = FontId::new(13.0, famille(natif::SEMI));
+    p.text(pos2(x + 24.0, r.center().y), Align2::LEFT_CENTER, texte, police, t.encre_3);
     let tourniquet = Rect::from_min_size(pos2(x, r.center().y - 7.0), vec2(14.0, 14.0));
     egui::Spinner::new().size(14.0).color(t.encre_3).paint_at(ui, tourniquet);
 }
@@ -1733,6 +2214,8 @@ struct Cellule {
 struct Rangee {
     cellules: Vec<Cellule>,
     hauteur: f32,
+    /// Une note au pied : sa seule case prend toute la largeur ([`est_une_note`]).
+    note: bool,
 }
 
 fn police_corps() -> FontId {
@@ -1741,6 +2224,17 @@ fn police_corps() -> FontId {
 
 fn police_pied() -> FontId {
     FontId::new(13.0, famille(natif::SEMI))
+}
+
+fn police_note() -> FontId {
+    FontId::proportional(12.5)
+}
+
+/// Une rangée du pied qui n'a qu'une case, dans un tableau qui en a plusieurs : une note (« Source : … », « Au-delà du
+/// lundi, aucune prévision »), que Claude y met souvent. Elle prend toute la largeur du tableau : dans la première
+/// colonne seule, une phrase s'y étirait sur cinq lignes et allongeait la carte d'autant.
+fn est_une_note(rangee: &[String], n: usize) -> bool {
+    n > 1 && rangee.len() == 1
 }
 
 fn police_entete() -> FontId {
@@ -1768,7 +2262,7 @@ fn marge(k: usize, n: usize) -> f32 {
 }
 
 /// Les largeurs naturelles des colonnes : l'en-tête ne se coupe pas, une cellule alignée à droite non plus ; le
-/// reste se coupe entre ses mots.
+/// reste se coupe entre ses mots. Une note au pied n'y compte pas : elle prend toute la largeur.
 fn mesurer(p: &egui::Painter, t: &Tableau, ppp: f32) -> Mesures {
     let n = t.n;
     let (mut min, mut max) = (vec![0.0f32; n], vec![0.0f32; n]);
@@ -1782,11 +2276,11 @@ fn mesurer(p: &egui::Painter, t: &Tableau, ppp: f32) -> Mesures {
     for (k, c) in t.colonnes.iter().enumerate() {
         voir(k, &c.to_uppercase(), police_entete(), 0.6, true);
     }
-    for (rangees, police) in [(&t.lignes, police_corps()), (&t.pieds, police_pied())] {
-        for l in rangees {
-            for (k, v) in l.iter().enumerate() {
-                voir(k, v, police.clone(), 0.0, t.droite(k, v));
-            }
+    let pieds = t.pieds.iter().filter(|l| !est_une_note(l, n));
+    let rangees = t.lignes.iter().map(|l| (l, police_corps())).chain(pieds.map(|l| (l, police_pied())));
+    for (l, police) in rangees {
+        for (k, v) in l.iter().enumerate() {
+            voir(k, v, police.clone(), 0.0, t.droite(k, v));
         }
     }
     for k in 0..n {
@@ -1827,7 +2321,15 @@ fn mettre_en_page(p: &egui::Painter, t: &Tableau, m: &Mesures, dispo: f32) -> Mi
         let cellules: Vec<Cellule> =
             (0..n).map(|k| mise(k, l.get(k).map_or("", String::as_str), police.clone(), encre, 0.0)).collect();
         let hauteur = cellules.iter().map(|c| c.galley.size().y).fold(0.0, f32::max) + marges;
-        Rangee { cellules, hauteur }
+        Rangee { cellules, hauteur, note: false }
+    };
+    // Une note se coupe sur la largeur visible de la carte : elle se lit sans faire défiler un tableau trop large.
+    let note = |l: &Vec<String>, encre: Color32| {
+        let texte = l.first().map_or("", String::as_str);
+        let droite = ressemble_a_un_nombre(texte);
+        let galley = cellule(p, texte, police_note(), encre, 0.0, if droite { f32::INFINITY } else { dispo.max(8.0) });
+        let hauteur = galley.size().y + MARGE_RANGEE + 3.0;
+        Rangee { cellules: vec![Cellule { galley, droite }], hauteur, note: true }
     };
     // Les cellules se mettent en page sans couleur : elles prennent celles du thème quand elles se peignent.
     let encre = Color32::PLACEHOLDER;
@@ -1844,12 +2346,17 @@ fn mettre_en_page(p: &egui::Painter, t: &Tableau, m: &Mesures, dispo: f32) -> Mi
     let h_entete =
         entete.iter().map(|c| c.galley.size().y).fold(0.0, f32::max) + if entete.is_empty() { 0.0 } else { 7.0 };
     let lignes = t.lignes.iter().map(|l| rangee(l, police_corps(), encre, 2.0 * MARGE_RANGEE)).collect();
-    let pieds = t.pieds.iter().map(|l| rangee(l, police_pied(), encre, MARGE_RANGEE + 3.0)).collect();
+    let pieds = t
+        .pieds
+        .iter()
+        .map(|l| if est_une_note(l, n) { note(l, encre) } else { rangee(l, police_pied(), encre, MARGE_RANGEE + 3.0) })
+        .collect();
     MiseEnPage { ppp: m.ppp, dispo, largeurs, entete, h_entete, lignes, pieds }
 }
 
-/// Le tableau (K4) : l'en-tête en petites capitales, qui reste en haut quand le corps défile ; les nombres à droite ;
-/// le pied en gras sous un filet ; 340 points de haut au plus, et le défilement en largeur, dans la carte.
+/// Le tableau (K4) : l'en-tête en petites capitales ; les nombres à droite ; le pied en gras sous un filet, une note
+/// sur toute la largeur. Toutes ses rangées, toujours : c'est la conversation qui défile. Seul le défilement en
+/// largeur reste dans la carte, quand les colonnes ne tiennent pas ; l'en-tête le suit.
 fn tableau(
     ui: &mut egui::Ui,
     t: &Tableau,
@@ -1888,28 +2395,27 @@ fn tableau(
     }
     let entete = (mp.h_entete > 0.0).then(|| ui.allocate_exact_size(vec2(dispo, mp.h_entete), Sense::hover()).0);
     // Sans la marge de contenu de la fenêtre (10 points à droite) : le tableau a mesuré ses colonnes sur toute la
-    // largeur, et la marge le faisait déborder d'autant — sa dernière colonne rognée et fondue, pour rien.
-    let sortie = egui::ScrollArea::both()
+    // largeur, et la marge le faisait déborder d'autant — sa dernière colonne rognée et fondue, pour rien. En largeur
+    // seulement : dans la conversation qui défile, egui ne donnait à une zone qui défile aussi en hauteur que la place
+    // restée visible au-dessus d'elle — 64 points, trois lignes, au bas d'une longue conversation.
+    let sortie = egui::ScrollArea::horizontal()
         .id_salt(id.with("tableau"))
         .content_margin(Margin::ZERO)
-        .max_height((TABLEAU_HAUT - mp.h_entete).max(80.0))
         .auto_shrink([false, true])
         .show(ui, |ui| {
             let (r, _) = ui.allocate_exact_size(vec2(total, h_corps.max(1.0)), Sense::hover());
             corps_du_tableau(ui, r, mp);
         });
     // Les barres de défilement d'egui ne se montrent qu'au survol : un fondu au bord dit qu'il reste des colonnes à
-    // droite, ou des rangées plus bas. `inner_rect` est la place offerte avant que la zone se resserre sur un tableau
-    // plus court : la vue s'arrête au contenu (sinon le fondu de droite descendait sous la carte).
-    let vue = Rect::from_min_size(sortie.inner_rect.min, sortie.inner_rect.size().min(sortie.content_size));
+    // droite. `inner_rect` est la place offerte au départ : sa largeur est celle de la vue, mais pas sa hauteur (la
+    // place restée visible) ; la vue a celle du tableau.
+    let largeur_vue = sortie.inner_rect.width().min(sortie.content_size.x);
+    let vue = Rect::from_min_size(sortie.inner_rect.min, vec2(largeur_vue, sortie.content_size.y));
     let decale = sortie.state.clamped_offset();
     let reste = sortie.content_size - vue.size() - decale;
     let p = ui.painter_at(vue);
     if reste.x > 1.0 {
         fondu(&p, Rect::from_min_max(pos2(vue.right() - 32.0, vue.top()), vue.right_bottom()), false, palette.fond);
-    }
-    if reste.y > 1.0 {
-        fondu(&p, Rect::from_min_max(pos2(vue.left(), vue.bottom() - 24.0), vue.right_bottom()), true, palette.fond);
     }
     if let Some(r) = entete {
         // Le bandeau marine de l'en-tête, en clair : 8 points de plus de chaque côté, 5 au-dessus.
@@ -1976,7 +2482,15 @@ fn corps_du_tableau(ui: &egui::Ui, r: Rect, mp: &MiseEnPage) {
     if !mp.pieds.is_empty() {
         p.hline(r.x_range(), y + 0.75, Stroke::new(1.5, t.filet_fort));
         for l in &mp.pieds {
-            rangee_de_cellules(p, pos2(r.left(), y + MARGE_RANGEE + 1.0), &l.cellules, &mp.largeurs, t.encre);
+            let haut = y + MARGE_RANGEE + 1.0;
+            match l.cellules.first() {
+                // Une note : sur toute la largeur, plus discrète qu'un total ; un montant seul, à droite.
+                Some(c) if l.note => {
+                    let x = if c.droite { r.right() - c.galley.size().x } else { r.left() };
+                    p.galley(pos2(x, haut), c.galley.clone(), t.encre_2);
+                }
+                _ => rangee_de_cellules(p, pos2(r.left(), haut), &l.cellules, &mp.largeurs, t.encre),
+            }
             y += l.hauteur;
         }
     }
@@ -2107,6 +2621,120 @@ mod essais {
         assert_eq!(colonnes_a_droite(&lignes, &[], 4), [false, true, true, false]);
         // Sans lignes, le pied décide.
         assert_eq!(colonnes_a_droite(&[], &l(&[&["Total", "5 $"]]), 2), [false, true]);
+    }
+
+    #[test]
+    fn une_note_au_pied_prend_toute_la_largeur() {
+        let Carte::Tableau(t) = carte(
+            r#"{"type":"tableau","titre":"Météo","colonnes":["Jour","Min / max","Conditions"],
+               "lignes":[["Samedi 24","0 / 11","Ensoleillé"],["Dimanche 25","2 / 14","Soleil"]],
+               "pied":["Source : wttr.in, consultée le samedi 24 octobre 2026. Au-delà du lundi 26, aucune prévision."]}"#,
+        ) else {
+            panic!()
+        };
+        assert!(est_une_note(&t.pieds[0], t.n) && !est_une_note(&["Total".into(), "5".into()], 2));
+        assert!(!est_une_note(&["seule".into()], 1), "un tableau d'une colonne n'a pas de note");
+        let ctx = egui::Context::default();
+        natif::polices(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let p = ui.painter();
+            let m = mesurer(p, &t, 1.0);
+            // La note n'élargit pas la première colonne : « Dimanche 25 » la règle.
+            let jour = cellule(p, "Dimanche 25", police_corps(), Color32::PLACEHOLDER, 0.0, f32::INFINITY).size().x;
+            assert_eq!(m.max[0], (jour + MARGE_COLONNE).ceil(), "{:?}", m.max);
+            let mp = mettre_en_page(p, &t, &m, 400.0);
+            let note = &mp.pieds[0];
+            assert!(note.note && note.cellules.len() == 1);
+            // Sur la largeur de la carte : deux lignes, quand la première colonne seule lui en donnait cinq.
+            let g = &note.cellules[0].galley;
+            assert!(
+                g.rows.len() <= 2 && g.size().x > 2.0 * mp.largeurs[0],
+                "{} lignes de {}",
+                g.rows.len(),
+                g.size().x
+            );
+        });
+    }
+
+    #[test]
+    fn un_dessin_se_complete_et_se_nomme() {
+        // Sans l'espace de noms du SVG, comme dans une page web, il s'ajoute ; celui de xlink, si le dessin s'en sert.
+        assert_eq!(
+            svg_complet(r#"<svg viewBox="0 0 4 2"></svg>"#),
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 2"></svg>"#
+        );
+        assert!(matches!(svg_complet(r#"<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>"#), Cow::Borrowed(_)));
+        let xlink = svg_complet(r##"<svg xmlns="http://www.w3.org/2000/svg"><use xlink:href="#a"/></svg>"##);
+        assert!(xlink.starts_with(r#"<svg xmlns:xlink="http://www.w3.org/1999/xlink" xmlns="#), "{xlink}");
+        assert_eq!(svg_complet("pas un dessin"), "pas un dessin");
+        // Son titre : son premier <title>, ses entités lues, ses blancs resserrés.
+        assert_eq!(
+            titre_du_dessin("<svg><title>Plan du  sous-sol &amp; garage</title></svg>"),
+            "Plan du sous-sol & garage"
+        );
+        assert_eq!(titre_du_dessin("<svg><rect/></svg>"), "Dessin");
+        assert_eq!(titre_du_dessin("<svg><title> </title></svg>"), "Dessin");
+        // Le nom de ses fichiers.
+        assert_eq!(nom_de_fichier("Plan : sous-sol / garage ?"), "Plan sous-sol garage");
+        assert_eq!(nom_de_fichier("CON"), "Dessin");
+        assert_eq!(nom_de_fichier("..."), "Dessin");
+        assert_eq!(nom_de_fichier(&"é".repeat(80)).chars().count(), 60);
+        assert_eq!(avec_extension(PathBuf::from(r"C:\x\plan"), 1), PathBuf::from(r"C:\x\plan.png"));
+        assert_eq!(avec_extension(PathBuf::from(r"C:\x\plan"), 2), PathBuf::from(r"C:\x\plan.svg"));
+        assert_eq!(avec_extension(PathBuf::from(r"C:\x\plan.SVG"), 1), PathBuf::from(r"C:\x\plan.SVG"));
+        assert_eq!(avec_extension(PathBuf::from(r"C:\x\plan.v2"), 1), PathBuf::from(r"C:\x\plan.v2.png"));
+        // Sa taille à l'écran : toute la largeur, agrandi s'il le faut, la hauteur au plus ; son rendu, au palier.
+        assert_eq!(remplir(vec2(800.0, 500.0), vec2(400.0, 1000.0)), vec2(400.0, 250.0));
+        assert_eq!(remplir(vec2(100.0, 50.0), vec2(400.0, 1000.0)), vec2(400.0, 200.0), "agrandi");
+        assert_eq!(remplir(vec2(500.0, 1000.0), vec2(400.0, 400.0)), vec2(200.0, 400.0), "la hauteur au plus");
+        assert_eq!((palier(1.0, 2048), palier(700.4, 2048), palier(9000.0, 2048)), (256, 768, 2048));
+    }
+
+    #[test]
+    fn un_dessin_s_ouvre_et_s_enregistre() {
+        // « Ouvrir en grand » : le dessin dans dessins\ du dossier local, à son nom ; le même dessin, le même fichier.
+        let local = std::env::temp_dir().join(format!("eve-dessins-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&local);
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 2"><rect width="4" height="2"/></svg>"#;
+        let chemin = dessin_dans_un_fichier(&local, "Plan : sous-sol", 0xABCD_EF12, svg).unwrap();
+        assert_eq!(chemin, local.join("dessins").join("Plan sous-sol cdef12.svg"));
+        assert_eq!(std::fs::read_to_string(&chemin).unwrap(), svg);
+        assert_eq!(dessin_dans_un_fichier(&local, "Plan : sous-sol", 0xABCD_EF12, svg).unwrap(), chemin);
+        // « Enregistrer » : en PNG, ou en SVG, selon le nom choisi.
+        ecrire_le_dessin(&local.join("plan.png"), svg).unwrap();
+        assert!(std::fs::read(local.join("plan.png")).unwrap().starts_with(b"\x89PNG"));
+        ecrire_le_dessin(&local.join("plan.SVG"), svg).unwrap();
+        assert_eq!(std::fs::read_to_string(local.join("plan.SVG")).unwrap(), svg);
+        assert!(ecrire_le_dessin(&local.join("faux.png"), "<svg").is_err());
+        let _ = std::fs::remove_dir_all(&local);
+    }
+
+    #[test]
+    fn un_dessin_se_rend_sur_une_feuille_blanche() {
+        // Sans espace de noms, un carré rouge et du texte sans police : il se rend à la largeur demandée, sur du blanc.
+        let svg = svg_complet(concat!(
+            r#"<svg viewBox="0 0 200 100"><rect x="0" y="0" width="50" height="50" fill="red"/>"#,
+            r#"<text x="100" y="80" font-size="30">Salon</text></svg>"#
+        ))
+        .into_owned();
+        let (image, intrinseque) = dessin_en_pixels(&svg, 512, 2048).expect("le dessin se rend");
+        assert_eq!((image.size, intrinseque), ([512, 256], vec2(200.0, 100.0)));
+        assert_eq!(image.pixels[0], Color32::RED, "le carré, en haut à gauche");
+        assert_eq!(image.pixels[511], Color32::WHITE, "la feuille, en haut à droite");
+        // Son texte se dessine, dans la police d'office (Segoe UI, sur ce poste).
+        #[cfg(windows)]
+        {
+            let texte = (140..210).flat_map(|y| (256..480).map(move |x| y * 512 + x));
+            assert!(texte.filter(|&i| image.pixels[i] != Color32::WHITE).count() > 300, "le texte se dessine");
+        }
+        // Plus grand que la texture : son grand côté s'y tient.
+        assert_eq!(dessin_en_pixels(&svg, 8192, 2048).unwrap().0.size, [2048, 1024]);
+        // Un SVG faux ne se rend pas, sans paniquer.
+        assert!(matches!(dessin_en_pixels("<svg><rect", 512, 2048), Err(Probleme::DessinIllisible)));
+        // En PNG : 2048 pixels de grand côté.
+        let png = png_du_dessin(&svg).unwrap();
+        let lecteur = png::Decoder::new(std::io::Cursor::new(png)).read_info().unwrap();
+        assert_eq!((lecteur.info().width, lecteur.info().height), (2048, 1024));
     }
 
     #[test]
@@ -2288,23 +2916,22 @@ mod essais {
         };
         #[cfg(windows)]
         systeme::initialiser();
-        let mut polices = None;
-        let lu = |d: Demande, polices: &mut Option<Arc<fontdb::Database>>| lire(&d, &racines, polices);
+        let lu = |d: Demande| lire(&d, &racines);
 
         #[cfg(windows)]
         {
             let Lu::Image { image, intrinseque, empreinte, .. } =
-                lu(demande(travail.join("image.png"), SorteFichier::Image, None), &mut polices)
+                lu(demande(travail.join("image.png"), SorteFichier::Image, None))
             else {
                 panic!("l'image se lit")
             };
             assert_eq!((image.size, intrinseque), ([4, 2], vec2(4.0, 2.0)));
             assert!(matches!(
-                lu(demande(travail.join("image.png"), SorteFichier::Image, Some(empreinte)), &mut polices),
+                lu(demande(travail.join("image.png"), SorteFichier::Image, Some(empreinte))),
                 Lu::Inchange
             ));
             let Lu::Image { image, intrinseque, pages, .. } =
-                lu(demande(travail.join("soumission.pdf"), SorteFichier::Pdf, None), &mut polices)
+                lu(demande(travail.join("soumission.pdf"), SorteFichier::Pdf, None))
             else {
                 panic!("le PDF se lit")
             };
@@ -2312,16 +2939,13 @@ mod essais {
             assert!((intrinseque.y / intrinseque.x - 792.0 / 612.0).abs() < 0.01, "une page Lettre : {intrinseque:?}");
             assert!(image.size[1] > 100 && image.pixels[0] == Color32::WHITE, "la page est blanche dans son coin");
         }
-        let Lu::Image { image, intrinseque, .. } =
-            lu(demande(travail.join("plan.svg"), SorteFichier::Svg, None), &mut polices)
+        let Lu::Image { image, intrinseque, .. } = lu(demande(travail.join("plan.svg"), SorteFichier::Svg, None))
         else {
             panic!("le SVG se lit")
         };
         assert_eq!((image.size, intrinseque), ([80, 40], vec2(40.0, 20.0)), "à deux fois sa taille");
         assert_eq!(image.pixels[0], Color32::RED);
-        let Lu::Page { titre, extrait, .. } =
-            lu(demande(local.join("page.html"), SorteFichier::Page, None), &mut polices)
-        else {
+        let Lu::Page { titre, extrait, .. } = lu(demande(local.join("page.html"), SorteFichier::Page, None)) else {
             panic!("la page se lit")
         };
         assert_eq!((titre.as_str(), extrait.as_str()), ("Essai", "Bonjour"));
@@ -2330,16 +2954,16 @@ mod essais {
             _ => None,
         };
         assert_eq!(
-            echec(lu(demande(travail.join("gros.png"), SorteFichier::Image, None), &mut polices)),
+            echec(lu(demande(travail.join("gros.png"), SorteFichier::Image, None))),
             Some((Probleme::TropGros(APERCU_MAX + 1), true))
         );
         assert_eq!(
-            echec(lu(demande(travail.join("absent.png"), SorteFichier::Image, None), &mut polices)),
+            echec(lu(demande(travail.join("absent.png"), SorteFichier::Image, None))),
             Some((Probleme::Introuvable, false))
         );
         // Le second jugement : même si la forme passait, ce que le chemin désigne vraiment est dehors.
         assert_eq!(
-            echec(lu(demande(dehors.join("image.png"), SorteFichier::Image, None), &mut polices)),
+            echec(lu(demande(dehors.join("image.png"), SorteFichier::Image, None))),
             Some((Probleme::Refuse(Refus::Dehors), false))
         );
         let _ = std::fs::remove_dir_all(&base);

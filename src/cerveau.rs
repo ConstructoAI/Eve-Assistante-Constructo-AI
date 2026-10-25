@@ -9,6 +9,8 @@
 //!   ([`consigne_des_profils`]) : où il travaille, et les commandes d'Eve pour passer d'un profil à l'autre ;
 //! - il tourne sur le modèle et l'effort des réglages (`--model`, `--effort`) ; la partie « MODÈLE » de la consigne
 //!   ([`consigne_du_modele`]) lui dit comment en changer, et de donner son effort à ses agents ;
+//! - il dessine dans la fenêtre d'Eve, comme dans claude.ai : la partie « DESSINS » de la consigne
+//!   ([`consigne_des_dessins`]) lui dit comment, là où Eve sait les dessiner (`cartes.rs`) ;
 //! - il ne reçoit que les privilèges de son espace d'actions ([`Espace`]) : ses outils, et les connecteurs de claude.ai,
 //!   Chrome ou les serveurs MCP du poste s'ils lui sont donnés ;
 //! - Constructo AI, s'il lui est permis, arrive après l'initialisation : Eve lui branche le serveur de l'ERP avec le
@@ -81,6 +83,8 @@ impl Cerveau {
         consigne.push_str(&consigne_des_profils(&l.profil, &l.dossier, &l.dossier_d_eve));
         consigne.push_str("\n\n");
         consigne.push_str(&consigne_du_modele(&l.modele, &l.effort));
+        consigne.push_str("\n\n");
+        consigne.push_str(&consigne_des_dessins());
         let mut c = Command::new(&l.claude);
         c.current_dir(&l.dossier)
             .args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"])
@@ -486,6 +490,35 @@ pub fn consigne_du_modele(modele: &str, effort: &str) -> String {
     )
 }
 
+/// La ligne qui ouvre la partie « DESSINS » de la consigne.
+const ENTETE_DESSINS: &str = "DESSINS";
+
+/// La partie « DESSINS » de la consigne, que reçoit toute Eve : Claude dessine dans la fenêtre, comme dans claude.ai,
+/// par un bloc « ```svg » de sa réponse. Elle vit ici, avec le programme qui dessine (`cartes.rs` : la feuille blanche,
+/// la police d'office, ce que resvg ne dessine pas), et non dans la consigne vocale de chaque Eve : une Eve installée
+/// avant elle la reçoit avec sa mise à jour.
+pub fn consigne_des_dessins() -> String {
+    format!(
+        "{ENTETE_DESSINS}\n\
+         - Tu peux dessiner dans la fenêtre d'Eve, comme Claude dans claude.ai : un schéma, un plan, un croquis, un \
+         graphique, une illustration — quand on te le demande (« dessine-moi… », « fais-moi un schéma… », « montre-moi \
+         un graphique… »), ou quand un dessin explique mieux que des mots. Dis d'abord en une phrase ce que tu dessines.\n\
+         - Après les trois tirets, un bloc ```svg qui ne contient qu'un SVG complet, \
+         <svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 480 300\">…</svg>. Eve le dessine dans ta réponse, \
+         sur une feuille blanche, de toute la largeur de la conversation ; il ne se dit jamais. La personne l'ouvre en \
+         grand ou l'enregistre (PNG ou SVG) d'un clic : n'écris de fichier que si on te le demande.\n\
+         - Un viewBox d'environ 480 de large, sans width ni height : la conversation le montre à peu près à 400 \
+         points de large (une unité y vaut presque un point ; plus grand quand la fenêtre est repliée). Plus large que \
+         haut d'ordinaire ; un <title> qui le nomme (le titre de sa carte). Le texte en font-family=\"{police}\", de 13 \
+         à 16, jamais moins de 12, foncé (#1F2937) ; des couleurs franches (#2563EB, #059669, #D97706, #DC2626, \
+         #7C3AED), les aplats pâles (fill-opacity de 0.15 à 0.3) ; des étiquettes qui ne se chevauchent pas.\n\
+         - Du SVG fixe seulement : ni script, ni animation, ni foreignObject, ni image ou police à télécharger (Eve ne \
+         les dessine pas). Simple et lisible : il s'écrit pendant qu'on attend, quelques dizaines d'éléments suffisent. \
+         Un graphique : ses axes, ses valeurs écrites, de vraies données.",
+        police = crate::cartes::POLICE_DES_DESSINS
+    )
+}
+
 /// Les gabarits du kit sur ce poste : `outils\gabarits` à côté du programme (`%LOCALAPPDATA%\Eve\programme`), sinon
 /// `kit\outils\gabarits` des sources, au-dessus d'un programme qu'on vient de construire (`target\release`).
 fn gabarits() -> Option<PathBuf> {
@@ -687,6 +720,25 @@ mod essais {
         // Un modèle qu'Eve n'offre pas (écrit à la main) se dit tel quel, et ses agents reçoivent l'effort du lancement.
         let autre = consigne_du_modele("claude-haiku-4-5", "high");
         assert!(autre.contains("Tu tournes sur claude-haiku-4-5 (effort high)") && autre.contains("« high »"));
+    }
+
+    /// La partie « DESSINS » dit le bloc qu'Eve dessine, sa feuille, la police d'office et ce qu'elle ne dessine pas.
+    #[test]
+    fn la_consigne_des_dessins() {
+        let c = consigne_des_dessins();
+        assert!(c.starts_with("DESSINS\n- Tu peux dessiner"), "{c}");
+        for attendu in [
+            "un bloc ```svg",
+            "xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 480 300\"",
+            "400 points de large",
+            "feuille blanche",
+            "font-family=\"Segoe UI\"",
+            "<title>",
+            "ni script",
+        ] {
+            assert!(c.contains(attendu), "{attendu} manque :\n{c}");
+        }
+        assert!(!c.contains("  "), "les lignes se suivent sans blancs doublés :\n{c}");
     }
 
     /// La partie « CONSTRUCTO AI » que donne Eve est celle de la consigne du kit, entière, sans gabarit à remplir.

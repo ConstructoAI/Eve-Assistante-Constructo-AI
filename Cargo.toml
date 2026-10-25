@@ -7,10 +7,10 @@
 name = "eve"
 description = "Eve, l'Assistante de Constructo AI, de vive voix — on lui parle, elle fait le travail (Claude Code), elle répond à voix haute"
 license = "Apache-2.0"
-# La révision d'Eve (7.0.0 : la v7), sa seule source : la fenêtre la montre (« v7 »), `eve --version` la dit, le zip
+# La révision d'Eve (8.0.0 : la v8), sa seule source : la fenêtre la montre (« v8 »), `eve --version` la dit, le zip
 # (emballer.ps1) et l'étiquette du dépôt public (outils\publier.ps1) en prennent le nom. Une révision de plus : monter
-# ce nombre (8.0.0 pour la v8), et rien d'autre.
-version = "7.0.0"
+# ce nombre (9.0.0 pour la v9), et rien d'autre.
+version = "8.0.0"
 edition = "2024"
 rust-version = "1.99"
 publish = false
@@ -54,10 +54,12 @@ resvg = { version = "0.45.1", default-features = false, features = ["text", "sys
 # connexion à Constructo AI : le hachage et l'aléa de PKCE (BCrypt), les jetons chiffrés pour la session (DPAPI), et la
 # page de connexion dans le navigateur du poste (ShellExecute : ni cmd.exe ni guillemets pour une adresse pleine de &) ;
 # la barre de titre que dessine Eve (le sous-classement de sa fenêtre, Shell ; son écran et la barre des tâches
-# masquée, Gdi) ; la boîte de dialogue « Ouvrir » des pièces jointes (Shell, COM).
+# masquée, Gdi) ; la boîte de dialogue « Ouvrir » des pièces jointes (Shell, COM), et « Enregistrer sous » des dessins
+# (ses types de fichiers : Shell_Common).
 windows = { version = "0.62.2", features = [
     "Win32_Security_Cryptography",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
     "Win32_System_Com",
     "Media_SpeechSynthesis",
     "Media_Playback",
