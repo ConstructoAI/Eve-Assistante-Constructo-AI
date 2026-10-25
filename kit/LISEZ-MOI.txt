@@ -34,8 +34,8 @@ L'INSTALLATION
    il se change ensuite dans ses réglages, rubrique « Cerveau », ou de vive voix, « passe à Opus »), la touche pour
    parler et le mot d'éveil ; avec une carte NVIDIA, son oreille sur la carte, bien plus rapide que le processeur ; sa
    liberté (totale, ou ses fichiers et le Web seulement) ; Constructo AI ; si elle te demande « je confirme » avant ce
-   qui ne se défait pas ; son allure (le centre de commande, ou le thème clair de Constructo AI : elle se change
-   ensuite dans ses réglages) ; un raccourci sur le bureau.
+   qui ne se défait pas ; son allure (le centre de commande, son réseau neuronal ou la Voie lactée, ou le thème clair
+   de Constructo AI : elle se change ensuite dans ses réglages) ; un raccourci sur le bureau.
 5. Le profil s'écrit, de 5 à 20 minutes (Claude cherche sur le Web pendant ce temps), puis Eve démarre — et, si tu l'as
    reliée à Constructo AI, elle ouvre sa page de connexion dans ton navigateur (voir plus bas).
 

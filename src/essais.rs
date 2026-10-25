@@ -1711,10 +1711,11 @@ enum SceneDuReseau {
     Mesure,
 }
 
-/// `eve --essai-reseau [scène] [--mesure] [--nu] [--econome] [--secondes N] [--captures DOSSIER --aux T1,T2…]` : le
-/// réseau des actions plein fenêtre, habillé comme le tableau HTML de la famille (la ligne d'état en haut, la courbe
-/// d'activité en bas, des personnes d'exemple). `--mesure` relève, phase par phase, ce que coûte une image sur le
-/// processeur (le temps de `Reseau::dessiner`, et l'image entière selon eframe), et l'écrit en partant ; `--nu` montre
+/// `eve --essai-reseau [scène] [--galaxie] [--mesure] [--nu] [--econome] [--secondes N] [--captures DOSSIER --aux
+/// T1,T2…]` : le réseau des actions plein fenêtre, habillé comme le tableau HTML de la famille (la ligne d'état en haut,
+/// la courbe d'activité en bas, des personnes d'exemple). `--galaxie` le montre en Voie lactée (le thème « galaxie ») ;
+/// `--mesure` relève, phase par phase, ce que coûte une image sur le processeur (le temps de `Reseau::dessiner`, et
+/// l'image entière selon eframe), et l'écrit en partant ; `--nu` montre
 /// le réseau seul, avec son propre cadre ; `--captures` enregistre la fenêtre en PNG aux secondes dites (`--aux
 /// 5,12.5`) ; `--secondes N` la ferme d'elle-même. Touches : D la démonstration, E le mode économe, S l'image suivante,
 /// C une couleur, V la voix, P une personne, J la journée (avec un journal), Échap pour fermer.
@@ -1767,6 +1768,8 @@ pub fn reseau(args: &[String]) -> i32 {
     let econome = args.iter().any(|a| a == "--econome") || scene == SceneDuReseau::Econome;
     // Le réseau nu, avec son propre cadre et sans l'habillage de l'essai : la fenêtre de la mesure d'avant.
     let nu = args.iter().any(|a| a == "--nu");
+    // La Voie lactée (le thème « galaxie ») à la place du cerveau.
+    let galaxie = args.iter().any(|a| a == "--galaxie");
     let captures = valeur("--captures").map(std::path::PathBuf::from);
     let mut aux: Vec<f64> =
         valeur("--aux").map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect()).unwrap_or_default();
@@ -1784,6 +1787,9 @@ pub fn reseau(args: &[String]) -> i32 {
         reseau.personnes(personnes_d_exemple());
         reseau.evoquer("ecole", vec!["Léa".into(), "Noah".into()]);
         reseau.econome(econome);
+        if galaxie {
+            reseau.allure(crate::reseau::Allure::Galaxie);
+        }
         Ok(Box::new(EssaiDuReseau {
             reseau,
             scene,
@@ -2076,7 +2082,8 @@ impl EssaiDuReseau {
         // Le titre.
         let mut job = LayoutJob::default();
         job.append("EVE", 0.0, format(15.0, cyan, 4.8));
-        job.append("\nRÉSEAU NEURONAL · ACTIVITÉ EN DIRECT · 360°", 0.0, format(11.0, gris, 1.3));
+        let sous_titre = format!("\n{} · ACTIVITÉ EN DIRECT · 360°", self.reseau.titre());
+        job.append(&sous_titre, 0.0, format(11.0, gris, 1.3));
         p.galley(rect.min + vec2(20.0, 14.0), p.layout_job(job), Color32::PLACEHOLDER);
         // La ligne d'état : le texte tapé, puis le curseur (cyan) quand il se montre.
         let ligne = self.reseau.ligne_d_etat(t);
@@ -6404,7 +6411,9 @@ impl ChefDesProfils {
                 self.fil.push(serde_json::json!({ "de": "systeme", "texte": ligne, "heure": "", "pieces": [] }));
                 self.choix.push(nom.to_string());
             }
-            ("theme", Some(t)) => self.theme = if t == "constructo" { "constructo" } else { "centre" },
+            ("theme", Some(t)) => {
+                self.theme = crate::reglages::THEMES.iter().find(|x| x.0 == t).map_or("centre", |x| x.0)
+            }
             _ => self.autres.push(action),
         }
     }

@@ -21,10 +21,17 @@
 //! voix le fait vibrer. Il tient aussi ce que la page écrit autour de lui : la ligne d'état, tapée lettre à lettre, et
 //! la courbe d'activité ; et ses modes : la démonstration, la journée rejouée d'après le journal d'Eve, le mode
 //! économe.
+//!
+//! Il a deux allures ([`Allure`], le réglage `theme`) : le cerveau du modèle, ou la Voie lactée (le 25 octobre 2026 :
+//! « que les points représentent nos étoiles et système autour de la galaxie »). Ses 330 points sont
+//! alors les étoiles d'une spirale barrée à quatre bras, vue de biais, Eve en son cœur ; une lueur peinte (le bulbe, les
+//! bras, le disque) et une poussière d'étoiles la remplissent ; le Soleil et ses planètes sont à leur place, dans le
+//! bras d'Orion ; chaque personne a son bras. Le reste ne change pas : les destinations (des amas autour du disque,
+//! comme les vrais), les impulsions qui courent d'étoile en étoile, les images que dessinent les étoiles, les modes.
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
-use std::f32::consts::{PI, TAU};
+use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI, TAU};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -34,6 +41,14 @@ use eframe::egui::{
     vec2,
 };
 use serde_json::Value;
+
+/// L'allure du réseau : le cerveau du modèle, ou la Voie lactée.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Allure {
+    #[default]
+    Cerveau,
+    Galaxie,
+}
 
 /// Les neurones du cerveau, comme le modèle.
 const NEURONES: usize = 330;
@@ -73,6 +88,31 @@ const MAX_AMBIANTES: usize = 25;
 const FOULE: usize = 14;
 /// Les bandeaux du haut (le compte, la légende) et du bas (la dernière action), où les étiquettes ne se posent pas.
 const BANDEAU: f32 = 26.0;
+/// L'inclinaison au repos : le cerveau un peu par-dessous, comme le modèle ; la Voie lactée de biais, d'en haut.
+const TANGAGE_CERVEAU: f32 = -0.35;
+const TANGAGE_GALAXIE: f32 = 0.62;
+
+// La Voie lactée se tire sur un disque de rayon 1, puis grandit de `RAYON_DE_LA_GALAXIE` : vue de biais, elle remplit
+// alors la fenêtre comme la sphère du cerveau ; les places des destinations (la sphère de 1,1) sont autour d'elle et
+// au-dessus, comme ses amas. Une spirale barrée à quatre bras, deux grands (Persée et l'Écu-Croix, partis des bouts de
+// la barre) et deux petits (la Règle et le Sagittaire), enroulés en arrière de la rotation, au pas de 14° ; le Soleil
+// sur l'éperon d'Orion, entre le Sagittaire et Persée, à un peu plus de la moitié du rayon (26 000 années-lumière sur
+// 50 000). Au centre, l'orbe d'Eve recouvre le cœur : la barre en dépasse.
+const RAYON_DE_LA_GALAXIE: f32 = 1.4;
+const BRAS: usize = 4;
+/// La tangente du pas des bras (14°).
+const PAS_DES_BRAS: f32 = 0.25;
+/// Le rayon où les bras quittent la barre, et l'angle de celle-ci.
+const DEBUT_DES_BRAS: f32 = 0.3;
+const ANGLE_DE_LA_BARRE: f32 = 0.45;
+const RAYON_DU_SOLEIL: f32 = 0.6;
+/// Les étoiles de la poussière, en plus des 330 du réseau : elles ne portent rien, elles font la galaxie.
+const POUSSIERE: usize = 1800;
+/// La lueur peinte : son côté en pixels, et le carré du disque de rayon 1 qu'elle couvre (de −1,15 à 1,15).
+const COTE_DE_LA_LUEUR: usize = 384;
+const ETENDUE: f32 = 1.15;
+/// Le quartier d'une étoile qui n'est à personne : le bulbe, le disque entre les bras.
+const A_PERSONNE: u8 = u8::MAX;
 
 /// Les images que le réseau sait dessiner (cdc:163-184), et leur nom dans la ligne d'état (« PENSE : ÉCOLE »).
 pub const IMAGES: [(&str, &str); 11] = [
@@ -659,6 +699,11 @@ pub struct Reseau {
     synapses: Vec<(usize, usize)>,
     /// Les places des destinations dans l'ordre où elles se donnent : chacune au plus loin des précédentes.
     ordre: Vec<usize>,
+    /// L'allure : le cerveau du modèle, ou la Voie lactée ; dans celle-ci, ce qu'est chaque point (sa couleur, son
+    /// éclat, son bras), et ce qui la peint autour de ses étoiles.
+    allure: Allure,
+    astres: Vec<Astre>,
+    galaxie: Option<Galaxie>,
     /// La destination posée sur chaque point, s'il y en a une.
     pole_de: Vec<Option<usize>>,
     /// La lueur de chaque point : son éclat, et l'heure où il l'a reçu (elle s'éteint d'elle-même).
@@ -746,7 +791,7 @@ impl Reseau {
     /// `dossier_de_travail` : celui du spécialiste (C:\Exemple\Maison pour l'Assistante famille), pour reconnaître ses
     /// fichiers parmi les chemins des outils.
     pub fn nouveau(dossier_de_travail: &Path) -> Reseau {
-        let Cerveau { places, voisins, synapses, ordre } = construire();
+        let Cerveau { places, voisins, synapses, ordre, astres } = construire(Allure::Cerveau);
         let n = places.len();
         let mut hasard = Hasard(GRAINE ^ 0x00E5_FF00);
         let etoiles = (0..110).map(|_| [hasard.f(), hasard.f(), hasard.f()]).collect();
@@ -756,6 +801,9 @@ impl Reseau {
             voisins,
             synapses,
             ordre,
+            allure: Allure::Cerveau,
+            astres,
+            galaxie: None,
             pole_de: vec![None; n],
             lueurs: vec![(0.0, f64::NEG_INFINITY); n],
             lobes: vec![Lobe { pole: 0, avant: 0, depuis: f64::NEG_INFINITY }; n],
@@ -768,7 +816,7 @@ impl Reseau {
             etoiles,
             hasard,
             lacet: 0.6,
-            tangage: -0.35,
+            tangage: TANGAGE_CERVEAU,
             elan: 0.0,
             zoom: 1.0,
             avant: None,
@@ -826,20 +874,65 @@ impl Reseau {
         rect.center() + vec2(0.0, 4.0)
     }
 
+    /// L'allure du réseau ([`Allure`]) : changée, ses points se replacent — le cerveau du modèle, ou les étoiles de la
+    /// Voie lactée —, il reprend l'inclinaison qui la montre le mieux, et ce qui courait sur les anciennes synapses
+    /// s'arrête. Ses destinations (leurs places ne changent pas), leurs compteurs et ses personnes restent.
+    pub fn allure(&mut self, allure: Allure) {
+        if allure == self.allure {
+            return;
+        }
+        let Cerveau { places, voisins, synapses, ordre, astres } = construire(allure);
+        (self.places, self.voisins, self.synapses, self.ordre, self.astres) =
+            (places, voisins, synapses, ordre, astres);
+        self.allure = allure;
+        self.galaxie = (allure == Allure::Galaxie).then(Galaxie::nouvelle);
+        self.impulsions.clear();
+        self.ambiantes.clear();
+        self.ondes.clear();
+        self.etincelles.clear();
+        // Une image en cours se refait sur les nouvelles places.
+        (self.forme, self.morph) = (None, 0.0);
+        self.tangage = if allure == Allure::Galaxie { TANGAGE_GALAXIE } else { TANGAGE_CERVEAU };
+        self.tangage_repos = None;
+        self.recalculer_lobes(f64::NEG_INFINITY);
+        self.quartiers = self.quartiers_de(self.personnes.len());
+    }
+
+    /// Le titre du centre de commande, qui dit ce que montre le réseau : « RÉSEAU NEURONAL », ou « VOIE LACTÉE ».
+    pub fn titre(&self) -> &'static str {
+        match self.allure {
+            Allure::Cerveau => "RÉSEAU NEURONAL",
+            Allure::Galaxie => "VOIE LACTÉE",
+        }
+    }
+
     /// Le nombre d'actions depuis l'ouverture, et celles en cours.
     pub fn compteurs(&self) -> (u32, usize) {
         (self.total, self.en_cours.len())
     }
 
     /// Les personnes du spécialiste, huit au plus : chacune a son quartier du réseau (la sphère coupée autour de son
-    /// axe ; à quatre, les quartiers du modèle), qui prend sa couleur 12 s quand un outil la nomme, et la ligne d'état
-    /// dit alors « POUR … » (cdc:529-545).
+    /// axe ; à quatre, les quartiers du modèle ; dans la Voie lactée, un bras), qui prend sa couleur 12 s quand un
+    /// outil la nomme, et la ligne d'état dit alors « POUR … » (cdc:529-545).
     pub fn personnes(&mut self, mut liste: Vec<Personne>) {
         liste.truncate(MAX_PERSONNES);
         let n = liste.len();
-        self.quartiers = self.places.iter().map(|p| secteur(p[0], p[2], n) as u8).collect();
+        self.quartiers = self.quartiers_de(n);
         self.eclairages = vec![Eclairage::ETEINT; n];
         self.personnes = liste;
+    }
+
+    /// Le quartier de chaque point pour `n` personnes : sa part de la sphère ([`secteur`]). Dans la Voie lactée, à
+    /// quatre personnes au plus, chacune a un bras (à deux, deux bras chacune ; à trois, la première en a deux) ; le
+    /// bulbe et le disque entre les bras ne sont à personne. Au-delà de quatre, des parts du disque, comme la sphère.
+    fn quartiers_de(&self, n: usize) -> Vec<u8> {
+        let galaxie = self.allure == Allure::Galaxie && n <= BRAS;
+        (0..self.places.len())
+            .map(|i| match self.astres.get(i) {
+                Some(a) if galaxie => a.bras.map_or(A_PERSONNE, |b| (usize::from(b) * n / BRAS) as u8),
+                _ => secteur(self.places[i][0], self.places[i][2], n) as u8,
+            })
+            .collect()
     }
 
     /// Des mots de plus qui font penser à une image, avant ceux du modèle : pour `ecole`, les prénoms des enfants et le
@@ -1352,10 +1445,11 @@ impl Reseau {
         (temps < fin).then(|| (c, (((fin - temps) / FONDU_COULEUR).min(1.0) * 0.88) as f32))
     }
 
-    /// La couleur d'un neurone (cdc:534-536) : celle de son lobe, teinte de la couleur demandée, puis mêlée de celle
-    /// de la personne de son quartier quand elle est nommée ; et la force de celle-ci.
+    /// La couleur d'un neurone (cdc:534-536) : celle de son lobe (dans la Voie lactée, celle de l'étoile), teinte de la
+    /// couleur demandée, puis mêlée de celle de la personne de son quartier quand elle est nommée ; et la force de
+    /// celle-ci.
     fn couleur_neurone(&self, i: usize, temps: f64, teinte: Option<(Rgb, f32)>, forces: &[f32]) -> (Rgb, f32) {
-        let mut c = self.couleur_lobe(i, temps);
+        let mut c = self.couleur_place(i, temps);
         if let Some((t, k)) = teinte {
             c = melange(c, t, k);
         }
@@ -1432,12 +1526,28 @@ impl Reseau {
 
         self.avancer(temps, dt);
 
+        // La lueur de la Voie lactée se peint une fois, à sa première image (une fraction de seconde).
+        if let Some(g) = &mut self.galaxie
+            && g.lueur.is_none()
+        {
+            let image = lueur_galactique(COTE_DE_LA_LUEUR);
+            g.lueur = Some(ui.ctx().load_texture("voie-lactee", image, egui::TextureOptions::LINEAR));
+        }
         let p = ui.painter_at(rect);
         self.peindre_fond(&p, &vue, temps);
-        self.peindre_anneaux(&p, &vue);
+        if let Some(g) = &self.galaxie {
+            self.peindre_lueur_galactique(&p, &vue, g);
+            self.peindre_poussiere(&p, &vue, g, temps);
+            self.peindre_orbite_du_soleil(&p, &vue);
+        } else {
+            self.peindre_anneaux(&p, &vue);
+        }
         self.peindre_synapses(&p, temps);
         self.peindre_ambiantes(&p, &vue, temps);
         self.peindre_neurones(&p, &vue, temps);
+        if let Some(g) = &self.galaxie {
+            self.peindre_soleil(&p, &vue, g, temps);
+        }
         self.peindre_impulsions(&p, &vue, temps);
         let (reperes, cotes) = self.peindre_poles(&p, &vue, temps);
         for (k, cote) in cotes {
@@ -1654,11 +1764,12 @@ impl Reseau {
         if k >= 1.0 { c } else { melange(self.poles[lobe.avant].couleur, c, k) }
     }
 
-    /// La couleur d'un point : Eve, sa destination, ou son lobe.
+    /// La couleur d'un point : Eve, sa destination, ou son lobe ; dans la Voie lactée, son étoile.
     fn couleur_place(&self, i: usize, temps: f64) -> Rgb {
-        match (i, self.pole_de[i]) {
-            (0, _) => CYAN,
-            (_, Some(p)) => self.poles[p].couleur,
+        match (i, self.pole_de[i], self.astres.get(i)) {
+            (0, _, _) => CYAN,
+            (_, Some(p), _) => self.poles[p].couleur,
+            (_, None, Some(a)) => a.couleur,
             _ => self.couleur_lobe(i, temps),
         }
     }
@@ -1823,9 +1934,11 @@ impl Reseau {
 
     /// Les synapses, de la couleur de leur lobe, plus vives devant et quand elles portent une lueur ; celles d'une
     /// place sans destination restent éteintes. Presque effacées quand le réseau dessine une image (cdc:365) ; une sur
-    /// deux en mode économe (cdc:363).
+    /// deux en mode économe (cdc:363). Dans la Voie lactée, une synapse entre deux étoiles ne se voit que quand une
+    /// lueur la parcourt ; seules les attaches des destinations restent, pâles.
     fn peindre_synapses(&self, p: &Painter, temps: f64) {
         let efface = 1.0 - self.morph * 0.85;
+        let galaxie = self.galaxie.is_some();
         for &(a, b) in &self.synapses {
             if self.econome && (a + b) % 2 == 1 {
                 continue;
@@ -1833,13 +1946,17 @@ impl Reseau {
             let (couleur, naissance) = match (self.pole_de[a], self.pole_de[b]) {
                 (Some(k), _) | (_, Some(k)) => (self.poles[k].couleur, self.naissance(k, temps)),
                 _ if a > NEURONES || b > NEURONES => continue,
-                _ => (self.couleur_lobe(if a == 0 { b } else { a }, temps), 1.0),
+                _ => (self.couleur_place(if a == 0 { b } else { a }, temps), 1.0),
             };
             let (pa, pb) = (self.projetes[a], self.projetes[b]);
             let devant = 1.0 - ((pa.z + pb.z) * 0.5 + 1.2) / 2.4;
-            let force = (0.05 + 0.13 * devant + (self.lueur(a, temps) + self.lueur(b, temps)) * 0.35).min(0.9)
-                * naissance
-                * efface;
+            let attache = a > NEURONES || b > NEURONES;
+            let base = match (galaxie, attache) {
+                (false, _) => 0.05 + 0.13 * devant,
+                (true, true) => 0.02 + 0.05 * devant,
+                (true, false) => 0.0,
+            };
+            let force = (base + (self.lueur(a, temps) + self.lueur(b, temps)) * 0.35).min(0.9) * naissance * efface;
             if force > 0.01 {
                 p.line_segment([pa.pos, pb.pos], Stroke::new(1.0, lumiere(couleur, force)));
             }
@@ -1870,12 +1987,113 @@ impl Reseau {
             let lueur = self.lueur(i, temps);
             let devant = 1.0 - (q.z + 1.2) / 2.4;
             let (c, personne) = self.couleur_neurone(i, temps, teinte, &forces);
+            if let Some(a) = self.astres.get(i) {
+                // Une étoile : sa grandeur et son éclat propres ; elle scintille, lentement (au repos, la fenêtre ne
+                // redessine que quatre fois par seconde) ; les plus vives ont leur halo.
+                let scintille = 0.8 + 0.2 * (temps * (0.9 + (i % 7) as f64 * 0.17) + i as f64).sin() as f32;
+                let r = (0.75 + a.eclat * 1.25 + lueur * 3.0 + m * 1.4 + personne * 1.4) * q.s * taille;
+                let force = (0.3 + 0.4 * devant) * (0.5 + 0.5 * a.eclat) * scintille + lueur + m * 0.5 + personne * 0.4;
+                p.circle_filled(q.pos, r, lumiere(c, force));
+                if lueur > 0.25 || a.eclat > 0.8 || personne > 0.3 {
+                    p.circle_filled(q.pos, r * 3.0, lumiere(c, 0.1 + lueur * 0.2 + personne * 0.1));
+                }
+                continue;
+            }
             let r = (1.3 + lueur * 3.2 + m * 1.4 + personne * 1.2) * q.s * taille;
             p.circle_filled(q.pos, r, lumiere(c, 0.25 + 0.5 * devant + lueur + m * 0.5));
             if lueur > 0.25 {
                 p.circle_filled(q.pos, r * 3.4, lumiere(c, lueur * 0.25));
             }
         }
+    }
+
+    /// La lueur de la Voie lactée ([`lueur_galactique`]), posée sur le plan du disque et vue comme lui : une grille de
+    /// 32 × 32 cases dont chaque coin se projette ; elle s'ajoute au fond. Elle s'efface quand les étoiles dessinent
+    /// une image.
+    fn peindre_lueur_galactique(&self, p: &Painter, v: &Vue, g: &Galaxie) {
+        let Some(texture) = &g.lueur else { return };
+        let force = (1.0 - self.morph * 0.95) * if self.econome { 0.6 } else { 0.8 };
+        let k = (force.clamp(0.0, 1.0) * 255.0) as u8;
+        let couleur = Color32::from_rgba_premultiplied(k, k, k, 0);
+        const N: u32 = 32;
+        let mut m = Mesh::with_texture(texture.id());
+        for j in 0..=N {
+            for i in 0..=N {
+                let (u, w) = (i as f32 / N as f32, j as f32 / N as f32);
+                let cote = |t: f32| (t * 2.0 - 1.0) * ETENDUE * RAYON_DE_LA_GALAXIE;
+                let pos = projeter([cote(u), 0.0, cote(w)], &v.camera).pos;
+                m.vertices.push(egui::epaint::Vertex { pos, uv: pos2(u, w), color: couleur });
+            }
+        }
+        for j in 0..N {
+            for i in 0..N {
+                let a = j * (N + 1) + i;
+                m.add_triangle(a, a + 1, a + N + 2);
+                m.add_triangle(a, a + N + 2, a + N + 1);
+            }
+        }
+        p.add(Shape::mesh(m));
+    }
+
+    /// La poussière d'étoiles de la Voie lactée : de petits carrés de lumière, pâles, plus vifs devant, qui scintillent à
+    /// peine ; un tiers en mode économe. Elle s'efface quand les étoiles dessinent une image.
+    fn peindre_poussiere(&self, p: &Painter, v: &Vue, g: &Galaxie, temps: f64) {
+        let efface = 1.0 - self.morph;
+        if efface <= 0.01 {
+            return;
+        }
+        let n = if self.econome { g.poussiere.len() / 3 } else { g.poussiere.len() };
+        let cote = 1.3 * v.taille.sqrt();
+        let mut m = Mesh::default();
+        for (k, (place, couleur, eclat)) in g.poussiere.iter().take(n).enumerate() {
+            let q = projeter(*place, &v.camera);
+            let devant = 1.0 - (q.z + 1.2) / 2.4;
+            let scintille = 0.8 + 0.2 * (temps * 1.3 + k as f64 * 0.37).sin() as f32;
+            let force = eclat * (0.45 + 0.55 * devant) * scintille * efface;
+            m.add_colored_rect(
+                Rect::from_center_size(q.pos, Vec2::splat((cote * q.s).max(1.0))),
+                lumiere(*couleur, force),
+            );
+        }
+        p.add(Shape::mesh(m));
+    }
+
+    /// L'orbite du Soleil autour du cœur de la galaxie (il en fait le tour en 230 millions d'années), en pointillé
+    /// doré : le repère de la rotation, à la place des anneaux du cerveau.
+    fn peindre_orbite_du_soleil(&self, p: &Painter, v: &Vue) {
+        let efface = (1.0 - self.morph * 1.6).max(0.0);
+        if efface <= 0.01 {
+            return;
+        }
+        let rayon = RAYON_DU_SOLEIL * RAYON_DE_LA_GALAXIE;
+        let points: Vec<Pos2> =
+            (0..=120).map(|i| projeter(sur_le_disque(rayon, i as f32 / 120.0 * TAU, 0.0), &v.camera).pos).collect();
+        p.extend(Shape::dashed_line(&points, Stroke::new(1.0, voile(OR, 0.18 * efface)), 5.0, 6.0));
+    }
+
+    /// Le Soleil, notre étoile, sur l'éperon d'Orion : son éclat doré et, autour, trois planètes sur leurs orbites (la
+    /// Terre est la deuxième, bleue), si lentes qu'elles restent douces à quatre images par seconde ; dessous, son nom,
+    /// « SYSTÈME SOLAIRE ». Il s'efface quand les étoiles dessinent une image.
+    fn peindre_soleil(&self, p: &Painter, v: &Vue, g: &Galaxie, temps: f64) {
+        // Il s'efface plus vite que la poussière : son nom ne reste pas au milieu de l'image.
+        let efface = (1.0 - self.morph * 1.6).max(0.0);
+        if efface <= 0.01 {
+            return;
+        }
+        let q = projeter(g.soleil, &v.camera);
+        let t = v.taille.sqrt() * q.s;
+        halo(p, q.pos, 11.0 * t, OR, 0.8 * efface);
+        p.circle_filled(q.pos, 2.4 * t, lumiere([255, 246, 220], efface));
+        let planetes: [(f32, f64, Rgb); 3] =
+            [(6.5, 24.0, [214, 190, 170]), (10.0, 40.0, [120, 180, 255]), (14.0, 64.0, [235, 140, 100])];
+        for (k, (rayon, periode, couleur)) in planetes.into_iter().enumerate() {
+            let r = rayon * t;
+            p.circle_stroke(q.pos, r, Stroke::new(0.7, lumiere(OR, 0.16 * efface)));
+            let a = (temps / periode * std::f64::consts::TAU + k as f64 * 2.1) as f32;
+            p.circle_filled(q.pos + Vec2::angled(a) * r, (1.3 * t).max(1.0), lumiere(couleur, efface));
+        }
+        let nom = voile(OR, 0.85 * efface * estompe(q.z));
+        ecrire(p, q.pos + vec2(0.0, 16.0 * t + 3.0), Align2::CENTER_TOP, "SYSTÈME SOLAIRE", 10.0, nom);
     }
 
     /// Où en est une impulsion : la synapse qu'elle parcourt et la part déjà faite.
@@ -2142,32 +2360,49 @@ impl Reseau {
     }
 }
 
-/// Le cerveau, tiré une fois pour toutes : ses points, ses synapses, l'ordre des places des destinations.
+/// Le cerveau (ou la Voie lactée), tiré une fois pour toutes : ses points, ses synapses, l'ordre des places des
+/// destinations ; dans la Voie lactée, l'étoile de chaque point (vide pour le cerveau).
 struct Cerveau {
     places: Vec<[f32; 3]>,
     voisins: Vec<Vec<usize>>,
     synapses: Vec<(usize, usize)>,
     ordre: Vec<usize>,
+    astres: Vec<Astre>,
 }
 
 /// Le cerveau du modèle : Eve au centre ; 330 neurones tirés dans une boule, sept sur dix près de sa surface ; chacun
 /// lié à ses quatre plus proches voisins, Eve à ses douze, chaque place de destination à ses huit ; puis tout neurone
 /// isolé rattaché au plus proche de ceux qu'Eve atteint. Les 60 places des destinations sont posées en spirale (le
-/// nombre d'or) sur une sphère un peu plus grande.
-fn construire() -> Cerveau {
-    let mut h = Hasard(GRAINE);
+/// nombre d'or) sur une sphère un peu plus grande. Dans la Voie lactée, les 330 points sont ses étoiles
+/// ([`tirer_une_etoile`]), liées de même ; les places des destinations ne changent pas.
+fn construire(allure: Allure) -> Cerveau {
     let mut places = vec![[0.0f32; 3]];
-    for _ in 0..NEURONES {
-        let d = loop {
-            let (x, y, z) = (h.suivant() * 2.0 - 1.0, h.suivant() * 2.0 - 1.0, h.suivant() * 2.0 - 1.0);
-            let l = x * x + y * y + z * z;
-            if (0.01..=1.0).contains(&l) {
-                let l = l.sqrt();
-                break [x / l, y / l, z / l];
+    let mut astres = Vec::new();
+    match allure {
+        Allure::Cerveau => {
+            let mut h = Hasard(GRAINE);
+            for _ in 0..NEURONES {
+                let d = loop {
+                    let (x, y, z) = (h.suivant() * 2.0 - 1.0, h.suivant() * 2.0 - 1.0, h.suivant() * 2.0 - 1.0);
+                    let l = x * x + y * y + z * z;
+                    if (0.01..=1.0).contains(&l) {
+                        let l = l.sqrt();
+                        break [x / l, y / l, z / l];
+                    }
+                };
+                let r = if h.suivant() < 0.7 { 0.78 + h.suivant() * 0.24 } else { 0.22 + h.suivant() * 0.5 };
+                places.push([(d[0] * r) as f32, (d[1] * r) as f32, (d[2] * r) as f32]);
             }
-        };
-        let r = if h.suivant() < 0.7 { 0.78 + h.suivant() * 0.24 } else { 0.22 + h.suivant() * 0.5 };
-        places.push([(d[0] * r) as f32, (d[1] * r) as f32, (d[2] * r) as f32]);
+        }
+        Allure::Galaxie => {
+            let mut h = Hasard(GRAINE ^ 0x0047_A1A0);
+            astres.push(Astre::default());
+            for _ in 0..NEURONES {
+                let (place, astre) = tirer_une_etoile(&mut h, &PARTS_DES_ETOILES);
+                places.push(place);
+                astres.push(astre);
+            }
+        }
     }
     for k in 0..MAX_DESTINATIONS {
         let y = 1.0 - 2.0 * (k as f32 + 0.5) / MAX_DESTINATIONS as f32;
@@ -2218,7 +2453,183 @@ fn construire() -> Cerveau {
         }
     }
     let ordre = donnees.into_iter().map(|k| 1 + NEURONES + k).collect();
-    Cerveau { places, voisins, synapses, ordre }
+    if allure == Allure::Galaxie {
+        astres.resize(places.len(), Astre::default());
+    }
+    Cerveau { places, voisins, synapses, ordre, astres }
+}
+
+// ---- La Voie lactée -----------------------------------------------------------------------------------------------
+
+/// Une étoile de la Voie lactée : sa couleur (son type : bleutée dans les bras, où elles sont jeunes ; dorée au cœur,
+/// où elles sont vieilles), son éclat propre, son bras (aucun : le bulbe, la barre, l'éperon d'Orion, le disque entre
+/// les bras).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Astre {
+    couleur: Rgb,
+    eclat: f32,
+    bras: Option<u8>,
+}
+
+/// Ce qui peint la Voie lactée autour de ses 330 étoiles : la poussière d'étoiles (leur place, leur couleur, leur
+/// éclat), la place du Soleil, et la lueur peinte (sa texture, faite à la première image).
+struct Galaxie {
+    poussiere: Vec<([f32; 3], Rgb, f32)>,
+    soleil: [f32; 3],
+    lueur: Option<egui::TextureHandle>,
+}
+
+impl Galaxie {
+    fn nouvelle() -> Galaxie {
+        let mut h = Hasard(GRAINE ^ 0x0D05_7000);
+        let poussiere = (0..POUSSIERE)
+            .map(|_| {
+                let (place, a) = tirer_une_etoile(&mut h, &PARTS_DE_LA_POUSSIERE);
+                (place, a.couleur, 0.14 + 0.3 * a.eclat)
+            })
+            .collect();
+        let soleil = sur_le_disque(RAYON_DU_SOLEIL * RAYON_DE_LA_GALAXIE, angle_de_l_eperon(RAYON_DU_SOLEIL), 0.0);
+        Galaxie { poussiere, soleil, lueur: None }
+    }
+}
+
+/// Où tombent les étoiles, en parts cumulées : le bulbe et la barre ; les deux grands bras ; les deux petits ;
+/// l'éperon d'Orion ; le reste, le disque entre les bras. Les 330 du réseau, puis la poussière (plus de cœur et de
+/// disque : elle fait la lueur).
+const PARTS_DES_ETOILES: [f32; 4] = [0.16, 0.62, 0.88, 0.92];
+const PARTS_DE_LA_POUSSIERE: [f32; 4] = [0.22, 0.6, 0.82, 0.85];
+
+/// Les couleurs des étoiles : celles du cœur, vieilles et dorées ; celles des bras, jeunes et bleutées, quelques
+/// jaunes, et le rose des nuages où elles naissent ; celles du disque, blanches à jaunes.
+const COULEURS_DU_BULBE: [Rgb; 4] = [[255, 204, 150], [255, 224, 180], [255, 188, 130], [255, 238, 210]];
+const COULEURS_DES_BRAS: [Rgb; 5] =
+    [[160, 196, 255], [196, 216, 255], [240, 244, 255], [255, 236, 200], [255, 140, 190]];
+const PARTS_DES_COULEURS_DES_BRAS: [f32; 4] = [0.35, 0.65, 0.85, 0.95];
+const COULEURS_DU_DISQUE: [Rgb; 3] = [[255, 240, 220], [232, 236, 255], [255, 226, 190]];
+/// L'or du Soleil, de son orbite et de son nom.
+const OR: Rgb = [255, 214, 110];
+/// Le sinus du pas des bras (14°) : l'écart, perpendiculaire au bras, d'un point qui en est à un angle donné.
+const SINUS_DU_PAS: f32 = 0.242;
+
+/// L'angle du bras `b` au rayon `r` : une spirale logarithmique, partie d'un bout de la barre (les bras 0 et 2, les
+/// grands) ou d'entre ses bouts (1 et 3, les petits), qui recule à mesure qu'elle s'éloigne (les bras traînent derrière
+/// la rotation, comme ceux des vraies galaxies).
+fn angle_du_bras(b: usize, r: f32) -> f32 {
+    ANGLE_DE_LA_BARRE + b as f32 * FRAC_PI_2 - (r.max(DEBUT_DES_BRAS) / DEBUT_DES_BRAS).ln() / PAS_DES_BRAS
+}
+
+/// L'angle de l'éperon d'Orion au rayon `r` : à mi-chemin du grand bras 0 et du petit bras 1.
+fn angle_de_l_eperon(r: f32) -> f32 {
+    angle_du_bras(0, r) + FRAC_PI_4
+}
+
+/// Le point du disque au rayon `r`, à l'angle `theta`, à la hauteur `y`.
+fn sur_le_disque(r: f32, theta: f32, y: f32) -> [f32; 3] {
+    let (s, c) = theta.sin_cos();
+    [r * c, y, r * s]
+}
+
+/// L'écart signé, perpendiculaire au bras, d'un point au rayon `r` et à l'angle `theta` d'un bras qui passe à l'angle
+/// `angle` à ce rayon : positif au-dehors du bras (côté convexe), négatif en dedans.
+fn ecart_au_bras(angle: f32, r: f32, theta: f32) -> f32 {
+    r * ((theta - angle + PI).rem_euclid(TAU) - PI) * SINUS_DU_PAS
+}
+
+/// Une étoile de la Voie lactée, tirée selon `parts` ([`PARTS_DES_ETOILES`]) : sa place et ce qu'elle est. Le bulbe,
+/// une boule aplatie, et la barre, allongée de son angle ; les bras, plus peuplés vers le centre, plus larges au-dehors,
+/// leurs étoiles de part et d'autre de leur ligne ; l'éperon d'Orion, autour du rayon du Soleil ; le disque, n'importe
+/// où, mince. Son éclat : beaucoup de pâles, peu de vives.
+fn tirer_une_etoile(h: &mut Hasard, parts: &[f32; 4]) -> ([f32; 3], Astre) {
+    let u = h.f();
+    let (place, bras, palette) = if u < parts[0] {
+        let place = if h.f() < 0.6 {
+            let (a, b) = (h.normale() * 0.16, h.normale() * 0.05);
+            let (s, c) = ANGLE_DE_LA_BARRE.sin_cos();
+            [a * c - b * s, h.normale() * 0.035, a * s + b * c]
+        } else {
+            [h.normale() * 0.1, h.normale() * 0.07, h.normale() * 0.1]
+        };
+        (place, None, 0)
+    } else if u < parts[2] {
+        // Les grands bras (0, 2) d'abord, puis les petits (1, 3) ; chacun de la paire, à pile ou face.
+        let b = usize::from(u >= parts[1]) + 2 * usize::from(h.f() >= 0.5);
+        let r = DEBUT_DES_BRAS + (1.0 - DEBUT_DES_BRAS) * h.f().powf(1.4);
+        let ecart = h.normale() * (0.022 + 0.04 * r);
+        let theta = angle_du_bras(b, r) + h.normale() * 0.03;
+        (sur_le_disque(r + ecart, theta, h.normale() * (0.01 + 0.012 * (1.0 - r))), Some(b as u8), 1)
+    } else if u < parts[3] {
+        let r = RAYON_DU_SOLEIL + h.normale() * 0.07;
+        (sur_le_disque(r, angle_de_l_eperon(r) + h.normale() * 0.06, h.normale() * 0.01), None, 2)
+    } else {
+        let r = 0.22 + 0.8 * h.f().sqrt();
+        (sur_le_disque(r, h.f() * TAU, h.normale() * 0.015), None, 2)
+    };
+    let couleur = match palette {
+        0 => COULEURS_DU_BULBE[h.indice(COULEURS_DU_BULBE.len())],
+        1 => {
+            let v = h.f();
+            COULEURS_DES_BRAS[PARTS_DES_COULEURS_DES_BRAS.iter().take_while(|&&p| v >= p).count()]
+        }
+        _ => COULEURS_DU_DISQUE[h.indice(COULEURS_DU_DISQUE.len())],
+    };
+    let place = place.map(|v| v * RAYON_DE_LA_GALAXIE);
+    (place, Astre { couleur, eclat: 0.25 + 0.75 * h.f().powi(3), bras })
+}
+
+/// La lueur de la Voie lactée, vue de face : une image carrée de `cote` pixels qui couvre le disque de −1,15 à 1,15
+/// ([`lueur_en`]), en couleurs additives (l'alpha nul : elle s'ajoute au fond, le `lighter` du modèle).
+fn lueur_galactique(cote: usize) -> egui::ColorImage {
+    let mut octets = Vec::with_capacity(cote * cote * 4);
+    let en = |k: usize| ((k as f32 + 0.5) / cote as f32 * 2.0 - 1.0) * ETENDUE;
+    for j in 0..cote {
+        for i in 0..cote {
+            octets.extend(lueur_en(en(i), en(j)).map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8));
+            octets.push(0);
+        }
+    }
+    egui::ColorImage::from_rgba_premultiplied([cote, cote], &octets)
+}
+
+/// La lumière de la Voie lactée en un point de son disque, vue de face (rouge, vert, bleu, de 0 à 1) : le bulbe et la
+/// barre, dorés ; les quatre bras, bleutés, les deux grands plus vifs, grumeleux comme leurs nuages d'étoiles, une bande
+/// de poussière sombre à leur bord intérieur ; l'éperon d'Orion autour du Soleil ; le disque, pâle ; tout s'éteint au
+/// bord.
+fn lueur_en(x: f32, z: f32) -> [f32; 3] {
+    let (r, theta) = (x.hypot(z), z.atan2(x));
+    let (s, c) = ANGLE_DE_LA_BARRE.sin_cos();
+    let (a, b) = (x * c + z * s, -x * s + z * c);
+    let bulbe = (-(r / 0.13).powi(2)).exp() + 0.6 * (-(a / 0.3).powi(2) - (b / 0.085).powi(2)).exp();
+    let debut = lisse((r - DEBUT_DES_BRAS * 0.7) / (DEBUT_DES_BRAS * 0.5));
+    let bord = 1.0 - lisse((r - 0.82) / 0.3);
+    let grumeaux = 0.55 + 0.45 * (0.65 * bruit(x * 7.0, z * 7.0) + 0.35 * bruit(x * 19.0, z * 19.0));
+    let (mut bras, mut ombre) = (0.0f32, 0.0f32);
+    let largeur = 0.04 + 0.05 * r;
+    for k in 0..BRAS {
+        let d = ecart_au_bras(angle_du_bras(k, r), r, theta);
+        let poids = if k % 2 == 0 { 1.0 } else { 0.62 };
+        bras += poids * (-(d / largeur).powi(2)).exp();
+        ombre += poids * (-((d + 0.75 * largeur) / (0.35 * largeur)).powi(2)).exp();
+    }
+    let d = ecart_au_bras(angle_de_l_eperon(r), r, theta);
+    let eperon = 0.45 * (-(d / 0.045).powi(2)).exp() * (-((r - RAYON_DU_SOLEIL) / 0.12).powi(2)).exp();
+    let bras = (bras + eperon) * debut * bord * grumeaux * (1.0 - 0.55 * ombre.min(1.0)) * (-r / 0.8).exp() * 1.6;
+    let disque = 0.22 * (-r / 0.35).exp() * bord;
+    let (dore, bleute, pale) = ([1.0, 0.82, 0.58], [0.62, 0.74, 1.0], [0.86, 0.84, 0.92]);
+    [0, 1, 2].map(|k| dore[k] * bulbe * 0.9 + bleute[k] * bras + pale[k] * disque)
+}
+
+/// Un bruit doux, de 0 à 1 : des valeurs tirées aux nœuds d'une grille, lissées entre eux. Les grumeaux des bras.
+fn bruit(x: f32, z: f32) -> f32 {
+    let (xi, zi) = (x.floor(), z.floor());
+    let (fx, fz) = (lisse(x - xi), lisse(z - zi));
+    let noeud = |a: f32, b: f32| {
+        let mut n = (a as i32).wrapping_mul(374_761_393) ^ (b as i32).wrapping_mul(668_265_263);
+        n = (n ^ (n >> 13)).wrapping_mul(1_274_126_177);
+        ((n ^ (n >> 16)) as u32 & 0xFFFF) as f32 / 65_535.0
+    };
+    let haut = noeud(xi, zi) + (noeud(xi + 1.0, zi) - noeud(xi, zi)) * fx;
+    let bas = noeud(xi, zi + 1.0) + (noeud(xi + 1.0, zi + 1.0) - noeud(xi, zi + 1.0)) * fx;
+    haut + (bas - haut) * fz
 }
 
 /// Les `k` points retenus les plus proches du point `i` (à distance égale, le plus petit numéro d'abord).
@@ -2281,6 +2692,13 @@ impl Hasard {
     /// Dans 0..n.
     fn indice(&mut self, n: usize) -> usize {
         ((self.suivant() * n as f64) as usize).min(n.saturating_sub(1))
+    }
+
+    /// Une valeur de la loi normale centrée réduite (Box-Muller) : les étoiles de part et d'autre de la ligne d'un bras.
+    fn normale(&mut self) -> f32 {
+        let u = self.suivant().max(1e-12);
+        let v = self.suivant();
+        ((-2.0 * u.ln()).sqrt() * (std::f64::consts::TAU * v).cos()) as f32
     }
 }
 
@@ -2882,7 +3300,7 @@ mod essais {
 
     #[test]
     fn le_cerveau_est_celui_du_modele_et_d_un_seul_tenant() {
-        let c = construire();
+        let c = construire(Allure::Cerveau);
         // Les neurones de la page de l'Assistante famille (son tirage, sa graine), calculés par son propre code.
         for (i, attendu) in [
             (1, [-0.843414, 0.026214, 0.222465]),
@@ -2905,8 +3323,112 @@ mod essais {
         assert_eq!(ordre, (1 + NEURONES..1 + NEURONES + MAX_DESTINATIONS).collect::<Vec<_>>());
         assert!(d2(c.places[c.ordre[0]], c.places[c.ordre[1]]).sqrt() > 2.0 * RAYON_DESTINATIONS * 0.95);
         // Le même tirage à chaque fois.
-        let d = construire();
+        let d = construire(Allure::Cerveau);
         assert_eq!((c.places, c.synapses), (d.places, d.synapses));
+    }
+
+    #[test]
+    fn la_voie_lactee_est_d_un_seul_tenant() {
+        let (c, b) = (construire(Allure::Galaxie), construire(Allure::Cerveau));
+        assert_eq!((c.places.len(), c.astres.len()), (1 + NEURONES + MAX_DESTINATIONS, c.places.len()));
+        // Les places des destinations ne changent pas : celles du cerveau, dans le même ordre.
+        assert_eq!((&c.places[1 + NEURONES..], &c.ordre), (&b.places[1 + NEURONES..], &b.ordre));
+        // Eve atteint toutes les étoiles par les étoiles seules ; chaque place de destination en touche huit.
+        assert!(atteints(&c.voisins)[..=NEURONES].iter().all(|&v| v));
+        assert!((1 + NEURONES..c.places.len()).all(|place| c.voisins[place].len() == 8));
+        // Un disque mince, de son rayon ; ses quatre bras peuplés, les grands plus que les petits ; le cœur, l'éperon et
+        // le disque entre les bras.
+        let etoiles = &c.places[1..=NEURONES];
+        let (rayon, epaisseur) = (1.35 * RAYON_DE_LA_GALAXIE, 0.4 * RAYON_DE_LA_GALAXIE);
+        assert!(etoiles.iter().all(|p| p[0].hypot(p[2]) < rayon && p[1].abs() < epaisseur), "{etoiles:?}");
+        let mut par_bras = [0; BRAS];
+        for a in &c.astres[1..=NEURONES] {
+            if let Some(b) = a.bras {
+                par_bras[usize::from(b)] += 1;
+            }
+        }
+        assert!(
+            par_bras.iter().all(|&n| n > 25) && par_bras[0] + par_bras[2] > par_bras[1] + par_bras[3],
+            "{par_bras:?}"
+        );
+        assert!(c.astres[1..=NEURONES].iter().filter(|a| a.bras.is_none()).count() > 40);
+        // Le Soleil sur l'éperon d'Orion, à 0,6 du rayon.
+        let soleil = Galaxie::nouvelle().soleil;
+        assert!((soleil[0].hypot(soleil[2]) - RAYON_DU_SOLEIL * RAYON_DE_LA_GALAXIE).abs() < 1e-5, "{soleil:?}");
+        // Le même tirage à chaque fois.
+        let d = construire(Allure::Galaxie);
+        assert_eq!((c.places, c.synapses, c.astres), (d.places, d.synapses, d.astres));
+    }
+
+    #[test]
+    fn la_lueur_suit_les_bras() {
+        let clarte = |p: [f32; 3]| lueur_en(p[0], p[2]).iter().sum::<f32>();
+        // Sur la ligne d'un grand bras, bien plus de lumière qu'entre deux bras, au même rayon ; le bras bleuté.
+        let r = 0.6;
+        let sur = clarte(sur_le_disque(r, angle_du_bras(2, r), 0.0));
+        let entre = clarte(sur_le_disque(r, angle_du_bras(2, r) + FRAC_PI_4, 0.0));
+        assert!(sur > 2.0 * entre, "{sur} {entre}");
+        let bras = sur_le_disque(r, angle_du_bras(2, r), 0.0);
+        let c = lueur_en(bras[0], bras[2]);
+        assert!(c[2] > c[0], "{c:?}");
+        // Le cœur, doré et vif ; le bord, éteint.
+        let coeur = lueur_en(0.0, 0.0);
+        assert!(coeur[0] > coeur[2] && coeur[0] > 0.8, "{coeur:?}");
+        assert!(clarte([1.14, 0.0, 0.0]) < 0.05);
+        // L'image : des couleurs additives, l'alpha nul partout.
+        let image = lueur_galactique(16);
+        assert_eq!(image.size, [16, 16]);
+        assert!(image.pixels.iter().all(|p| p.a() == 0) && image.pixels.iter().any(|p| p.r() > 100));
+    }
+
+    #[test]
+    fn dans_la_voie_lactee_chaque_personne_a_son_bras() {
+        let mut r = Reseau::nouveau(Path::new(FAMILLE));
+        r.recevoir(&evenement("t1", "Read", r"D:\Projet\a.md", true, false), 1.0);
+        r.personnes(famille_d_exemple());
+        r.allure(Allure::Galaxie);
+        assert_eq!((r.titre(), r.poles.len(), r.tangage), ("VOIE LACTÉE", 2, TANGAGE_GALAXIE));
+        // À quatre, un bras chacune ; le cœur et le disque entre les bras, à personne.
+        assert!((1..=NEURONES).all(|i| r.quartiers[i] == r.astres[i].bras.unwrap_or(A_PERSONNE)));
+        // Une étoile a sa couleur ; nommée, sa personne la teinte ; une étoile du cœur ne prend celle de personne.
+        let i = (1..=NEURONES).find(|&i| r.quartiers[i] == 2).unwrap_or(1);
+        let mut forces = [0.0; MAX_PERSONNES];
+        assert_eq!(r.couleur_neurone(i, 30.0, None, &forces).0, r.astres[i].couleur);
+        forces[2] = 1.0;
+        assert_eq!(r.couleur_neurone(i, 30.0, None, &forces), ([255, 210, 63], 1.0));
+        let coeur = (1..=NEURONES).find(|&i| r.quartiers[i] == A_PERSONNE).unwrap_or(1);
+        assert_eq!(r.couleur_neurone(coeur, 30.0, None, &[1.0; MAX_PERSONNES]).1, 0.0);
+        // À deux, deux bras chacune ; au-delà de quatre, des parts du disque.
+        r.personnes(famille_d_exemple().into_iter().take(2).collect());
+        assert!((1..=NEURONES).all(|i| r.astres[i].bras.is_none_or(|b| r.quartiers[i] == b / 2)));
+        let mut six = famille_d_exemple();
+        six.extend(famille_d_exemple().into_iter().take(2));
+        r.personnes(six);
+        assert!(r.quartiers[1..=NEURONES].iter().all(|&q| q < 6));
+        // De retour au cerveau : ses neurones, ses quartiers, ses destinations gardées.
+        r.allure(Allure::Cerveau);
+        assert_eq!((r.titre(), r.poles.len(), r.tangage), ("RÉSEAU NEURONAL", 2, TANGAGE_CERVEAU));
+        assert!(r.astres.is_empty() && r.galaxie.is_none());
+        assert_eq!(r.places, construire(Allure::Cerveau).places);
+    }
+
+    #[test]
+    fn la_voie_lactee_se_dessine_sans_fenetre() {
+        let ctx = egui::Context::default();
+        let mut r = Reseau::nouveau(Path::new(FAMILLE));
+        r.allure(Allure::Galaxie);
+        // Au repos : la lueur peinte, la poussière, les étoiles ; rien de plus que les quatre images par seconde.
+        let (anime, sommets) = une_image(&ctx, &mut r, 0.0);
+        assert!(!anime && sommets > 10_000, "{anime} {sommets}");
+        assert!(r.galaxie.as_ref().is_some_and(|g| g.lueur.is_some()), "la lueur est peinte");
+        assert!(!une_image(&ctx, &mut r, 0.25).0);
+        // Une image que dessinent les étoiles, puis leur retour ; un outil, son impulsion d'étoile en étoile.
+        assert!(r.sujet("soleil", 3.0, 0.5));
+        for t in [0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 9.0] {
+            une_image(&ctx, &mut r, t);
+        }
+        r.recevoir(&evenement("t1", "Read", r"D:\Projet\a.md", false, false), 10.0);
+        assert!(une_image(&ctx, &mut r, 10.2).0);
     }
 
     #[test]
@@ -3086,7 +3608,7 @@ mod essais {
             [[-0.869264, -0.504741], [-0.053861, -0.19115], [-0.141807, -0.335309], [0.660973, 0.15]],
             [[-0.751716, -0.000006], [0.000008, -0.753776], [-0.052535, 0.294773], [0.629862, 0.260898]],
         ];
-        let c = construire();
+        let c = construire(Allure::Cerveau);
         for ((nom, n_traits, n_points, longueur), places) in MODELE.into_iter().zip(PLACES) {
             let t = traits(nom);
             assert_eq!((t.len(), t.iter().map(Vec::len).sum::<usize>()), (n_traits, n_points), "{nom}");
@@ -3151,7 +3673,7 @@ mod essais {
         let quatre = [secteur(-0.5, -0.5, 4), secteur(0.5, -0.5, 4), secteur(-0.5, 0.5, 4), secteur(0.5, 0.5, 4)];
         assert_eq!(quatre, [0, 1, 2, 3]);
         // Autrement, des parts égales autour de l'axe : chacune a ses neurones.
-        let c = construire();
+        let c = construire(Allure::Cerveau);
         for n in [1, 2, 3, 5, 8] {
             let mut compte = vec![0; n];
             for p in &c.places[1..=NEURONES] {

@@ -33,6 +33,7 @@ use super::{
     Fenetre, GRAS, ICONES, Ligne, SEMI, Style, TENUE, couleurs, degrade, icones, melange, segments, semi, sphere,
 };
 use crate::cartes::{Cartes, Geste};
+use crate::reglages::THEMES;
 use crate::{ambiance, journal};
 
 /// La palette de l'ERP de Constructo AI : `index.css` (ses variables, et les gris de Tailwind qu'il ramène à ceux de
@@ -912,26 +913,33 @@ fn date_du_badge(aujourdhui: &str) -> String {
 }
 
 impl Fenetre {
-    /// Le thème « Constructo AI » est choisi : celui que publie le chef, ou celui qu'on vient de choisir d'un clic,
-    /// tenu le temps que le chef le publie (pas de retour en arrière d'une image).
-    pub(super) fn theme_constructo(&self, ctx: &egui::Context) -> bool {
+    /// Le thème choisi (son nom, [`THEMES`]) : celui que publie le chef, ou celui qu'on vient de choisir d'un clic,
+    /// tenu le temps que le chef le publie (pas de retour en arrière d'une image) ; un nom inconnu, le centre.
+    pub(super) fn theme(&self, ctx: &egui::Context) -> &'static str {
         let maintenant = ctx.input(|i| i.time);
-        match ctx.data(|d| d.get_temp::<(bool, f64)>(egui::Id::unique(THEME_TENU))) {
+        let rang = match ctx.data(|d| d.get_temp::<(usize, f64)>(egui::Id::unique(THEME_TENU))) {
             Some((choisi, quand)) if maintenant - quand < TENUE => choisi,
-            _ => self.champ("theme") == "constructo",
-        }
+            _ => THEMES.iter().position(|t| t.0 == self.champ("theme")).unwrap_or(0),
+        };
+        THEMES[rang.min(THEMES.len() - 1)].0
     }
 
-    /// La rubrique « Thème » des réglages : le choix en segments (« Centre de commande », « Constructo AI ») ; le geste
-    /// `theme` au chef, qui le retient dans `reglages.json`.
+    /// Le thème « Constructo AI » est choisi.
+    pub(super) fn theme_constructo(&self, ctx: &egui::Context) -> bool {
+        self.theme(ctx) == "constructo"
+    }
+
+    /// La rubrique « Thème » des réglages : le choix en segments (« Réseau neuronal », « Voie lactée », « Constructo
+    /// AI ») ; le geste `theme` au chef, qui le retient dans `reglages.json`.
     pub(super) fn choix_du_theme(&mut self, ui: &mut egui::Ui) {
-        let actuel = usize::from(self.theme_constructo(ui.ctx()));
-        if let Some(k) = segments(ui, "theme", &["Centre de commande", "Constructo AI"], actuel)
+        let actuel = THEMES.iter().position(|t| t.0 == self.theme(ui.ctx())).unwrap_or(0);
+        let mots: Vec<&str> = THEMES.iter().map(|t| t.1).collect();
+        if let Some(k) = segments(ui, "theme", &mots, actuel)
             && k != actuel
         {
             let maintenant = ui.input(|i| i.time);
-            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique(THEME_TENU), (k == 1, maintenant)));
-            self.geste("theme", Value::String(if k == 1 { "constructo" } else { "centre" }.into()));
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique(THEME_TENU), (k, maintenant)));
+            self.geste("theme", Value::String(THEMES[k].0.into()));
         }
     }
 

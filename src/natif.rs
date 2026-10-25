@@ -811,6 +811,9 @@ impl Fenetre {
         let rect = ui.max_rect();
         let temps = ui.input(|i| i.time);
         self.reseau.habiller(false, false);
+        // Le thème « galaxie » : le même centre de commande, ses points en Voie lactée.
+        let galaxie = self.theme(ui.ctx()) == "galaxie";
+        self.reseau.allure(if galaxie { crate::reseau::Allure::Galaxie } else { crate::reseau::Allure::Cerveau });
         self.anime = self.reseau.dessiner(ui, rect, temps);
         // L'orbe au cœur du réseau ; tenue, elle parle ; réduite le temps d'un accord, comme dans la page.
         let accord = self.etat.get("accord").is_some_and(|a| !a.is_null());
@@ -1300,7 +1303,7 @@ impl Fenetre {
         // Le titre, au style de celui de la page (cdc:13-14) ; la barre d'Eve porte déjà son nom : le centre dit ce
         // qu'il montre, en face de « CONVERSATION ».
         let coin = rect.left_top() + vec2(20.0, 14.0);
-        let titre = texte_hud(p, coin, Align2::LEFT_TOP, "RÉSEAU NEURONAL", 15.0, hud::CYAN, 4.8);
+        let titre = texte_hud(p, coin, Align2::LEFT_TOP, self.reseau.titre(), 15.0, hud::CYAN, 4.8);
         let sous_titre = "ACTIVITÉ EN DIRECT · 360°";
         texte_hud(p, egui::pos2(coin.x, titre.bottom() + 3.0), Align2::LEFT_TOP, sous_titre, 11.0, hud::GRIS, 1.3);
         // La ligne d'état (cdc:19-20), tapée par le réseau ; sous elle, comment parler à Eve.
@@ -2855,6 +2858,23 @@ mod essais {
         assert_eq!(v["lignes"][1], serde_json::json!(["1 nov.", "Heure"]));
         assert_eq!(blocs[2], texte(&["Fin."]));
         assert_eq!(decouper("| a | b |\nsuite", false), [texte(&["| a | b |", "suite"])]);
+    }
+
+    #[test]
+    fn les_themes_tiennent_dans_leurs_segments() {
+        // Le panneau des réglages : 380 points, moins ses marges (14 de chaque côté), celles du cadre des segments (4)
+        // et leurs écarts (3) ; chaque mot, centré, garde 4 points de chaque côté.
+        let ctx = egui::Context::default();
+        polices(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let n = crate::reglages::THEMES.len() as f32;
+            let segment = (380.0 - 28.0 - 8.0 - 3.0 * (n - 1.0)) / n;
+            for (_, mot) in crate::reglages::THEMES {
+                let police = FontId::new(13.5, FontFamily::Name(SEMI.into()));
+                let l = ui.painter().layout_no_wrap(mot.to_string(), police, Color32::WHITE).size().x;
+                assert!(l + 8.0 <= segment, "« {mot} » : {l} points dans un segment de {segment}");
+            }
+        });
     }
 
     #[test]

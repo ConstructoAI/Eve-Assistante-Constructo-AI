@@ -910,8 +910,10 @@ impl Chef {
             }
             // Le site de Constructo AI, cliqué en haut de la fenêtre.
             ("site", _) => self.ouvrir_dans_le_navigateur(connexion::SITE.to_string()),
-            // Le thème de la fenêtre native, choisi dans ses réglages.
-            ("theme", Some(t)) if matches!(t, "centre" | "constructo") => self.changer_reglage("theme", json!(t)),
+            // Le thème de la fenêtre native, choisi dans ses réglages : l'un de ceux qu'elle offre.
+            ("theme", Some(t)) if crate::reglages::THEMES.iter().any(|x| x.0 == t) => {
+                self.changer_reglage("theme", json!(t))
+            }
             // Un profil, choisi dans le menu de la barre ou dans les réglages (son nom ; celui d'office y ramène).
             ("profil", Some(nom)) => self.choisir_le_profil(nom),
             // Le modèle et l'effort de Claude, choisis dans la rubrique « Cerveau » des réglages : ceux qu'Eve offre.

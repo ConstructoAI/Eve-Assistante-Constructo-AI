@@ -62,12 +62,15 @@ TOUCHES = [
     ("Alt droit", "alt_droit"),
     ("Ctrl gauche", "ctrl_gauche"),
 ]
-# Les deux allures de la fenêtre (le réglage « theme », src\reglages.rs) : le choix revient à la personne, et se change
-# ensuite dans les réglages de la fenêtre. La première est celle d'office du programme : rien ne s'écrit pour elle.
+# Les allures de la fenêtre (le réglage « theme », THEMES dans src\reglages.rs) : le choix revient à la personne, et se
+# change ensuite dans les réglages de la fenêtre. La première est celle d'office du programme : rien ne s'écrit pour
+# elle. Le numéro d'une réponse garde son sens : une allure nouvelle s'ajoute au bout.
 THEMES = [
     ("Le centre de commande : le réseau neuronal, ses panneaux et sa musique", "le centre de commande", None),
     ("Le thème clair Constructo AI : le tableau de bord de l'ERP, sans musique", "le thème clair Constructo AI",
      "constructo"),
+    ("Le centre de commande en Voie lactée : la galaxie et ses étoiles, ses panneaux et sa musique",
+     "le centre de commande en Voie lactée", "galaxie"),
 ]
 PORT_DEPART = 47821
 QUESTIONS_MAX = 24

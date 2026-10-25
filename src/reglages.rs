@@ -88,8 +88,9 @@ pub struct Reglages {
     /// La fenêtre native, dans le programme (le lot 6), au lieu de la page dans Edge. Faux d'office tant qu'elle ne
     /// fait pas tout ce que fait la page ; `eve --native` l'essaie pour un lancement.
     pub fenetre_native: bool,
-    /// Le thème de la fenêtre native : « centre » (le centre de commande, au style du tableau HTML), ou « constructo »
-    /// (clair et simple, comme l'ERP de Constructo AI). Il se choisit dans ses réglages.
+    /// Le thème de la fenêtre native ([`THEMES`]) : « centre » (le centre de commande, au style du tableau HTML),
+    /// « galaxie » (le même, son réseau en Voie lactée) ou « constructo » (clair et simple, comme l'ERP de Constructo
+    /// AI). Il se choisit dans ses réglages.
     pub theme: String,
     /// Le dossier de la comptabilité du ménage, celui de son tableau de bord (`tableau\donnees.json`, sa forme dans
     /// `tableau\format-donnees.md`) ; vide : aucune. Nommée, elle seule donne à la fenêtre l'encaisse et les échéances
@@ -397,6 +398,12 @@ pub fn sortie_de_commande(fait: Result<String, String>) -> i32 {
         }
     }
 }
+
+/// Les thèmes de la fenêtre native (le réglage `theme`, la rubrique « Thème » de ses réglages) : leur nom, et ce que dit
+/// leur choix. Les deux premiers sont le centre de commande, son réseau en cerveau ou en Voie lactée
+/// ([`crate::reseau::Allure`]) ; le troisième, le thème clair de l'ERP. Le premier est celui d'office.
+pub const THEMES: [(&str, &str); 3] =
+    [("centre", "Réseau neuronal"), ("galaxie", "Voie lactée"), ("constructo", "Constructo AI")];
 
 // ---- Le cerveau : le modèle et l'effort de Claude -----------------------------------------------------------------
 
