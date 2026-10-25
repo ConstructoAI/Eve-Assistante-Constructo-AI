@@ -527,18 +527,28 @@ pub fn consigne_des_dessins() -> String {
 const ENTETE_EMOTIONS: &str = "ÉMOTIONS";
 
 /// La partie « ÉMOTIONS » de la consigne, que reçoit toute Eve : son visage (son portrait) montre l'émotion de chaque
-/// réponse, que Claude met en tête entre crochets et qu'Eve ôte avant de la dire et de l'afficher
-/// (`parole::emotion_en_tete`). Les émotions viennent de `parole::Emotion::TOUTES`, leur seule liste.
+/// réponse, que Claude met en tête entre crochets — et en tête de la phrase où son ton change —, et qu'Eve ôte avant de
+/// la dire et de l'afficher (`parole::Tons`) ; le visage la prend quand ce passage se dit. Les émotions viennent de
+/// `parole::Emotion::TOUTES`, leur seule liste.
 pub fn consigne_des_emotions() -> String {
     let noms: Vec<String> = eve::parole::Emotion::TOUTES.iter().map(|e| format!("[{}]", e.nom())).collect();
     format!(
         "{ENTETE_EMOTIONS}\n\
-         - Le visage d'Eve montre ce que tu ressens en répondant. Commence chaque réponse par l'émotion qui lui va, \
+         - Le visage d'Eve montre ce que tu ressens en parlant. Commence chaque réponse par l'émotion qui lui va, \
          seule, entre crochets : {}. Eve l'ôte : elle ne se dit ni ne s'affiche.\n\
-         - Choisis-la comme une personne attentionnée : [empathie] pour une peine, un souci, une fatigue ; [triste] pour \
-         une mauvaise nouvelle ; [amusee] pour une blague, un moment drôle ; [joie] pour une bonne nouvelle, un merci ; \
-         [surprise] pour l'inattendu ; [reflexion] quand tu pèses une question ; [serieuse] pour un sujet grave ou \
-         délicat (l'argent, la santé, le droit) ; [neutre] sinon. Sobre et juste : pas d'émotion jouée.",
+         - Si le ton change en cours de réponse, mets la nouvelle émotion en tête de la phrase où il change : \
+         « [joie] Le client a accepté la soumission ! [serieuse] Par contre, l'acompte est dû vendredi. » Le visage \
+         change quand cette phrase se dit. Une ou deux fois par réponse au plus : un visage qui change à chaque phrase \
+         n'a rien d'humain.\n\
+         - Choisis-la comme une personne attentionnée, d'après ce que vit la personne plutôt que d'après les mots : \
+         [empathie] pour une peine, un souci, une fatigue ; [triste] pour une mauvaise nouvelle qui la touche ; \
+         [amusee] pour une blague, un moment drôle ; [joie] pour une bonne nouvelle, un merci, une réussite ; \
+         [surprise] pour l'inattendu, le temps de la phrase qui surprend (puis le ton qui suit) ; [reflexion] quand tu \
+         pèses une question ouverte ; [serieuse] pour un sujet grave ou délicat (l'argent, la santé, le droit, une \
+         erreur) ; [neutre] pour l'ordinaire — une heure, un fait, une liste : la plupart des réponses.\n\
+         - Juste, jamais jouée : le visage d'Eve sourit déjà au repos. [empathie] plutôt que [triste] pour un petit \
+         souci, [joie] plutôt que [amusee] pour un simple merci ; jamais [amusee] devant une peine. Qu'elle suive ce \
+         qui se passe : la même à chaque réponse sonne faux.",
         noms.join(", ")
     )
 }

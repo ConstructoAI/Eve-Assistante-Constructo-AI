@@ -36,6 +36,9 @@ use crate::journal;
 use crate::reglages::{Reglages, VOIX_PAR_DEFAUT, dossier_local};
 
 use lecture::{Lecteur, Synthetiseur};
+pub use prosodie::{Marque, Repere};
+
+mod prosodie;
 
 /// Le pas du fil quand la voix travaille : la file avance (et se coupe) au moins à ce rythme.
 const PAS: Duration = Duration::from_millis(20);
@@ -104,12 +107,24 @@ pub struct Voix {
     coupure: Arc<Coupure>,
 }
 
-/// La piste de la bouche d'une phrase : le niveau de sa voix pas à pas ([`enveloppe`]) et, à chaque pas, la forme de la
-/// bouche ([`piste_de`]).
+/// La piste de la bouche d'une phrase : le niveau de sa voix pas à pas ([`enveloppe`]) et, à chaque pas, l'ouverture de
+/// la mâchoire et la forme des lèvres ([`piste_de`]) ; et, pour les gestes du visage, ses repères ([`Repere`] : ses
+/// pauses, la fin de ses groupes de mots).
 #[derive(Clone)]
 pub struct Piste {
     niveaux: Arc<[f32]>,
+    machoires: Arc<[f32]>,
     formes: Arc<[Forme]>,
+    reperes: Arc<[Repere]>,
+}
+
+/// La bouche à un instant d'une phrase ([`bouche_a_venir`]) : le niveau de la voix (de 0 à 1), l'ouverture de la
+/// mâchoire (de 0 à 1, dans la série de bouches de la forme : la voyelle et le niveau) et la forme des lèvres.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Articulation {
+    pub niveau: f32,
+    pub machoire: f32,
+    pub forme: Forme,
 }
 
 impl Piste {
@@ -124,22 +139,46 @@ impl Piste {
 /// des lèvres) : une seule voix parle, une seule bouche la suit.
 static S_ENTEND: Mutex<Option<(Instant, Piste)>> = Mutex::new(None);
 
-/// La bouche à cet instant : le niveau de la voix qui s'entend (de 0 à 1, entre deux pas, à mi-chemin) et la forme de la
-/// bouche ; `None` : rien ne s'entend.
-pub fn bouche_du_moment() -> Option<(f32, Forme)> {
+/// La bouche à cet instant ([`bouche_a_venir`]) ; `None` : rien ne s'entend.
+pub fn bouche_du_moment() -> Option<Articulation> {
     bouche_a_venir(Duration::ZERO)
 }
 
 /// La bouche dans `avance`, celle de ce qui s'entendra alors : les lèvres d'une vraie personne se placent avant que le
-/// son ne sorte. `None` : rien ne s'entend, ou la phrase aura fini.
-pub fn bouche_a_venir(avance: Duration) -> Option<(f32, Forme)> {
+/// son ne sorte. Au début du son, l'avance se prend peu à peu (le double du temps écoulé) : la bouche ne saute pas ce
+/// qui ouvre la phrase — les lèvres closes du « b » de « Bonjour ». Le niveau et la mâchoire, entre les milieux de deux
+/// pas (chacun dit le son de ses 40 ms) ; la forme, celle du pas. `None` : rien ne s'entend, ou la phrase aura fini.
+pub fn bouche_a_venir(avance: Duration) -> Option<Articulation> {
+    lire_la_piste(|ecoule| ecoule + avance.min(ecoule))
+}
+
+/// La forme des lèvres dans `avance` tout entière, sans la mise en route de [`bouche_a_venir`] : là où va la bouche
+/// (sur une consonne des lèvres, elle s'y prépare dès le début du son : le « b » de « Bonjour » se ferme arrondi).
+pub fn forme_a_venir(avance: Duration) -> Option<Forme> {
+    lire_la_piste(|ecoule| ecoule + avance).map(|a| a.forme)
+}
+
+/// La piste de ce qui s'entend, lue à l'instant que donne `instant` d'après le temps écoulé depuis le début du son.
+fn lire_la_piste(instant: impl Fn(Duration) -> Duration) -> Option<Articulation> {
     let s = S_ENTEND.lock().ok()?;
     let (depuis, piste) = s.as_ref()?;
-    let x = (depuis.elapsed() + avance).as_secs_f32() / PAS_DE_L_ENVELOPPE.as_secs_f32();
-    let i = x as usize;
-    let a = *piste.niveaux.get(i)?;
-    let b = piste.niveaux.get(i + 1).copied().unwrap_or(0.0);
-    Some((a + (b - a) * x.fract(), piste.formes.get(i).copied().unwrap_or(Forme::Ouverte)))
+    let t = instant(depuis.elapsed()).as_secs_f32() / PAS_DE_L_ENVELOPPE.as_secs_f32();
+    let forme = *piste.formes.get(t as usize)?;
+    let x = (t - 0.5).max(0.0);
+    let (i, f) = (x as usize, x.fract());
+    let entre = |v: &[f32]| {
+        let a = v.get(i).copied().unwrap_or(0.0);
+        a + (v.get(i + 1).copied().unwrap_or(0.0) - a) * f
+    };
+    Some(Articulation { niveau: entre(&piste.niveaux), machoire: entre(&piste.machoires), forme })
+}
+
+/// Les repères de la phrase qui s'entend ([`Repere`]), et où elle en sera dans `avance` (en secondes depuis son début,
+/// même passé sa fin) : les gestes du visage s'y accrochent. `None` : rien ne s'entend.
+pub fn reperes_a_venir(avance: Duration) -> Option<(f32, Arc<[Repere]>)> {
+    let s = S_ENTEND.lock().ok()?;
+    let (depuis, piste) = s.as_ref()?;
+    Some(((depuis.elapsed() + avance).as_secs_f32(), piste.reperes.clone()))
 }
 
 /// Fait entendre une piste à partir de maintenant (rien : plus rien ne s'entend) ; le fil de la voix, et les essais.
@@ -155,30 +194,185 @@ pub fn piste_du_son(wav: &[u8], texte: &str) -> Piste {
     piste_de(enveloppe(wav), texte)
 }
 
-/// La piste d'une phrase : son niveau pas à pas, et ses syllabes ([`parole::syllabes`]) posées sur les crêtes de la voix
-/// ([`cretes`]), dans l'ordre — une par crête quand elles sont autant, sinon réparties de la première à la dernière ;
-/// chaque pas prend la forme de la crête la plus proche, et les lèvres se ferment dans les 120 ms qui précèdent une
-/// syllabe qu'un m, un b ou un p ouvre.
+/// La piste d'une phrase : son niveau pas à pas, et ses syllabes ([`parole::syllabes`]) posées sur les crêtes de la
+/// voix ([`syllabes_des_cretes`]). Chaque pas prend la forme des lèvres de la crête la plus proche ; la mâchoire va de
+/// la voyelle d'une crête à celle de la suivante, ouverte selon le niveau de la voix ([`contraste`]) : elle s'ouvre sur
+/// la voyelle et se referme sur la consonne. Les lèvres se ferment sur les m, b et p, la lèvre du bas passe sous les
+/// dents sur les f et v (`Forme::Fermee`, `Forme::Dents`), et la mâchoire se referme avec elles : dans l'intervalle qui
+/// mène à chaque crête, les syllabes qui y commencent — celle de la crête, et celles qu'aucune crête n'a prises —
+/// tombent sur ses creux, dans l'ordre ([`creux_de_l_intervalle`]) ; les lèvres y prennent la consonne qui ouvre
+/// chacune, ou celle qui finit le mot d'avant (« Sam rit »), jusqu'à ce que la voyelle suivante s'entende
+/// ([`fermeture`]) — et juste après leur voyelle quand une pause les suit (« Sam. » : [`fermer_apres`]).
 pub fn piste_de(niveaux: Arc<[f32]>, texte: &str) -> Piste {
     let syllabes = parole::syllabes(texte);
     let cretes = cretes(&niveaux);
-    let mut formes = vec![Forme::Ouverte; niveaux.len()];
-    if !syllabes.is_empty() && !cretes.is_empty() {
-        let (s, c) = (syllabes.len(), cretes.len());
-        let syllabe = |i: usize| syllabes[if c == 1 { 0 } else { (i * (s - 1) + (c - 1) / 2) / (c - 1) }];
-        for (pas, forme) in formes.iter_mut().enumerate() {
-            let proche = (0..c).min_by_key(|&i| cretes[i].abs_diff(pas)).unwrap_or(0);
-            *forme = syllabe(proche).forme;
+    let n = niveaux.len();
+    let de_la_crete = syllabes_des_cretes(&niveaux, &cretes, &syllabes);
+    // La voyelle d'une crête : celle de sa syllabe ; une crête sans syllabe (un chiffre, que le texte ne dit pas en
+    // lettres) s'ouvre à moitié.
+    let voyelle =
+        |c: usize| de_la_crete[c].map_or((Forme::Ouverte, 0.5), |k| (syllabes[k].forme, syllabes[k].machoire));
+    let mut formes = vec![Forme::Ouverte; n];
+    let mut machoires = vec![0.0f32; n];
+    for i in 0..n {
+        let suivante = cretes.partition_point(|&c| c < i);
+        let ((forme, machoire), (forme_b, machoire_b), f) = match (suivante.checked_sub(1), cretes.get(suivante)) {
+            (Some(a), Some(&b)) => (voyelle(a), voyelle(suivante), (i - cretes[a]) as f32 / (b - cretes[a]) as f32),
+            (Some(a), None) => (voyelle(a), voyelle(a), 0.0),
+            (None, Some(_)) => (voyelle(suivante), voyelle(suivante), 0.0),
+            (None, None) => ((Forme::Ouverte, 0.5), (Forme::Ouverte, 0.5), 0.0),
+        };
+        formes[i] = if f <= 0.5 { forme } else { forme_b };
+        machoires[i] = (machoire + (machoire_b - machoire) * f) * contraste(niveaux[i]);
+    }
+    let mut levres = |forme: Forme, (de, a): (usize, usize)| {
+        for i in de..a {
+            (formes[i], machoires[i]) = (forme, 0.0);
         }
-        for (i, &crete) in cretes.iter().enumerate() {
-            if syllabe(i).fermee_avant {
-                for forme in &mut formes[crete.saturating_sub(3)..crete.saturating_sub(1)] {
-                    *forme = Forme::Fermee;
+    };
+    // La crête précédente, et sa syllabe.
+    let mut precedente: Option<(usize, usize)> = None;
+    for (&crete, &k) in cretes.iter().zip(&de_la_crete) {
+        let Some(k) = k else { continue };
+        let (debut, premiere) = precedente.map_or((0, 0), |(p, kp)| (p + 1, kp + 1));
+        let pause = precedente.is_some() && silence(&niveaux[debut..crete]);
+        if let Some((p, kp)) = precedente
+            && pause
+            && let Some(forme) = syllabes[kp].apres
+        {
+            levres(forme, fermer_apres(&niveaux, p, crete));
+        }
+        if premiere <= k {
+            let creux = creux_de_l_intervalle(&niveaux, debut, crete, k + 1 - premiere);
+            for (j, &d) in (premiere..=k).zip(&creux) {
+                // La consonne qui ouvre la syllabe, sinon celle qui finit le mot d'avant (pas par-dessus une pause).
+                let fin_du_mot = j.checked_sub(1).filter(|_| !(pause && j == premiere)).and_then(|p| syllabes[p].apres);
+                if let Some(forme) = syllabes[j].avant.or(fin_du_mot) {
+                    levres(forme, fermeture(&niveaux, debut, d, crete));
                 }
             }
         }
+        precedente = Some((crete, k));
     }
-    Piste { niveaux, formes: formes.into() }
+    if let Some((p, kp)) = precedente
+        && let Some(forme) = syllabes[kp].apres
+    {
+        levres(forme, fermer_apres(&niveaux, p, n));
+    }
+    let reperes = prosodie::reperes_de(&niveaux, texte).into();
+    Piste { niveaux, machoires: machoires.into(), formes: formes.into(), reperes }
+}
+
+/// La part du niveau de la voix qui ouvre la mâchoire : rien sous 0,45 (une consonne, un souffle), toute sur une
+/// voyelle forte — l'enveloppe, en décibels, écrase l'écart entre une voyelle et la consonne qui la suit ; ainsi étiré,
+/// il referme la bouche entre deux syllabes.
+fn contraste(niveau: f32) -> f32 {
+    ((niveau - 0.45) / 0.55).clamp(0.0, 1.0)
+}
+
+/// Un silence dans la voix : 160 ms au moins sous 0,25 (−40 dB sous ses voyelles ; un souffle n'y compte pas).
+fn silence(niveaux: &[f32]) -> bool {
+    niveaux.split(|&v| v >= 0.25).any(|calme| calme.len() * PAS_DE_L_ENVELOPPE.as_millis() as usize >= 160)
+}
+
+/// Les creux de l'intervalle qui mène à une crête (du pas `debut` à la crête, exclue), où commencent les `m` syllabes
+/// qu'il contient : ses minimums les plus profonds, autant que de syllabes, dans l'ordre ; s'il en a moins, chaque
+/// syllabe prend celui qui tombe à sa place. Au bout d'un silence, son dernier pas : la voix repart juste après.
+fn creux_de_l_intervalle(niveaux: &[f32], debut: usize, crete: usize, m: usize) -> Vec<usize> {
+    let mut minimums: Vec<usize> = (debut..crete)
+        .filter(|&i| (i == debut || niveaux[i] <= niveaux[i - 1]) && niveaux[i] < niveaux[i + 1])
+        .collect();
+    if minimums.is_empty() {
+        minimums.push(debut);
+    }
+    minimums.sort_by(|&a, &b| niveaux[a].total_cmp(&niveaux[b]));
+    minimums.truncate(m);
+    minimums.sort_unstable();
+    (0..m).map(|j| minimums[j * minimums.len() / m]).collect()
+}
+
+/// Les pas où les lèvres se ferment au creux `creux` (dans l'intervalle qui commence au pas `debut` et mène à la crête
+/// `crete`) : du pas qui le précède jusqu'à ce que la voyelle qui suit s'entende — la voix à mi-chemin du creux au
+/// sommet suivant —, deux pas au plus après lui ; deux pas au moins en tout : en moins de 80 ms, les lèvres ne se
+/// rejoindraient pas. Au tout début de la phrase, deux pas même si la voyelle s'entend déjà : la bouche ne lit la voix
+/// qu'à partir du son, et ne montrerait pas sinon les lèvres closes du « p » de « Pourquoi ».
+fn fermeture(niveaux: &[f32], debut: usize, creux: usize, crete: usize) -> (usize, usize) {
+    let sommet = (creux + 1..crete).find(|&i| niveaux[i] >= niveaux[i + 1]).unwrap_or(crete);
+    let seuil = niveaux[creux] + 0.5 * (niveaux[sommet] - niveaux[creux]);
+    let voyelle = (creux + 1..=sommet).find(|&i| niveaux[i] >= seuil).unwrap_or(sommet);
+    let de = creux.saturating_sub(1).max(debut);
+    let borne = if de == 0 { crete.max(2).min(niveaux.len()) } else { crete };
+    (de, voyelle.clamp(creux + 1, creux + 2).max(de + 2).min(borne))
+}
+
+/// Les pas où les lèvres se ferment après la syllabe de la crête `crete`, quand une pause la suit, avant le pas `fin` :
+/// dès que sa voyelle baisse (de plus d'un quart, vers le creux qui suit : le m de « Sam. » est plus sourd que le a),
+/// jusqu'au creux, deux pas au moins.
+fn fermer_apres(niveaux: &[f32], crete: usize, fin: usize) -> (usize, usize) {
+    let Some(creux) = (crete + 1..fin).min_by(|&a, &b| niveaux[a].total_cmp(&niveaux[b])) else { return (0, 0) };
+    let seuil = niveaux[creux] + 0.75 * (niveaux[crete] - niveaux[creux]);
+    let de = (crete + 1..=creux).find(|&i| niveaux[i] < seuil).unwrap_or(creux);
+    (de, (creux + 1).max(de + 2).min(fin))
+}
+
+/// Les syllabes posées sur les crêtes de la voix : le rang de celle de chaque crête (aucune : le texte n'a pas de
+/// syllabe pour elle). Les pauses de la voix — un [`silence`] entre deux crêtes — s'accordent d'abord à celles du
+/// texte, sa ponctuation ([`accorder_les_pauses`]) ; d'une pause accordée à la suivante, les syllabes se répartissent
+/// sur les crêtes, dans l'ordre — une par crête quand elles sont autant, sinon de la première à la dernière. Le texte
+/// et la voix ne se décalent ainsi que d'une pause à l'autre, jamais sur toute la phrase.
+fn syllabes_des_cretes(niveaux: &[f32], cretes: &[usize], syllabes: &[parole::Syllabe]) -> Vec<Option<usize>> {
+    let (c, s) = (cretes.len(), syllabes.len());
+    let mut de_la_crete = vec![None; c];
+    if c == 0 || s == 0 {
+        return de_la_crete;
+    }
+    let pauses_de_la_voix: Vec<usize> = (0..c - 1).filter(|&j| silence(&niveaux[cretes[j]..cretes[j + 1]])).collect();
+    let pauses_du_texte: Vec<usize> = (0..s - 1).filter(|&k| syllabes[k].pause_apres).collect();
+    let accords = accorder_les_pauses(&pauses_de_la_voix, c, &pauses_du_texte, s);
+    let (mut c0, mut s0) = (0, 0);
+    for (j, k) in accords.into_iter().chain([(c - 1, s - 1)]) {
+        let (nc, ns) = (j + 1 - c0, k + 1 - s0);
+        for i in 0..nc {
+            de_la_crete[c0 + i] = Some(s0 + if nc == 1 { 0 } else { (i * (ns - 1) + (nc - 1) / 2) / (nc - 1) });
+        }
+        (c0, s0) = (j + 1, k + 1);
+    }
+    de_la_crete
+}
+
+/// Les pauses de la voix (après la crête de chaque rang, sur `c` crêtes) accordées à celles du texte (après la syllabe
+/// de chaque rang, sur `s` syllabes) : autant de chaque côté — Piper marque chaque ponctuation —, dans l'ordre ; sinon,
+/// le plus grand nombre de paires, dans l'ordre, chacune à peu près au même endroit de la phrase (la part des crêtes et
+/// celle des syllabes qui la précèdent, à 0,3 près) ; les autres pauses, de la voix ou du texte, ne comptent pas.
+fn accorder_les_pauses(voix: &[usize], c: usize, texte: &[usize], s: usize) -> Vec<(usize, usize)> {
+    if voix.len() == texte.len() {
+        return voix.iter().copied().zip(texte.iter().copied()).collect();
+    }
+    let place = |rang: usize, sur: usize| (rang + 1) as f32 / sur as f32;
+    let (nv, nt) = (voix.len(), texte.len());
+    // meilleur[a][b] : le meilleur accord des `a` premières pauses de la voix et des `b` premières du texte ; une paire
+    // vaut 1, moins son écart.
+    let mut meilleur = vec![vec![0.0f32; nt + 1]; nv + 1];
+    for a in 1..=nv {
+        for b in 1..=nt {
+            let ecart = (place(voix[a - 1], c) - place(texte[b - 1], s)).abs();
+            let paire = if ecart <= 0.3 { meilleur[a - 1][b - 1] + 1.0 - ecart } else { f32::NEG_INFINITY };
+            meilleur[a][b] = meilleur[a - 1][b].max(meilleur[a][b - 1]).max(paire);
+        }
+    }
+    let (mut a, mut b, mut paires) = (nv, nt, Vec::new());
+    while a > 0 && b > 0 {
+        if meilleur[a][b] == meilleur[a - 1][b] {
+            a -= 1;
+        } else if meilleur[a][b] == meilleur[a][b - 1] {
+            b -= 1;
+        } else {
+            paires.push((voix[a - 1], texte[b - 1]));
+            (a, b) = (a - 1, b - 1);
+        }
+    }
+    paires.reverse();
+    paires
 }
 
 /// Les crêtes de la voix — ses syllabes : les pas d'au moins 0,35 que leurs deux voisins de chaque côté ne dépassent
@@ -238,9 +432,11 @@ fn lancer(reglages: &Reglages, rapport: Sender<Evt>, trace: Option<Sender<Trace>
 /// Le pas du niveau de la voix ([`enveloppe`]).
 const PAS_DE_L_ENVELOPPE: Duration = Duration::from_millis(40);
 
-/// Le niveau d'un WAV (PCM 16 bits), pas à pas ([`PAS_DE_L_ENVELOPPE`]) : de 0 sous −50 dBFS (le souffle de la synthèse)
-/// à 1 à −15 dBFS (une voix forte), en décibels comme l'oreille l'entend ; puis rapporté à la phrase (son neuvième
-/// décile parmi ce qui s'entend vaut 1) : une voix plus douce ou plus forte ouvre la bouche du portrait autant.
+/// Le niveau d'un WAV (PCM 16 bits), pas à pas ([`PAS_DE_L_ENVELOPPE`]) : de 0 sous −50 dBFS (le souffle de la
+/// synthèse), 1 à −15 dBFS, plus au-dessus, en décibels comme l'oreille l'entend ; puis rapporté à la phrase (son
+/// neuvième décile parmi ce qui s'entend vaut 1, et rien ne le dépasse) : une voix plus douce ou plus forte ouvre la
+/// bouche du portrait autant. Les voyelles de Piper montent de −7 à −13 dBFS : écrêtées à −15 dBFS, elles ouvraient
+/// toutes la bouche en grand, une syllabe comme la suivante.
 fn enveloppe(wav: &[u8]) -> Arc<[f32]> {
     let Some(e) = entete(wav) else { return Arc::from([]) };
     let fin = (e.debut + e.taille).min(wav.len());
@@ -258,7 +454,7 @@ fn enveloppe(wav: &[u8]) -> Arc<[f32]> {
                 })
                 .sum();
             let db = 20.0 * (carres / morceau.len() as f64).sqrt().max(1e-6).log10();
-            ((db + 50.0) / 35.0).clamp(0.0, 1.0) as f32
+            ((db + 50.0) / 35.0).max(0.0) as f32
         })
         .collect();
     let mut entendus: Vec<f32> = niveaux.iter().copied().filter(|&v| v > 0.05).collect();
@@ -2137,8 +2333,57 @@ mod essais {
         if let Ok(mut s) = S_ENTEND.lock() {
             *s = Some((Instant::now() - Duration::from_millis(260), piste));
         }
-        assert_eq!(bouche_du_moment().map(|(v, f)| (v > 0.99, f)), Some((true, Forme::Ouverte)));
+        assert_eq!(bouche_du_moment().map(|a| (a.niveau > 0.99, a.forme)), Some((true, Forme::Ouverte)));
+        // Au tout début du son, la bouche prend son avance peu à peu (les lèvres closes du premier « b » se voient) ;
+        // la forme à venir, elle, se lit aussi loin qu'on la demande (la voyelle ronde qui suit).
+        let formes: Vec<Forme> = [Forme::Fermee; 6].into_iter().chain([Forme::Ronde; 10]).collect();
+        let (niveaux, machoires) = (vec![0.5; 16].into(), vec![0.0; 16].into());
+        let piste = Piste { niveaux, machoires, formes: formes.into(), reperes: Arc::from([]) };
+        faire_entendre(Some(piste));
+        assert_eq!(bouche_a_venir(Duration::from_millis(300)).map(|a| a.forme), Some(Forme::Fermee));
+        assert_eq!(forme_a_venir(Duration::from_millis(300)), Some(Forme::Ronde));
         faire_entendre(None);
+    }
+
+    #[test]
+    fn la_machoire_suit_la_voyelle_et_les_levres_se_ferment() {
+        use Forme::{Dents as D, Etiree as I, Fermee as F, Ouverte as A};
+        // Quatre syllabes, chacune une crête (niveau 1) entre deux creux (0,3) ; une pause de 200 ms après la deuxième.
+        let mut niveaux = vec![0.0f32; 2];
+        for k in 0..4 {
+            niveaux.extend([0.3, 0.7, 1.0, 0.7]);
+            if k == 1 {
+                niveaux.extend([0.3, 0.0, 0.0, 0.0, 0.0, 0.0]);
+            }
+        }
+        niveaux.extend([0.3, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(cretes(&niveaux), [4, 8, 18, 22]);
+        // « la ville. Sam rit » : un a grand ouvert, un i étiré et petit.
+        let p = piste_de(niveaux.clone().into(), "la ville. Sam rit");
+        assert_eq!((p.formes[4], p.formes[8], p.formes[18], p.formes[22]), (A, I, A, I));
+        assert!((p.machoires[4] - 0.85).abs() < 1e-6 && (p.machoires[8] - 0.5).abs() < 1e-6, "{:?}", p.machoires);
+        // Entre deux crêtes, la mâchoire se referme avec la voix.
+        assert_eq!(p.machoires[6], 0.0, "{:?}", p.machoires);
+        // Le m de « Sam » ferme les lèvres, et la mâchoire, au creux qui le suit, jusqu'à ce que « rit » s'entende.
+        assert_eq!(&p.formes[18..23], [A, F, F, I, I], "{:?}", p.formes);
+        assert!(p.machoires[19..21].iter().all(|&m| m == 0.0));
+        // Cinq syllabes avant la pause du texte, pour deux crêtes avant celle de la voix : les syllabes d'après la
+        // pause restent à leurs crêtes — elles ne glissent pas d'une phrase à l'autre.
+        let p = piste_de(niveaux.clone().into(), "la ville en été. Sam rit");
+        assert_eq!((p.formes[18], p.formes[22]), (A, I), "{:?}", p.formes);
+        assert_eq!(&p.formes[19..21], [F, F]);
+        // « papa » au début de la phrase : les lèvres closes dès le premier pas, jusqu'à ce que le premier a
+        // s'entende ; puis de la fin du premier a jusqu'au second.
+        let p = piste_de(niveaux.clone().into(), "papa. Sam rit");
+        assert_eq!(&p.formes[..8], [F, F, F, A, A, F, F, A], "{:?}", p.formes);
+        // « la vie » : la lèvre du bas sous les dents au creux du v.
+        let p = piste_de(niveaux.into(), "la vie. Sam rit");
+        assert_eq!(&p.formes[4..9], [A, D, D, I, I], "{:?}", p.formes);
+        // « la sou mi », sans crête pour « sou » : le m de « mi » ferme les lèvres à son creux, pas à celui du s.
+        let n = vec![0.0, 0.0, 0.3, 0.7, 1.0, 0.7, 0.1, 0.6, 0.3, 0.7, 1.0, 0.7, 0.3, 0.0, 0.0];
+        assert_eq!(cretes(&n), [4, 10]);
+        let p = piste_de(n.into(), "la sou mi");
+        assert_eq!(&p.formes[5..10], [A, A, F, F, I], "{:?}", p.formes);
     }
 
     #[test]

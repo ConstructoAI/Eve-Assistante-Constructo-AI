@@ -12,32 +12,49 @@
 //! l'expression faciale encore plus fluide »), si elles sont là, de la même taille que la photo : les yeux qui se ferment
 //! (`portrait-yeux-1`, `-2`…), des regards de côté (`portrait-regard-1`…), les sourcils levés (`portrait-sourcils-1`…),
 //! la bouche — ouverte, la mâchoire de plus en plus basse (`portrait-bouche-1`…), ronde (`portrait-rond-1`…), étirée
-//! (`portrait-large-1`…), et les lèvres closes (`portrait-ferme-1`) —, et une pose par émotion (`portrait-emotion-joie`…),
-//! avec ses bouches pour parler (`portrait-emotion-joie-bouche-1`…). Chacune devient un calque — ce qui y change par
+//! (`portrait-large-1`…), et les lèvres jointes : closes (`portrait-ferme-1`), closes et arrondies (`-ferme-2`), la
+//! lèvre du bas sous les dents (`-ferme-3`) —, et une pose par émotion (`portrait-emotion-joie`…), avec ses bouches
+//! pour parler (`portrait-emotion-joie-bouche-1`…) et ses lèvres closes (`portrait-emotion-joie-ferme`). Chacune
+//! devient un calque — ce qui y change par
 //! rapport à la photo, le reste transparent, recadré sur ce qui s'y voit —, et les calques se posent l'un sur l'autre, en
 //! fondu : en grand, elle cligne et regarde de côté de temps en temps, même en parlant ; sa bouche suit sa voix et la
 //! forme de ses syllabes, un peu en avance sur le son, comme chez une vraie personne ([`crate::voix::bouche_a_venir`]),
 //! et passe d'une forme à l'autre en fondu ; ses sourcils se lèvent sur une syllabe appuyée ; elle respire ; sa tête
 //! prend une posture et la garde, puis une autre, et hoche sur une syllabe appuyée ; son visage prend l'émotion de sa
 //! réponse, que Claude choisit ([`Emotion`]), et parle avec la bouche de cette émotion. Tout ce qui bouge suit un
-//! ressort ([`Ressort`]) : il part doucement et se pose sans à-coup, comme un muscle.
+//! ressort : il part doucement et se pose sans à-coup, comme un muscle.
+//!
+//! Ses parties, chacune dans son fichier : la mimique les assemble ([`mimique`]) — les émotions ([`emotions`]), la
+//! bouche ([`bouche`]), les gestes de la tête et des sourcils ([`gestes`]), le regard ([`regard`]) — et le rendu les peint
+//! ([`rendu`]), sur un treillis que le flot de chaque pose déforme ([`flot`]), dans des textures à la taille où il se
+//! montre ([`nettete`]). Ici : le portrait, ses fichiers, ses calques et ses poses.
 
-use std::f32::consts::{FRAC_PI_4, PI, TAU};
+mod bouche;
+mod emotions;
+mod flot;
+mod gestes;
+mod mimique;
+mod nettete;
+mod regard;
+mod rendu;
+
+use std::f32::consts::{FRAC_PI_4, TAU};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, pos2, vec2};
-use eve::parole::{Emotion, Forme};
-
-use super::theme::erp;
+use eve::parole::Emotion;
 
 /// Les extensions que peut porter le portrait, et chacune de ses poses.
 const EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "webp", "gif"];
 /// Les sortes de poses (`portrait-yeux-1`, `portrait-regard-1`, `portrait-bouche-1`…), douze au plus chacune : les yeux
 /// qui se ferment, les regards ; puis la bouche — ouverte (a, è), ronde (o, ou, u), étirée (i, é), chacune de plus en
-/// plus ouverte, et les lèvres closes (m, b, p) ; les sourcils, de plus en plus levés. Et, à part, une pose par émotion
-/// (`portrait-emotion-triste`…), et ses bouches (`portrait-emotion-triste-bouche-1`…).
+/// plus ouverte, et les lèvres jointes : closes (m, b, p), closes et arrondies (avant un o, un ou), la lèvre du bas
+/// sous les dents (f, v) ; les sourcils, de plus en plus levés. Et, à part, une pose par émotion
+/// (`portrait-emotion-triste`…), ses bouches (`portrait-emotion-triste-bouche-1`…) et ses lèvres closes
+/// (`portrait-emotion-joie-ferme`).
 const SORTES: [&str; 7] = ["yeux", "regard", "bouche", "rond", "large", "ferme", "sourcils"];
 const POSES_MAX: usize = 12;
 /// Le grand côté du portrait chargé, en pixels : de quoi la bannière d'un écran 4K.
@@ -57,57 +74,74 @@ const MARGE: usize = 32;
 const LISSE: egui::TextureOptions =
     egui::TextureOptions { mipmap_mode: Some(egui::TextureFilter::Linear), ..egui::TextureOptions::LINEAR };
 
-/// Un calque prêt à peindre : sa texture — la part de l'image où sa pose change, recadrée ([`recadrer`]) — et le
-/// rectangle qu'elle couvre dans l'image entière (en coordonnées de texture, de 0 à 1).
+/// Un calque prêt à peindre : sa texture — la part de l'image où sa pose change, recadrée ([`recadrer`]) — et ses
+/// pixels (gardés pour la refaire à la taille où elle se montre : [`nettete`]), le rectangle qu'elle couvre dans l'image
+/// entière (en coordonnées de texture, de 0 à 1), et sa géométrie : où chaque point de la photo se retrouve dans sa pose
+/// ([`rendu::Geometrie`]).
 #[derive(Clone)]
 struct Calque {
     texture: egui::TextureHandle,
+    image: Arc<egui::ColorImage>,
     uv: Rect,
+    geometrie: Arc<rendu::Geometrie>,
 }
 
 /// Une émotion du visage : sa pose (le visage qui la prend) et ses bouches pour parler, de plus en plus ouvertes (s'il
-/// en a) : elle parle sans quitter son émotion.
+/// en a), chacune la bouche seule, à poser sur ce visage : elle parle sans quitter son émotion ; et ses lèvres closes
+/// (m, b, p), la bouche seule aussi, si sa pose ne les a pas (la joie, la surprise).
 #[derive(Clone)]
 struct Expression {
     emotion: Emotion,
     visage: Calque,
     bouches: Vec<Calque>,
+    levres_closes: Option<Calque>,
 }
 
-/// Le portrait prêt à peindre : sa photo ; les calques de ses poses ([`calque`]), une liste par [sorte](SORTES) — les
-/// yeux de plus en plus fermés, les regards, la bouche de plus en plus ouverte… — et ses émotions ; détouré, le fond de
-/// son disque ; le carré de l'image (en coordonnées de texture, de 0 à 1) que couvre le disque de la grande vue.
+/// Le portrait prêt à peindre : sa photo (sa texture, ses pixels) et sa taille (en pixels) ; les calques de ses poses
+/// ([`calque`]), une liste par [sorte](SORTES) — les yeux de plus en plus fermés, les regards, la bouche de plus en plus
+/// ouverte… — et ses émotions ; détouré, le fond de son disque ; le carré de l'image (en coordonnées de texture, de 0 à
+/// 1) que couvre le disque de la grande vue ; et sa netteté ([`nettete`]) : la taille où il se montre en grand, les
+/// textures refaites à cette taille, ses vignettes.
 #[derive(Clone)]
 pub(crate) struct Visage {
     texture: egui::TextureHandle,
+    image: Arc<egui::ColorImage>,
+    taille: [usize; 2],
     calques: [Vec<Calque>; 7],
     expressions: Vec<Expression>,
     fond: Option<egui::TextureHandle>,
     cadre: Rect,
+    demande: Arc<nettete::Demande>,
+    net: Option<Arc<nettete::Jeu>>,
+    vignettes: Arc<nettete::Vignettes>,
 }
 
-/// Une pose lue par le fil de lecture : son calque recadré, et le rectangle qu'il couvre dans l'image entière.
+/// Une pose lue par le fil de lecture : son calque recadré, le rectangle qu'il couvre dans l'image entière, et sa
+/// géométrie.
 struct Recadre {
     image: egui::ColorImage,
     uv: Rect,
+    geometrie: rendu::Geometrie,
 }
 
-/// Ce que rend le fil de lecture : la photo et les calques de ses poses, ses émotions et leurs bouches, détourée ou non,
-/// le carré de son disque.
+/// Ce que rend le fil de lecture : la photo et les calques de ses poses, ses émotions (leur visage, leurs bouches,
+/// leurs lèvres closes), détourée ou non, le carré de son disque.
 struct Images {
     photo: egui::ColorImage,
     calques: [Vec<Recadre>; 7],
-    expressions: Vec<(Emotion, Recadre, Vec<Recadre>)>,
+    expressions: Vec<(Emotion, Recadre, Vec<Recadre>, Option<Recadre>)>,
     detoure: bool,
     cadre: Rect,
 }
 
-/// Une couche de la pose : un calque (sa texture, le rectangle qu'il couvre dans l'image entière) et sa part, de 0 à 1.
-#[derive(Clone, Copy)]
+/// Une couche de la pose : un calque (sa texture, le rectangle qu'il couvre dans l'image entière, sa géométrie — aucune
+/// pour la photo) et sa part, de 0 à 1.
+#[derive(Clone)]
 struct Couche {
     texture: egui::TextureId,
     uv: Rect,
     part: f32,
+    geometrie: Option<Arc<rendu::Geometrie>>,
 }
 
 impl Couche {
@@ -123,37 +157,57 @@ impl Couche {
     }
 }
 
-/// La pose du visage en grand à un instant ([`Portrait::pose_du_moment`]) : les calques à poser sur la photo, dans
-/// l'ordre, chacun avec sa part — les sourcils levés et le regard de côté (une émotion qui a les siens les couvre),
-/// l'émotion qui s'efface et celle qui vient, les bouches (celle d'en dessous, et la part de la suivante qui se fond en
-/// elle ; d'une famille à l'autre, en fondu), les lèvres closes, les yeux qui clignent —, sa tête, son souffle (ce dont
-/// elle grandit en inspirant, une part de sa taille), et dans combien de secondes la redessiner.
+/// Les strates de la pose, de la plus basse à la plus haute : ce que l'émotion couvre (les sourcils levés, le regard de
+/// côté) ; l'émotion ; la bouche ; ce qui passe par-dessus tout (le clignement). Chaque partie du visage pose ses calques
+/// dans la sienne, dans l'ordre où elle les pose.
+#[derive(Clone, Copy)]
+enum Strate {
+    Dessous,
+    Emotion,
+    Bouche,
+    Dessus,
+}
+
+/// La pose du visage en grand à un instant ([`Portrait::pose_du_moment`]) : les calques à poser sur la photo, chacun
+/// avec sa part, strate par strate ([`Strate`]) ; sa tête, son souffle (ce dont elle grandit en inspirant, une part de
+/// sa taille), et dans combien de secondes la redessiner.
 #[derive(Clone, Default)]
 pub(crate) struct Pose {
-    couches: Vec<Couche>,
+    couches: [Vec<Couche>; 4],
     tete: Tete,
     souffle: f32,
     pub(crate) apres: f64,
 }
 
 impl Pose {
-    /// Pose un calque, à sa part (presque rien : aucun).
-    fn peindre(&mut self, c: &Calque, part: f32) {
+    /// Pose un calque dans sa strate, à sa part (presque rien : aucun).
+    fn peindre(&mut self, strate: Strate, c: &Calque, part: f32) {
         if part > 0.004 {
-            self.couches.push(Couche { texture: c.texture.id(), uv: c.uv, part: part.min(1.0) });
+            let geometrie = Some(c.geometrie.clone());
+            self.couches[strate as usize].push(Couche {
+                texture: c.texture.id(),
+                uv: c.uv,
+                part: part.min(1.0),
+                geometrie,
+            });
         }
     }
 
     /// Une série de calques de plus en plus marqués, à l'avance `x` (de 0 à 1) : celui d'en dessous, et la part du
     /// suivant qui se fond en lui ([`en_poses`]) ; le tout à la part `part`.
-    fn serie(&mut self, serie: &[Calque], x: f32, part: f32) {
+    fn serie(&mut self, strate: Strate, serie: &[Calque], x: f32, part: f32) {
         let (k, suivant) = en_poses(x, serie.len());
         if let Some(c) = k.checked_sub(1).and_then(|i| serie.get(i)) {
-            self.peindre(c, part);
+            self.peindre(strate, c, part);
         }
         if let Some(c) = serie.get(k) {
-            self.peindre(c, suivant * part);
+            self.peindre(strate, c, suivant * part);
         }
+    }
+
+    /// Ses couches, dans l'ordre où elles se peignent : de la strate la plus basse à la plus haute.
+    fn couches(&self) -> impl Iterator<Item = &Couche> {
+        self.couches.iter().flatten()
     }
 }
 
@@ -166,132 +220,92 @@ struct Tete {
     y: f32,
 }
 
-/// Un ressort amorti au plus juste (critique) : sa valeur `x` va vers sa cible sans la dépasser, part doucement et se
-/// pose sans à-coup, comme un muscle — là où une approche exponentielle part d'un coup ; `v` : sa vitesse, gardée d'une
-/// image à l'autre.
-#[derive(Clone, Copy, Default)]
-struct Ressort {
-    x: f32,
-    v: f32,
-}
-
-impl Ressort {
-    /// Avance de `dt` secondes vers `cible`, à la pulsation `w` (par seconde : aux neuf dixièmes du chemin en 3,9/`w`
-    /// secondes), par la solution exacte du ressort — juste quel que soit le pas ; rend sa valeur.
-    fn vers(&mut self, cible: f32, w: f32, dt: f32) -> f32 {
-        let e = (-w * dt).exp();
-        let d = self.x - cible;
-        let a = self.v + w * d;
-        self.x = cible + (d + a * dt) * e;
-        self.v = (self.v - w * a * dt) * e;
-        self.x
-    }
-}
-
-/// La famille des bouches qui parlent : ouvertes, rondes ou étirées (le visage de la photo), ou celles d'une émotion.
+/// Ce que fait Eve, pour son visage : au repos, elle écoute, elle réfléchit (ou transcrit), elle parle.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-enum Famille {
+pub(crate) enum Activite {
     #[default]
-    Ouverte,
-    Ronde,
-    Etiree,
-    Emotion(Emotion),
+    Repos,
+    Ecoute,
+    Reflechit,
+    Parle,
 }
 
-/// Ce que fait le visage, d'une image à l'autre (les heures sont celles de la fenêtre, en secondes) : le prochain
-/// clignement ; le regard de côté voulu, celui qui se montre et sa part, jusqu'à quand, le prochain ; l'ouverture de la
-/// bouche et ses lèvres closes, la forme de sa syllabe, sa famille de bouches, celle d'avant et le passage de l'une à
-/// l'autre ; les sourcils, jusqu'à quand ils restent levés, quand ils pourront se lever de nouveau ; l'émotion montrée et
-/// celle qui s'efface, leurs parts ; la tête — son roulis, ses déplacements —, la posture qu'elle prend et quand elle en
-/// changera, son hochement et le dernier, l'ouverture de l'image d'avant (une syllabe qui monte), si elle parlait ; le
-/// dernier calcul ; le hasard.
-#[derive(Default)]
-struct Mimique {
-    clin: f64,
-    regard: Option<usize>,
-    regard_vu: Option<usize>,
-    regard_part: f32,
-    regard_jusqua: f64,
-    prochain_regard: f64,
-    ouverture: Ressort,
-    levres_closes: Ressort,
-    forme: Option<Forme>,
-    famille: Famille,
-    famille_avant: Famille,
-    passage: f32,
-    sourcils: Ressort,
-    sourcils_jusqua: f64,
-    prochains_sourcils: f64,
-    emotion: Option<Emotion>,
-    emotion_part: Ressort,
-    emotion_avant: Option<Emotion>,
-    emotion_avant_part: Ressort,
-    roulis: Ressort,
-    tete_x: Ressort,
-    tete_y: Ressort,
-    posture: Tete,
-    prochaine_posture: f64,
-    hochement: Ressort,
-    dernier_hochement: f64,
-    ouverture_avant: f32,
-    parlait: bool,
-    vu_a: f64,
-    hasard: u64,
-}
-
-impl Mimique {
-    /// Un nombre de 0 à 1, différent à chaque fois (un xorshift) : le visage ne bouge pas comme un métronome.
-    fn hasard(&mut self) -> f64 {
-        let mut x = if self.hasard == 0 { 0x9E37_79B9_7F4A_7C15 } else { self.hasard };
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.hasard = x;
-        (x % 10_000) as f64 / 10_000.0
-    }
-
-    /// Un nombre de −1 à 1, au hasard.
-    fn signe(&mut self) -> f32 {
-        2.0 * self.hasard() as f32 - 1.0
+impl Activite {
+    /// L'activité d'un état d'Eve (celui que publie le chef : « parole », « ecoute », « reflexion »…).
+    pub(crate) fn de(etat: &str) -> Activite {
+        match etat {
+            "parole" => Activite::Parle,
+            "ecoute" => Activite::Ecoute,
+            "reflexion" | "transcription" => Activite::Reflechit,
+            _ => Activite::Repos,
+        }
     }
 }
 
-/// Le portrait d'Eve, tel que la fenêtre le tient : son dossier local, ses fichiers vus (leur date et leur taille), le
-/// visage prêt à peindre, sa lecture en cours, sa mimique.
+/// Le portrait d'Eve, tel que la fenêtre le tient : son dossier local, le regard sur ses fichiers ([`Veille`]), le
+/// visage prêt à peindre, l'heure du dernier regard, sa mimique, le suivi de sa netteté.
 pub(crate) struct Portrait {
     local: PathBuf,
-    vu: Vec<(PathBuf, SystemTime, u64)>,
+    veille: Arc<Mutex<Veille>>,
     visage: Option<Visage>,
-    lu: Arc<Mutex<Option<Result<Images, String>>>>,
-    en_lecture: bool,
     regarde_a: f64,
-    mimique: Mimique,
+    mimique: mimique::Mimique,
+    nettete: nettete::Suivi,
+}
+
+/// Le regard sur les fichiers du portrait, que porte un fil (sur le fil de la fenêtre, lister et dater sa centaine de
+/// fichiers prenait une image entière toutes les deux secondes : la mimique sautait) : les fichiers vus (leur date et
+/// leur taille), ce qu'il a lu et que la fenêtre n'a pas encore pris, s'il regarde en ce moment, et son tour — un
+/// portrait retiré pendant une lecture ne revient pas avec elle.
+#[derive(Default)]
+struct Veille {
+    vu: Vec<(PathBuf, SystemTime, u64)>,
+    lu: Option<Lu>,
+    en_cours: bool,
+    tour: u64,
+}
+
+/// Ce que le regard a trouvé de neuf : plus de portrait, ou ses images relues (ou pourquoi elles ne se lisent pas).
+enum Lu {
+    Aucun,
+    Images(Result<Images, String>),
 }
 
 impl Portrait {
     pub(crate) fn nouveau(local: PathBuf) -> Portrait {
         Portrait {
             local,
-            vu: Vec::new(),
+            veille: Arc::default(),
             visage: None,
-            lu: Arc::default(),
-            en_lecture: false,
             regarde_a: f64::NEG_INFINITY,
-            mimique: Mimique::default(),
+            mimique: mimique::Mimique::default(),
+            nettete: nettete::Suivi::default(),
         }
     }
 
-    /// Le portrait à cette image : ses fichiers regardés toutes les deux secondes, relus dans un fil quand l'un d'eux
-    /// change, avec sa mise en place ([`mise_en_place`]). `None` : pas de portrait (ou illisible, et le journal le dit) :
-    /// l'orbe reste.
+    /// Le portrait à cette image : ses fichiers regardés toutes les deux secondes, dans un fil, et relus quand l'un
+    /// d'eux change, avec sa mise en place ([`mise_en_place`]). `None` : pas de portrait (ou illisible, et le journal le
+    /// dit) : l'orbe reste.
     pub(crate) fn visage(&mut self, ctx: &egui::Context) -> Option<Visage> {
         let maintenant = ctx.input(|i| i.time);
-        if let Some(lu) = self.lu.lock().ok().and_then(|mut l| l.take()) {
-            self.en_lecture = false;
+        let (lu, libre) = match self.veille.lock() {
+            Ok(mut v) => (v.lu.take(), !v.en_cours),
+            Err(_) => (None, false),
+        };
+        if libre && maintenant - self.regarde_a >= 2.0 {
+            self.regarde_a = maintenant;
+            self.regarder(ctx);
+        }
+        if let Some(lu) = lu {
             self.visage = match lu {
-                Ok(i) => {
-                    let texture = |nom: String, image| ctx.load_texture(nom, image, LISSE);
-                    let calque = |nom: String, r: Recadre| Calque { texture: texture(nom, r.image), uv: r.uv };
+                Lu::Aucun => None,
+                Lu::Images(Ok(i)) => {
+                    let texture =
+                        |nom: String, image: &Arc<egui::ColorImage>| ctx.load_texture(nom, image.clone(), LISSE);
+                    let calque = |nom: String, r: Recadre| {
+                        let image = Arc::new(r.image);
+                        Calque { texture: texture(nom, &image), image, uv: r.uv, geometrie: Arc::new(r.geometrie) }
+                    };
                     let serie = |nom: &str, recadres: Vec<Recadre>| -> Vec<Calque> {
                         recadres.into_iter().enumerate().map(|(k, r)| calque(format!("{nom}-{}", k + 1), r)).collect()
                     };
@@ -302,238 +316,97 @@ impl Portrait {
                     let expressions = i
                         .expressions
                         .into_iter()
-                        .map(|(emotion, visage, bouches)| {
+                        .map(|(emotion, visage, bouches, closes)| {
                             let nom = format!("portrait-emotion-{}", emotion.nom());
                             let bouches = serie(&format!("{nom}-bouche"), bouches);
-                            Expression { emotion, visage: calque(nom, visage), bouches }
+                            let levres_closes = closes.map(|r| calque(format!("{nom}-ferme"), r));
+                            Expression { emotion, visage: calque(nom, visage), bouches, levres_closes }
                         })
                         .collect();
+                    let photo = Arc::new(i.photo);
+                    self.nettete = nettete::Suivi::default();
                     Some(Visage {
-                        texture: texture("portrait-d-eve".into(), i.photo),
+                        taille: photo.size,
+                        texture: texture("portrait-d-eve".into(), &photo),
+                        image: photo,
                         calques,
                         expressions,
-                        fond: i.detoure.then(|| fond_de_studio(ctx)),
+                        fond: i.detoure.then(|| rendu::fond_de_studio(ctx)),
                         cadre: i.cadre,
+                        demande: Arc::default(),
+                        net: None,
+                        vignettes: Arc::default(),
                     })
                 }
-                Err(e) => {
+                Lu::Images(Err(e)) => {
                     crate::journal::ecrire(&format!("le portrait d'Eve ne se lit pas : {e}"));
                     None
                 }
             };
         }
-        if !self.en_lecture && maintenant - self.regarde_a >= 2.0 {
-            self.regarde_a = maintenant;
-            let vus: Vec<_> = fichiers(&self.local)
+        if let Some(v) = self.visage.as_mut() {
+            self.nettete.suivre(ctx, v, maintenant);
+        }
+        self.visage.clone()
+    }
+
+    /// Un regard sur les fichiers du portrait, dans un fil : leur date et leur taille ; s'ils ont changé, le portrait
+    /// relu (ou plus de portrait), rendu à la fenêtre au prochain [`Portrait::visage`].
+    fn regarder(&self, ctx: &egui::Context) {
+        let Ok(mut v) = self.veille.lock() else { return };
+        v.en_cours = true;
+        drop(v);
+        let (veille, ctx, local) = (self.veille.clone(), ctx.clone(), self.local.clone());
+        std::thread::spawn(move || {
+            let vus: Vec<_> = fichiers(&local)
                 .into_iter()
                 .filter_map(|c| {
                     let m = std::fs::metadata(&c).ok()?;
                     Some((c, m.modified().ok()?, m.len()))
                 })
                 .collect();
-            if vus != self.vu {
-                self.vu = vus;
-                if self.vu.is_empty() {
-                    self.visage = None;
-                } else {
-                    self.en_lecture = true;
-                    let (lu, ctx, local) = (self.lu.clone(), ctx.clone(), self.local.clone());
-                    std::thread::spawn(move || {
-                        let images = lire(&local);
-                        if let Ok(mut l) = lu.lock() {
-                            *l = Some(images);
-                        }
-                        ctx.request_repaint();
-                    });
+            let tour = match veille.lock() {
+                Ok(mut v) if v.vu != vus => {
+                    v.vu = vus.clone();
+                    v.tour
                 }
+                Ok(mut v) => {
+                    v.en_cours = false;
+                    return;
+                }
+                Err(_) => return,
+            };
+            let lu = if vus.is_empty() { Lu::Aucun } else { Lu::Images(lire(&local)) };
+            if let Ok(mut v) = veille.lock() {
+                if v.tour == tour {
+                    v.lu = Some(lu);
+                }
+                v.en_cours = false;
             }
-        }
-        self.visage.clone()
+            ctx.request_repaint();
+        });
     }
 
-    /// La pose du visage en grand à l'instant `temps` (celui de la fenêtre) : quand Eve `parle`, sa bouche suit sa voix,
-    /// lue un peu en avance à chaque image ([`crate::voix::bouche_a_venir`]) — ouverte, ronde ou étirée selon la
-    /// syllabe, plus ou moins selon le niveau, d'une pose à la suivante en fondu, d'une forme à l'autre aussi, les lèvres
-    /// closes avant m, b, p ; toutes les deux à six secondes, elle cligne (parfois deux fois de suite) ; de temps en
-    /// temps, elle regarde de côté un moment ; sa tête prend une posture et la garde, puis une autre (plus souvent quand
-    /// elle parle), et hoche sur une syllabe appuyée. `vivant` : les animations de Windows sont permises — sans elles, ni
-    /// souffle, ni regard de côté, ni tête qui bouge, et elle cligne encore. `emotion` : celle de la réponse
-    /// ([`Emotion`]), que le visage prend en fondu pendant que celle d'avant s'efface (sa pose, un penchant de la tête) ;
-    /// elle parle alors avec les bouches de cette émotion, si elle en a.
+    /// La pose du visage en grand à l'instant `temps` (celui de la fenêtre), Eve à son `activite`, l'émotion de sa
+    /// réponse `emotion` ([`Emotion`]) : la mimique ([`mimique`]) — quand Eve parle, sa bouche suit sa voix ; elle cligne
+    /// et regarde de côté de temps en temps ; sa tête prend une posture et hoche ; son visage prend l'émotion en fondu.
+    /// `vivant` : les animations de Windows sont permises — sans elles, ni souffle, ni regard de côté, ni tête qui bouge,
+    /// et elle cligne encore. `None` : pas de portrait.
     pub(crate) fn pose_du_moment(
         &mut self,
         temps: f64,
-        parle: bool,
+        activite: Activite,
         vivant: bool,
         emotion: Option<Emotion>,
     ) -> Option<Pose> {
         let v = self.visage.as_ref()?;
-        let [yeux, regards, _, rondes, etirees, fermees, sourcils] = &v.calques;
-        let m = &mut self.mimique;
-        let dt = (temps - m.vu_a).clamp(0.0, 0.1) as f32;
-        m.vu_a = temps;
-        let mut pose = Pose::default();
-        // Les sourcils : levés six dixièmes de seconde sur une syllabe appuyée (au plus toutes les deux secondes et
-        // demie à cinq et demie), et de loin en loin au repos (toutes les quinze à quarante secondes) ; ils montent en un
-        // quart de seconde, redescendent en moins d'une demi. Sous l'émotion : une émotion qui a les siens les couvre.
-        if vivant && !sourcils.is_empty() {
-            if m.prochains_sourcils == 0.0 {
-                m.prochains_sourcils = temps + 12.0;
-            }
-            if temps >= m.prochains_sourcils && (!parle || m.ouverture.x > 0.75) {
-                m.sourcils_jusqua = temps + 0.6;
-                let attente = if parle { 2.5 + 3.0 * m.hasard() } else { 15.0 + 25.0 * m.hasard() };
-                m.prochains_sourcils = temps + attente;
-            }
-        }
-        let leves = temps < m.sourcils_jusqua;
-        m.sourcils.vers(if leves { 1.0 } else { 0.0 }, if leves { 16.0 } else { 9.0 }, dt);
-        pose.serie(sourcils, m.sourcils.x, 1.0);
-        // Le regard de côté : de temps en temps, un moment ; il s'en va et revient vite, comme l'œil. Sous l'émotion,
-        // de même.
-        if vivant && !regards.is_empty() {
-            if m.prochain_regard == 0.0 {
-                m.prochain_regard = temps + 4.0;
-            }
-            if m.regard.is_some() && temps >= m.regard_jusqua {
-                (m.regard, m.prochain_regard) = (None, temps + 3.0 + 6.0 * m.hasard());
-            } else if m.regard.is_none() && temps >= m.prochain_regard {
-                let k = ((m.hasard() * regards.len() as f64) as usize).min(regards.len() - 1);
-                (m.regard, m.regard_jusqua) = (Some(k), temps + 0.7 + 1.8 * m.hasard());
-            }
-        } else {
-            m.regard = None;
-        }
-        let pas = dt / DUREE_DU_REGARD;
-        if m.regard_vu == m.regard {
-            m.regard_part = (m.regard_part + pas).min(1.0);
-        } else {
-            m.regard_part = (m.regard_part - pas).max(0.0);
-            if m.regard_part == 0.0 {
-                m.regard_vu = m.regard;
-            }
-        }
-        if let Some(r) = m.regard_vu.and_then(|k| regards.get(k)) {
-            pose.peindre(r, lisse(m.regard_part));
-        }
-        // Les émotions : celle qu'on veut vient en un peu plus d'une demi-seconde pendant que celle d'avant s'efface ;
-        // revenir à celle qui s'effaçait la reprend où elle en était. Sans sa pose, aucune.
-        let voulue = emotion.filter(|e| v.expressions.iter().any(|x| x.emotion == *e));
-        if voulue != m.emotion {
-            if voulue.is_some() && voulue == m.emotion_avant {
-                std::mem::swap(&mut m.emotion, &mut m.emotion_avant);
-                std::mem::swap(&mut m.emotion_part, &mut m.emotion_avant_part);
-            } else {
-                if m.emotion_part.x >= m.emotion_avant_part.x {
-                    (m.emotion_avant, m.emotion_avant_part) = (m.emotion, m.emotion_part);
-                }
-                (m.emotion, m.emotion_part) = (voulue, Ressort::default());
-            }
-        }
-        m.emotion_part.vers(if m.emotion.is_some() { 1.0 } else { 0.0 }, 6.0, dt);
-        m.emotion_avant_part.vers(0.0, 7.0, dt);
-        if m.emotion_avant_part.x < 0.004 {
-            m.emotion_avant = None;
-        }
-        let expression = |e: Option<Emotion>| e.and_then(|e| v.expressions.iter().find(|x| x.emotion == e));
-        for (e, part) in [(m.emotion_avant, m.emotion_avant_part.x), (m.emotion, m.emotion_part.x)] {
-            if let Some(x) = expression(e) {
-                pose.peindre(&x.visage, part);
-            }
-        }
-        // La bouche : la voix qui s'entendra dans un instant, et la forme de sa syllabe ; elle s'ouvre en un dixième de
-        // seconde, se referme en un peu plus. Ses bouches : celles de l'émotion qui domine (sa bouche au repos est celle
-        // de sa pose : avant m, b, p, elle s'y referme), sinon celles de la syllabe — d'une famille à l'autre en fondu.
-        let dominante = if m.emotion_part.x >= m.emotion_avant_part.x { m.emotion } else { m.emotion_avant };
-        let (cible, forme) = if parle { crate::voix::bouche_a_venir(AVANCE_DE_LA_BOUCHE) } else { None }.unzip();
-        if let Some(f) = forme.filter(|&f| f != Forme::Fermee) {
-            m.forme = Some(f);
-        }
-        let famille = match (expression(dominante), m.forme) {
-            (Some(x), _) if !x.bouches.is_empty() => Famille::Emotion(x.emotion),
-            (_, Some(Forme::Ronde)) if !rondes.is_empty() => Famille::Ronde,
-            (_, Some(Forme::Etiree)) if !etirees.is_empty() => Famille::Etiree,
-            _ => Famille::Ouverte,
-        };
-        let closes = forme == Some(Forme::Fermee);
-        let propres = matches!(famille, Famille::Emotion(_));
-        let cible = if closes && propres { 0.0 } else { cible.unwrap_or(0.0) };
-        m.ouverture.vers(cible, if cible > m.ouverture.x { 38.0 } else { 26.0 }, dt);
-        m.levres_closes.vers(if closes && !propres { 1.0 } else { 0.0 }, 45.0, dt);
-        if famille != m.famille {
-            if famille == m.famille_avant {
-                (m.famille, m.famille_avant, m.passage) = (famille, m.famille, 1.0 - m.passage);
-            } else {
-                if m.passage >= 0.5 {
-                    m.famille_avant = m.famille;
-                }
-                (m.famille, m.passage) = (famille, 0.0);
-            }
-        }
-        m.passage = (m.passage + dt / DUREE_DU_PASSAGE).min(1.0);
-        let o = courbe_de_l_ouverture(m.ouverture.x);
-        let poids = if m.famille_avant == m.famille { 1.0 } else { lisse(m.passage) };
-        if poids < 1.0 {
-            pose.serie(v.bouches(m.famille_avant), o, 1.0);
-        }
-        pose.serie(v.bouches(m.famille), o, poids);
-        if let Some(f) = fermees.first() {
-            pose.peindre(f, m.levres_closes.x);
-        }
-        // Les yeux qui clignent, par-dessus tout.
-        if m.clin == 0.0 {
-            m.clin = temps + 2.0;
-        }
-        if temps - m.clin >= DUREE_DU_CLIN {
-            m.clin = temps + if m.hasard() < 0.12 { 0.35 } else { 2.0 + 4.0 * m.hasard() };
-        }
-        pose.serie(yeux, fermeture((temps - m.clin) / DUREE_DU_CLIN) as f32, 1.0);
-        // Le souffle : une inspiration toutes les quatre secondes et demie (elle ne fait que grandir : le cadre reste dans
-        // l'image). La tête : une posture — un peu penchée, un peu déplacée —, gardée trois secondes et demie à huit et
-        // demie au repos, une et demie à trois et demie en parlant (plus marquée ; plus encore amusée), rejointe en trois
-        // quarts de seconde ; le penchant des émotions ; sur une syllabe appuyée, une fois sur deux, un hochement.
-        if vivant {
-            pose.souffle = 0.003 * (1.0 + (temps * std::f64::consts::TAU / 4.5).sin()) as f32;
-            if parle && !m.parlait {
-                m.prochaine_posture = m.prochaine_posture.min(temps + 0.3);
-            }
-            m.parlait = parle;
-            if temps >= m.prochaine_posture {
-                let amusee = if dominante == Some(Emotion::Amusee) { 1.4 } else { 1.0 };
-                let ample = if parle { 1.0 } else { 0.5 } * amusee;
-                let roulis = ample * 0.035 * m.signe();
-                m.posture = Tete { roulis, x: 0.3 * roulis + ample * 0.008 * m.signe(), y: ample * 0.005 * m.signe() };
-                m.prochaine_posture = temps + if parle { 1.5 + 2.0 * m.hasard() } else { 3.5 + 5.0 * m.hasard() };
-            }
-            let o = m.ouverture.x;
-            if parle && o > 0.7 && m.ouverture_avant <= 0.7 && temps - m.dernier_hochement > 0.9 && m.hasard() < 0.5 {
-                m.hochement.v += 0.22;
-                m.dernier_hochement = temps;
-            }
-            m.ouverture_avant = o;
-            m.hochement.vers(0.0, 8.0, dt);
-            let mut but = m.posture;
-            for (e, part) in [(m.emotion, m.emotion_part.x), (m.emotion_avant, m.emotion_avant_part.x)] {
-                let p = penchant(e);
-                but = Tete { roulis: but.roulis + p.roulis * part, x: but.x + p.x * part, y: but.y + p.y * part };
-            }
-            pose.tete = Tete {
-                roulis: m.roulis.vers(but.roulis, W_TETE, dt),
-                x: m.tete_x.vers(but.x, W_TETE, dt),
-                y: m.tete_y.vers(but.y, W_TETE, dt) + m.hochement.x,
-            };
-        } else {
-            // Sans les animations de Windows : redessinée au prochain clignement, une fois tout posé.
-            let posee = m.emotion_avant.is_none()
-                && (m.emotion_part.x - if m.emotion.is_some() { 1.0 } else { 0.0 }).abs() < 0.005
-                && m.passage >= 1.0
-                && m.ouverture.x < 0.005
-                && m.levres_closes.x < 0.005;
-            if !parle && posee {
-                pose.apres = (m.clin - temps).max(0.0);
-            }
-        }
-        Some(pose)
+        Some(self.mimique.pose(v, temps, activite, vivant, emotion))
+    }
+
+    /// La voix de la personne que le micro entend (de 0 à 1 ; 0 quand Eve n'écoute pas), pour les poses qui suivent :
+    /// en l'écoutant, Eve hoche à ses pauses.
+    pub(crate) fn entendre(&mut self, niveau: f32) {
+        self.mimique.entendre(niveau);
     }
 
     /// Le dossier local, où vit le portrait.
@@ -541,41 +414,14 @@ impl Portrait {
         &self.local
     }
 
-    /// Retire le portrait : l'orbe revient tout de suite, sans attendre le prochain regard sur les fichiers.
+    /// Retire le portrait : l'orbe revient tout de suite, sans attendre le prochain regard sur les fichiers ; une lecture
+    /// en cours ne le ramène pas.
     pub(crate) fn retirer(&mut self) {
         retirer(&self.local);
-        (self.vu, self.visage) = (Vec::new(), None);
-    }
-}
-
-/// La durée d'un clignement, en secondes.
-const DUREE_DU_CLIN: f64 = 0.3;
-/// Le temps d'un regard qui s'en va ou qui vient, en secondes : vif, comme l'œil.
-const DUREE_DU_REGARD: f32 = 0.07;
-/// Le passage d'une famille de bouches à une autre (d'une voyelle ronde à une ouverte, d'une émotion à l'autre), en
-/// secondes.
-const DUREE_DU_PASSAGE: f32 = 0.1;
-/// L'avance de la bouche sur le son : les lèvres d'une vraie personne se placent avant que le son ne sorte, et le
-/// ressort de la bouche suit sa voix d'à peu près autant.
-const AVANCE_DE_LA_BOUCHE: std::time::Duration = std::time::Duration::from_millis(60);
-/// La pulsation du ressort de la tête : une posture rejointe en trois quarts de seconde.
-const W_TETE: f32 = 5.0;
-
-/// Un passage adouci, de 0 à 1 : lent au départ et à l'arrivée.
-fn lisse(t: f32) -> f32 {
-    let t = t.clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
-/// La fermeture des yeux (0 : ouverts, 1 : fermés) à `p` (de 0 à 1) d'un clignement : ils se ferment vite, restent
-/// fermés un instant, se rouvrent plus lentement — chaque mouvement adouci au départ et à l'arrivée.
-fn fermeture(p: f64) -> f64 {
-    let lisse = |t: f64| t * t * (3.0 - 2.0 * t);
-    match p {
-        p if !(0.0..1.0).contains(&p) => 0.0,
-        p if p < 0.3 => lisse(p / 0.3),
-        p if p < 0.45 => 1.0,
-        p => 1.0 - lisse((p - 0.45) / 0.55),
+        self.visage = None;
+        if let Ok(mut v) = self.veille.lock() {
+            (v.vu, v.lu, v.tour) = (Vec::new(), None, v.tour + 1);
+        }
     }
 }
 
@@ -587,34 +433,18 @@ fn en_poses(x: f32, n: usize) -> (usize, f32) {
     (k, if k < n { x - k as f32 } else { 0.0 })
 }
 
-/// L'avance des bouches pour une ouverture (de 0 à 1) : sous un souffle, aucune — la photo ; courbée (à la puissance
-/// 1,5) : les plus ouvertes, pour les syllabes les plus fortes seulement.
-fn courbe_de_l_ouverture(ouverture: f32) -> f32 {
-    const SEUIL: f32 = 0.15;
-    ((ouverture.clamp(0.0, 1.0).powf(1.5) - SEUIL) / (1.0 - SEUIL)).clamp(0.0, 1.0)
-}
-
-/// Le penchant de la tête que donne une émotion : penchée par empathie, basse de tristesse, levée de surprise, de côté
-/// en réfléchissant.
-fn penchant(e: Option<Emotion>) -> Tete {
-    let (roulis, x, y) = match e {
-        Some(Emotion::Empathie) => (0.05, 0.008, 0.008),
-        Some(Emotion::Triste) => (-0.02, 0.0, 0.03),
-        Some(Emotion::Surprise) => (0.0, 0.0, -0.015),
-        Some(Emotion::Reflexion) => (-0.03, -0.008, -0.008),
-        _ => (0.0, 0.0, 0.0),
-    };
-    Tete { roulis, x, y }
-}
-
 /// Lit le portrait du dossier local, dans un fil : la photo, sa mise en place, et les calques de ses poses de sa taille
-/// (une autre est laissée, et le journal le dit), recadrés ; ses émotions et leurs bouches.
+/// (une autre est laissée, et le journal le dit), recadrés, chacun avec sa géométrie ([`rendu::geometrie`]) ; ses
+/// émotions, leurs bouches et leurs lèvres closes. Les poses se lisent à plusieurs fils à la fois ([`en_parallele`]) :
+/// le flot de chacune prend son temps.
 fn lire(local: &Path) -> Result<Images, String> {
+    let debut = Instant::now();
     let chemin = trouver(local, "portrait").ok_or("le portrait a disparu")?;
     let photo = crate::cartes::image_du_disque(&chemin, COTE)?;
     let (detoure, cadre) = mise_en_place(&photo);
-    let pose = |c: PathBuf| match crate::cartes::image_du_disque(&c, COTE) {
-        Ok(i) if i.size == photo.size => Some(recadrer(calque(&photo, &i))),
+    let [l, h] = photo.size;
+    let lue = |c: &Path| match crate::cartes::image_du_disque(c, COTE) {
+        Ok(i) if i.size == photo.size => Some(i),
         Ok(_) => {
             crate::journal::ecrire(&format!("portrait d'Eve : {} n'a pas la taille de la photo", c.display()));
             None
@@ -624,15 +454,103 @@ fn lire(local: &Path) -> Result<Images, String> {
             None
         }
     };
-    let calques = SORTES.map(|sorte| poses(local, "portrait", sorte).into_iter().map_while(pose).collect());
-    let expressions = emotions(local, "portrait")
+    // Le calque d'une pose `i` : ce qui y change par rapport à ce qu'elle recouvre (`dessous` : la photo, ou le visage
+    // de son émotion), son masque élargi de la part `elargi` de l'image, recadré ; et sa géométrie, le flot de la photo
+    // vers la pose — le treillis va toujours de la photo à ce qui se voit.
+    let pose = |i: &egui::ColorImage, dessous: &egui::ColorImage, elargi: usize| {
+        let (image, masque) = calque(dessous, i, elargi);
+        let (image, [x0, y0, x1, y1]) = recadrer(image);
+        let geometrie = if image.size == [1, 1] {
+            rendu::Geometrie::default()
+        } else {
+            rendu::geometrie(&photo, i, &masque, [x0, y0, x1, y1])
+        };
+        let (lf, hf) = (l as f32, h as f32);
+        let uv = Rect::from_min_max(pos2(x0 as f32 / lf, y0 as f32 / hf), pos2(x1 as f32 / lf, y1 as f32 / hf));
+        Recadre { image, uv, geometrie }
+    };
+    let series = SORTES.map(|sorte| poses(local, "portrait", sorte));
+    let emotions: Vec<(Emotion, PathBuf, Vec<PathBuf>, Option<PathBuf>)> = emotions(local, "portrait")
         .into_iter()
-        .filter_map(|(e, c)| {
-            let bouches = bouches_d_emotion(local, "portrait", e).into_iter().map_while(pose).collect();
-            Some((e, pose(c)?, bouches))
+        .map(|(e, c)| (e, c, bouches_d_emotion(local, "portrait", e), levres_closes_d_emotion(local, "portrait", e)))
+        .collect();
+    // Une émotion : son visage, ce qui y change par rapport à la photo ; ses bouches et ses lèvres closes, ce qui y
+    // change par rapport à son visage — la bouche seule. Posées sur lui pour parler, elles ne reprennent ni ses yeux ni
+    // ses sourcils : le visage ne saute pas à la première syllabe, et un regard de côté, dessous, ne va et vient pas
+    // d'une syllabe à l'autre. Les visages d'abord, donc.
+    let visages: Vec<Option<(egui::ColorImage, Recadre)>> = en_parallele(&emotions, |(_, c, _, _)| {
+        let i = lue(c)?;
+        let r = pose(&i, &photo, ELARGI);
+        Some((i, r))
+    })
+    .into_iter()
+    .map(Option::flatten)
+    .collect();
+    // Puis toutes les autres, dans l'ordre, chacune avec l'élargissement de son masque et ce qu'elle recouvre : les
+    // séries de chaque sorte, puis les bouches et les lèvres closes de chaque émotion dont le visage se lit.
+    let sur_la_photo = &photo;
+    let chemins: Vec<(&PathBuf, usize, &egui::ColorImage)> = SORTES
+        .iter()
+        .zip(&series)
+        .flat_map(|(sorte, s)| {
+            let elargi = if ETROITES.contains(sorte) { ELARGI_DES_YEUX } else { ELARGI };
+            s.iter().map(move |c| (c, elargi, sur_la_photo))
+        })
+        .chain(emotions.iter().zip(&visages).flat_map(|((_, _, bouches, closes), v)| {
+            let dessous = v.as_ref().map(|(i, _)| i);
+            bouches.iter().chain(closes).filter_map(move |b| Some((b, ELARGI, dessous?)))
+        }))
+        .collect();
+    let mut lues = en_parallele(&chemins, |&(c, elargi, dessous)| Some(pose(&lue(c)?, dessous, elargi)))
+        .into_iter()
+        .map(Option::flatten);
+    let n = emotions.len() + chemins.len();
+    // Chaque série s'arrête à sa première pose illisible.
+    let mut suite = |n: usize| -> Vec<Recadre> {
+        let lues: Vec<Option<Recadre>> = lues.by_ref().take(n).collect();
+        lues.into_iter().map_while(|r| r).collect()
+    };
+    let calques = series.each_ref().map(|s| suite(s.len()));
+    let expressions = emotions
+        .iter()
+        .zip(visages)
+        .filter_map(|((e, _, bouches, closes), v)| {
+            let (_, visage) = v?;
+            let bouches = suite(bouches.len());
+            let closes = suite(usize::from(closes.is_some())).pop();
+            Some((*e, visage, bouches, closes))
         })
         .collect();
+    let duree = debut.elapsed().as_secs_f32();
+    crate::journal::ecrire(&format!("portrait d'Eve lu : la photo et {n} pose(s), en {duree:.1} s"));
     Ok(Images { photo, calques, expressions, detoure, cadre })
+}
+
+/// `f` sur chaque entrée, à plusieurs fils à la fois — trois au plus, et un cœur laissé à la fenêtre —, les sorties dans
+/// l'ordre des entrées ; celles d'un fil qui panique restent à `None`.
+fn en_parallele<E: Sync, S: Send>(entrees: &[E], f: impl Fn(&E) -> S + Sync) -> Vec<Option<S>> {
+    let fils = std::thread::available_parallelism().map_or(1, |n| n.get().saturating_sub(1)).clamp(1, 3);
+    let suivante = AtomicUsize::new(0);
+    let faites: Vec<Vec<(usize, S)>> = std::thread::scope(|s| {
+        let fils: Vec<_> = (0..fils)
+            .map(|_| {
+                s.spawn(|| {
+                    let mut faites = Vec::new();
+                    loop {
+                        let k = suivante.fetch_add(1, Ordering::Relaxed);
+                        let Some(e) = entrees.get(k) else { break faites };
+                        faites.push((k, f(e)));
+                    }
+                })
+            })
+            .collect();
+        fils.into_iter().filter_map(|f| f.join().ok()).collect()
+    });
+    let mut sorties: Vec<Option<S>> = (0..entrees.len()).map(|_| None).collect();
+    for (k, s) in faites.into_iter().flatten() {
+        sorties[k] = Some(s);
+    }
+    sorties
 }
 
 /// Les poses d'émotion posées dans `dossier` à côté de l'image `base` (`base-emotion-triste`…), une par émotion au
@@ -651,10 +569,25 @@ fn bouches_d_emotion(dossier: &Path, base: &str, e: Emotion) -> Vec<PathBuf> {
     poses(dossier, base, &format!("emotion-{}-bouche", e.nom()))
 }
 
+/// L'élargissement du masque d'un calque (son rayon : le grand côté de l'image divisé par ce nombre) : un soixantième,
+/// pour que le bord d'une pose ne se voie pas ; un cent-vingtième pour les sortes au masque étroit, les yeux et les
+/// regards — l'écart des yeux aux sourcils est d'une dizaine de pixels, et un masque plus large peignait, sur des
+/// sourcils levés, ceux de la photo : un sourcil fantôme (trouvé par l'agent du regard, ses poses des yeux ne changeant
+/// que les yeux).
+const ELARGI: usize = 60;
+const ELARGI_DES_YEUX: usize = 120;
+const ETROITES: [&str; 2] = ["yeux", "regard"];
+
+/// Les lèvres closes d'une émotion, posées dans `dossier` à côté de l'image `base` (`base-emotion-joie-ferme`), si elle
+/// en a.
+fn levres_closes_d_emotion(dossier: &Path, base: &str, e: Emotion) -> Option<PathBuf> {
+    trouver(dossier, &format!("{base}-emotion-{}-ferme", e.nom()))
+}
+
 /// Le calque d'une pose : ce qui y change par rapport à la photo — plus de 10 sur 255 d'écart —, élargi et adouci sur
-/// un soixantième de l'image pour que son bord ne se voie pas, le reste transparent. Un écart isolé (le grain de la
-/// photo) ne compte pas.
-fn calque(photo: &egui::ColorImage, pose: &egui::ColorImage) -> egui::ColorImage {
+/// la part `elargi` de l'image ([`ELARGI`]) pour que son bord ne se voie pas, le reste transparent ; et ce masque (de 0
+/// à 1, un par pixel). Un écart isolé (le grain de la photo) ne compte pas.
+fn calque(photo: &egui::ColorImage, pose: &egui::ColorImage, elargi: usize) -> (egui::ColorImage, Vec<f32>) {
     let [l, h] = photo.size;
     let ecart = |a: Color32, b: Color32| {
         let d = |x: u8, y: u8| x.abs_diff(y);
@@ -666,7 +599,7 @@ fn calque(photo: &egui::ColorImage, pose: &egui::ColorImage) -> egui::ColorImage
     for v in &mut masque {
         *v = if *v > 0.35 { 1.0 } else { 0.0 };
     }
-    let r = (l.max(h) / 60).max(2);
+    let r = (l.max(h) / elargi.max(1)).max(2);
     flou(&mut masque, l, h, r);
     for v in &mut masque {
         *v = (*v * 4.0).min(1.0);
@@ -681,13 +614,14 @@ fn calque(photo: &egui::ColorImage, pose: &egui::ColorImage) -> egui::ColorImage
             Color32::from_rgba_premultiplied(r, g, b, al)
         })
         .collect();
-    egui::ColorImage::new([l, h], pixels)
+    (egui::ColorImage::new([l, h], pixels), masque)
 }
 
 /// Le calque recadré sur ce qui s'y voit : la plus petite part de l'image qui garde ses pixels non transparents, plus
 /// une [`MARGE`] transparente, dans l'image — une bouche ne pèse plus qu'une bouche dans la carte graphique ; et cette
-/// part, en coordonnées de texture de l'image entière. Rien ne s'y voit : un seul pixel transparent, sur toute l'image.
-fn recadrer(c: egui::ColorImage) -> Recadre {
+/// part, en pixels de l'image entière (gauche, haut, droite, bas). Rien ne s'y voit : un seul pixel transparent, sur
+/// toute l'image.
+fn recadrer(c: egui::ColorImage) -> (egui::ColorImage, [usize; 4]) {
     let [l, h] = c.size;
     let (mut x0, mut y0, mut x1, mut y1) = (l, h, 0, 0);
     for (i, p) in c.pixels.iter().enumerate() {
@@ -697,105 +631,65 @@ fn recadrer(c: egui::ColorImage) -> Recadre {
         }
     }
     if x0 >= x1 {
-        let image = egui::ColorImage::new([1, 1], vec![Color32::TRANSPARENT]);
-        return Recadre { image, uv: Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)) };
+        return (egui::ColorImage::new([1, 1], vec![Color32::TRANSPARENT]), [0, 0, l, h]);
     }
     let (x0, y0) = (x0.saturating_sub(MARGE), y0.saturating_sub(MARGE));
     let (x1, y1) = ((x1 + MARGE).min(l), (y1 + MARGE).min(h));
     let pixels = (y0..y1).flat_map(|y| c.pixels[y * l + x0..y * l + x1].iter().copied()).collect();
-    let (l, h) = (l as f32, h as f32);
-    Recadre {
-        image: egui::ColorImage::new([x1 - x0, y1 - y0], pixels),
-        uv: Rect::from_min_max(pos2(x0 as f32 / l, y0 as f32 / h), pos2(x1 as f32 / l, y1 as f32 / h)),
-    }
+    (egui::ColorImage::new([x1 - x0, y1 - y0], pixels), [x0, y0, x1, y1])
 }
 
-/// Un flou en boîte de rayon `r` sur une image d'un seul canal (`l` sur `h`), sur place : les rangées, puis les
-/// colonnes, chacune par ses sommes cumulées.
+/// Un flou en boîte de rayon `r` sur une image d'un seul canal (`l` sur `h`), sur place : les rangées, chacune par ses
+/// sommes cumulées ; puis les colonnes, toutes ensemble, rangée après rangée — la somme des rangées de la fenêtre,
+/// glissée d'une rangée à la suivante : la mémoire se lit dans l'ordre (colonne par colonne, chaque pixel lu sautait
+/// d'une rangée, et le calque d'une pose prenait des dizaines de millisecondes).
 fn flou(m: &mut [f32], l: usize, h: usize, r: usize) {
-    let mut ligne = Vec::new();
-    let mut passe = |m: &mut [f32], n: usize, pas: usize, debut: usize| {
+    if l == 0 || h == 0 {
+        return;
+    }
+    let mut ligne = Vec::with_capacity(l + 1);
+    for rang in m.chunks_exact_mut(l) {
         ligne.clear();
         ligne.push(0.0f32);
-        for i in 0..n {
-            let s = ligne[i] + m[debut + i * pas];
+        for i in 0..l {
+            let s = ligne[i] + rang[i];
             ligne.push(s);
         }
-        for i in 0..n {
-            let (a, b) = (i.saturating_sub(r), (i + r + 1).min(n));
-            m[debut + i * pas] = (ligne[b] - ligne[a]) / (b - a) as f32;
+        for (i, v) in rang.iter_mut().enumerate() {
+            let (a, b) = (i.saturating_sub(r), (i + r + 1).min(l));
+            *v = (ligne[b] - ligne[a]) / (b - a) as f32;
         }
-    };
-    for y in 0..h {
-        passe(m, l, 1, y * l);
     }
-    for x in 0..l {
-        passe(m, h, l, x);
+    let source = m.to_vec();
+    let rangee = |y: usize| &source[y * l..y * l + l];
+    let mut somme = vec![0.0f32; l];
+    for y in 0..(r + 1).min(h) {
+        somme.iter_mut().zip(rangee(y)).for_each(|(s, v)| *s += v);
+    }
+    for (y, sortie) in m.chunks_exact_mut(l).enumerate() {
+        let n = ((y + r + 1).min(h) - y.saturating_sub(r)) as f32;
+        sortie.iter_mut().zip(&somme).for_each(|(o, s)| *o = s / n);
+        if y + r + 1 < h {
+            somme.iter_mut().zip(rangee(y + r + 1)).for_each(|(s, v)| *s += v);
+        }
+        if y >= r {
+            somme.iter_mut().zip(rangee(y - r)).for_each(|(s, v)| *s -= v);
+        }
     }
 }
 
 impl Visage {
-    /// Les bouches d'une famille, de plus en plus ouvertes.
-    fn bouches(&self, f: Famille) -> &[Calque] {
-        let [_, _, ouvertes, rondes, etirees, ..] = &self.calques;
-        match f {
-            Famille::Ouverte => ouvertes,
-            Famille::Ronde => rondes,
-            Famille::Etiree => etirees,
-            Famille::Emotion(e) => self.expressions.iter().find(|x| x.emotion == e).map_or(&[][..], |x| &x.bouches),
-        }
-    }
-
-    /// Le portrait en grand (la bannière, la tête de la conversation seule), dans le disque de centre `centre` et de
-    /// rayon `rayon`, dans sa pose du moment ([`Portrait::pose_du_moment`]) : la photo, puis chacune de ses couches —
-    /// une photo, en disque ; détouré, sur son fond de studio, la personne que le bas du cercle coupe et dont la tête
-    /// sort par le haut, et qui bouge, ses épaules restant en place ([`grille`]). Le souffle la grandit un peu depuis le
-    /// bas du disque, comme une poitrine qui s'emplit.
-    pub(crate) fn en_grand(&self, p: &egui::Painter, centre: Pos2, rayon: f32, pose: &Pose) {
-        let k = 1.0 + pose.souffle;
-        let cadre = Rect::from_center_size(
-            pos2(self.cadre.center().x, self.cadre.max.y - self.cadre.height() / (2.0 * k)),
-            self.cadre.size() / k,
-        );
-        let entiere = Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0));
-        let couches = std::iter::once(Couche { texture: self.texture.id(), uv: entiere, part: 1.0 })
-            .chain(pose.couches.iter().copied());
-        let Some(fond) = &self.fond else {
-            for c in couches {
-                let uv = Rect::from_min_max(c.dans(cadre.min), c.dans(cadre.max));
-                disque(p, centre, rayon, c.texture, uv, c.teinte());
-            }
-            return;
-        };
-        disque(p, centre, rayon, fond.id(), entiere, Color32::WHITE);
-        let carre = Rect::from_center_size(centre, vec2(2.0 * rayon, 2.0 * rayon));
-        // Un point de l'écran, et sa coordonnée de texture : le carré du disque est le cadre de l'image.
-        let vers_uv = move |q: Pos2| {
-            pos2(
-                cadre.min.x + (q.x - carre.min.x) / carre.width() * cadre.width(),
-                cadre.min.y + (q.y - carre.min.y) / carre.height() * cadre.height(),
-            )
-        };
-        // Le haut de l'image, à l'écran : la tête s'arrête là. Le bas du disque, qui ne bouge pas ; puis le haut, en
-        // grille, que la tête déforme.
-        let haut = carre.min.y - cadre.min.y / cadre.height() * carre.height();
-        for c in couches {
-            let uv = |q: Pos2| c.dans(vers_uv(q));
-            medaillon(p, centre, rayon, centre.y, (c.texture, c.teinte()), uv);
-            grille(p, centre, rayon, haut, (c.texture, c.teinte()), uv, pose.tete);
-        }
-    }
-
     /// Chaque pose, nommée, pour l'essai du portrait : la photo, chaque calque seul (de chaque sorte, son nom et son
     /// rang), deux fondus (une bouche à moitié fondue dans la suivante ; les lèvres à moitié closes), trois mélanges —
     /// les sourcils levés en clignant, cligner en parlant, regarder de côté en parlant —, chaque émotion (seule, puis
-    /// qui parle, sa bouche du milieu), et la tête penchée.
+    /// qui parle, sa bouche du milieu, puis ses lèvres closes si elle les a), des passages à mi-chemin (un clignement,
+    /// chaque émotion qui vient), et la tête penchée. Les calques de chacune se posent dans l'ordre où ils sont nommés.
     pub(crate) fn poses_d_essai(&self) -> Vec<(String, Pose)> {
         let [yeux, regards, ouvertes, _, _, fermees, sourcils] = &self.calques;
         let pose = |calques: &[(&Calque, f32)]| {
             let mut p = Pose::default();
             for (c, part) in calques {
-                p.peindre(c, *part);
+                p.peindre(Strate::Dessous, c, *part);
             }
             p
         };
@@ -825,6 +719,17 @@ impl Visage {
             if let Some(b) = x.bouches.get(x.bouches.len() / 2) {
                 v.push((format!("{}, qui parle", x.emotion.nom()), pose(&[(&x.visage, 1.0), (b, 1.0)])));
             }
+            if let Some(f) = &x.levres_closes {
+                v.push((format!("{}, lèvres closes", x.emotion.nom()), pose(&[(&x.visage, 1.0), (f, 1.0)])));
+            }
+        }
+        // À mi-chemin d'un passage, où deux poses se fondent l'une dans l'autre (le rendu les fait tomber l'une sur
+        // l'autre) : un clignement, chaque émotion qui vient.
+        if let [.., a, b] = yeux.as_slice() {
+            v.push(("clignement, à mi-chemin".into(), pose(&[(a, 1.0), (b, 0.5)])));
+        }
+        for x in &self.expressions {
+            v.push((format!("{}, à mi-chemin", x.emotion.nom()), pose(&[(&x.visage, 0.5)])));
         }
         // La tête penchée, plus que jamais en vrai (le cou et la jonction avec les épaules s'y jugent), et en parlant.
         let penchee = Tete { roulis: 0.08, x: 0.03, y: 0.02 };
@@ -834,18 +739,9 @@ impl Visage {
         v.push(("penchée, en parlant".into(), Pose { tete: autre, ..pose(&bouche) }));
         v
     }
-
-    /// Le petit disque (devant les bulles d'Eve, dans l'en-tête du dock et les réglages) : le visage, de plus près ;
-    /// détouré, sur son fond de studio.
-    pub(crate) fn vignette(&self, p: &egui::Painter, centre: Pos2, rayon: f32) {
-        if let Some(fond) = &self.fond {
-            disque(p, centre, rayon, fond.id(), Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
-        }
-        disque(p, centre, rayon, self.texture.id(), de_pres(self.cadre), Color32::WHITE);
-    }
 }
 
-/// Une image du portrait dans `dossier` (`nom` : « portrait », « portrait-yeux-1 »…), sous la première de ses
+// Une image du portrait dans `dossier` (`nom` : « portrait », « portrait-yeux-1 »…), sous la première de ses
 /// [`EXTENSIONS`] qui existe.
 fn trouver(dossier: &Path, nom: &str) -> Option<PathBuf> {
     EXTENSIONS.iter().map(|e| dossier.join(format!("{nom}.{e}"))).find(|c| c.is_file())
@@ -860,9 +756,10 @@ fn poses(dossier: &Path, base: &str, sorte: &str) -> Vec<PathBuf> {
 /// Les fichiers du portrait dans le dossier local : la photo, puis ses poses ; rien sans photo.
 fn fichiers(local: &Path) -> Vec<PathBuf> {
     let Some(photo) = trouver(local, "portrait") else { return Vec::new() };
-    let des_emotions = emotions(local, "portrait")
-        .into_iter()
-        .flat_map(|(e, c)| std::iter::once(c).chain(bouches_d_emotion(local, "portrait", e)));
+    let des_emotions = emotions(local, "portrait").into_iter().flat_map(|(e, c)| {
+        let closes = levres_closes_d_emotion(local, "portrait", e);
+        std::iter::once(c).chain(bouches_d_emotion(local, "portrait", e)).chain(closes)
+    });
     std::iter::once(photo).chain(SORTES.iter().flat_map(|s| poses(local, "portrait", s))).chain(des_emotions).collect()
 }
 
@@ -893,6 +790,10 @@ pub(crate) fn poser(choisie: &Path, local: &Path) -> Result<PathBuf, String> {
             copier(b, local, &format!("portrait-emotion-{}-bouche-{}", e.nom(), k + 1))?;
             n += 1;
         }
+        if let Some(f) = levres_closes_d_emotion(dossier, &base, e) {
+            copier(&f, local, &format!("portrait-emotion-{}-ferme", e.nom()))?;
+            n += 1;
+        }
     }
     let quoi = format!("portrait d'Eve posé : {} (de {}), {n} pose(s)", vers.display(), choisie.display());
     crate::journal::ecrire(&quoi);
@@ -914,7 +815,8 @@ fn retirer(local: &Path) {
     let des_emotions = Emotion::TOUTES.iter().flat_map(|e| {
         let nom = format!("portrait-emotion-{}", e.nom());
         let bouches: Vec<String> = (1..=POSES_MAX).map(|k| format!("{nom}-bouche-{k}")).collect();
-        std::iter::once(nom).chain(bouches)
+        let closes = format!("{nom}-ferme");
+        std::iter::once(nom).chain(bouches).chain([closes])
     });
     for nom in std::iter::once("portrait".to_string()).chain(noms).chain(des_emotions) {
         for e in EXTENSIONS {
@@ -983,108 +885,6 @@ fn de_pres(cadre: Rect) -> Rect {
     let dx = (-r.min.x).max(0.0) - (r.max.x - 1.0).max(0.0);
     let dy = (-r.min.y).max(0.0) - (r.max.y - 1.0).max(0.0);
     r.translate(vec2(dx, dy))
-}
-
-/// Le fond du disque d'un portrait détouré : la lumière d'un studio, claire derrière la tête, qui descend au bleu pâle de
-/// l'ERP sur les bords.
-fn fond_de_studio(ctx: &egui::Context) -> egui::TextureHandle {
-    const N: usize = 64;
-    let clair = Color32::from_rgb(0xF7, 0xFA, 0xFF);
-    let pixels = (0..N * N)
-        .map(|i| {
-            let (x, y) = ((i % N) as f32 / (N - 1) as f32, (i / N) as f32 / (N - 1) as f32);
-            super::melange(clair, erp::FOND_1, (vec2(x - 0.5, y - 0.38).length() / 0.7).clamp(0.0, 1.0))
-        })
-        .collect();
-    ctx.load_texture("fond-du-portrait", egui::ColorImage::new([N, N], pixels), egui::TextureOptions::LINEAR)
-}
-
-/// Une texture peinte en disque, centré sur `centre`, de rayon `rayon` : sa part `uv` (son bord adouci par egui),
-/// multipliée par `teinte` (blanc : telle quelle ; un blanc à moitié transparent : à moitié fondue).
-fn disque(p: &egui::Painter, centre: Pos2, rayon: f32, texture: egui::TextureId, uv: Rect, teinte: Color32) {
-    let carre = Rect::from_center_size(centre, vec2(2.0 * rayon, 2.0 * rayon));
-    p.add(egui::epaint::RectShape::filled(carre, rayon, teinte).with_texture(texture, uv));
-}
-
-/// La personne détourée, en grand : un seul maillage texturé — le carré du disque, du haut de l'image (`haut`, à
-/// l'écran) jusqu'au milieu du cercle, d'où la tête peut sortir, puis la moitié basse du cercle —, son contour adouci
-/// sur un point, d'une frange qui s'efface (egui n'adoucit pas un maillage) ; `image` : sa texture et sa teinte (comme
-/// [`disque`]) ; `vers_uv` : la coordonnée de texture d'un point de l'écran.
-fn medaillon(
-    p: &egui::Painter,
-    centre: Pos2,
-    rayon: f32,
-    haut: f32,
-    (texture, teinte): (egui::TextureId, Color32),
-    vers_uv: impl Fn(Pos2) -> Pos2,
-) {
-    const N: usize = 64;
-    // Le contour, dans le sens des aiguilles d'une montre à l'écran : les deux coins du haut, puis la moitié basse du
-    // cercle, de droite à gauche.
-    let mut contour = vec![pos2(centre.x - rayon, haut), pos2(centre.x + rayon, haut)];
-    contour.extend(
-        (0..=N).map(|k| centre + vec2((PI * k as f32 / N as f32).cos(), (PI * k as f32 / N as f32).sin()) * rayon),
-    );
-    let k = contour.len();
-    let mut m = egui::Mesh::with_texture(texture);
-    let milieu = pos2(centre.x, (haut + centre.y + rayon) / 2.0);
-    m.vertices.push(egui::epaint::Vertex { pos: milieu, uv: vers_uv(milieu), color: teinte });
-    for (i, &point) in contour.iter().enumerate() {
-        // Dehors : la perpendiculaire au contour, à gauche de sa marche (l'écran a son y vers le bas).
-        let marche = (contour[(i + 1) % k] - contour[(i + k - 1) % k]).normalized();
-        let dehors = point + vec2(marche.y, -marche.x);
-        for (q, couleur) in [(point, teinte), (dehors, Color32::TRANSPARENT)] {
-            m.vertices.push(egui::epaint::Vertex { pos: q, uv: vers_uv(q), color: couleur });
-        }
-    }
-    for i in 0..k as u32 {
-        let j = (i + 1) % k as u32;
-        let (dedans, frange, dedans_j, frange_j) = (1 + 2 * i, 2 + 2 * i, 1 + 2 * j, 2 + 2 * j);
-        m.indices.extend([0, dedans, dedans_j, dedans, frange, dedans_j, frange, frange_j, dedans_j]);
-    }
-    p.add(egui::Shape::mesh(m));
-}
-
-/// Le haut du médaillon — du haut de l'image (`haut`, à l'écran) au milieu du disque —, en grille, chaque point déplacé
-/// par la `tete` : penché autour de la base du cou et déplacé, pleinement au-dessus du menton, de moins en moins le long
-/// du cou, plus du tout au milieu du disque, où la grille rejoint le bas, qui ne bouge pas ; la texture prise là où le
-/// point était (le visage suit la tête). `image` et `vers_uv` : comme [`medaillon`].
-fn grille(
-    p: &egui::Painter,
-    centre: Pos2,
-    rayon: f32,
-    haut: f32,
-    (texture, teinte): (egui::TextureId, Color32),
-    vers_uv: impl Fn(Pos2) -> Pos2,
-    tete: Tete,
-) {
-    const COLONNES: u32 = 16;
-    const RANGEES: u32 = 20;
-    let pivot = centre + vec2(0.0, 0.05 * rayon);
-    let (s, c) = tete.roulis.sin_cos();
-    let deplace = |q: Pos2| {
-        let t = ((centre.y - q.y) / (0.15 * rayon)).clamp(0.0, 1.0);
-        let poids = t * t * (3.0 - 2.0 * t);
-        let d = q - pivot;
-        let penche = vec2(d.x * c - d.y * s, d.x * s + d.y * c);
-        q + (penche - d + vec2(tete.x, tete.y) * rayon) * poids
-    };
-    let mut m = egui::Mesh::with_texture(texture);
-    for j in 0..=RANGEES {
-        let y = haut + (centre.y - haut) * j as f32 / RANGEES as f32;
-        for i in 0..=COLONNES {
-            let q = pos2(centre.x - rayon + 2.0 * rayon * i as f32 / COLONNES as f32, y);
-            m.vertices.push(egui::epaint::Vertex { pos: deplace(q), uv: vers_uv(q), color: teinte });
-        }
-    }
-    let largeur = COLONNES + 1;
-    for j in 0..RANGEES {
-        for i in 0..COLONNES {
-            let a = j * largeur + i;
-            m.indices.extend([a, a + 1, a + largeur, a + 1, a + largeur + 1, a + largeur]);
-        }
-    }
-    p.add(egui::Shape::mesh(m));
 }
 
 /// L'anneau d'état autour du portrait (`centre`, `rayon` : ceux du disque), ce que fait Eve comme l'orbe le montrait,
@@ -1200,18 +1000,24 @@ mod essais {
             std::fs::write(local.join(nom), b"x").unwrap();
         }
         std::fs::write(local.join("portrait-bouche-3.png"), b"x").unwrap();
-        // Une émotion et sa bouche ; la bouche d'une émotion sans sa pose ne compte pas.
+        // Une émotion, sa bouche et ses lèvres closes ; sans sa pose, ni sa bouche ni ses lèvres ne comptent.
         for nom in [
             "portrait-emotion-triste.png",
             "portrait-emotion-triste-bouche-1.png",
+            "portrait-emotion-triste-ferme.png",
             "portrait-emotion-joie-bouche-1.png",
+            "portrait-emotion-joie-ferme.png",
         ] {
             std::fs::write(local.join(nom), b"x").unwrap();
         }
         let noms: Vec<String> =
             fichiers(&local).iter().map(|c| c.file_name().unwrap().to_string_lossy().into_owned()).collect();
         let attendus = ["portrait.jpg", "portrait-yeux-1.png", "portrait-yeux-2.png", "portrait-bouche-1.png"];
-        let emotion = ["portrait-emotion-triste.png", "portrait-emotion-triste-bouche-1.png"];
+        let emotion = [
+            "portrait-emotion-triste.png",
+            "portrait-emotion-triste-bouche-1.png",
+            "portrait-emotion-triste-ferme.png",
+        ];
         assert_eq!(noms, [attendus.as_slice(), &emotion].concat());
         // Une image choisie ailleurs, et ses poses à côté d'elle, sous son nom : copiées sous ceux du portrait.
         let ailleurs = local.join("ailleurs");
@@ -1221,7 +1027,7 @@ mod essais {
         assert!(poses(&ailleurs, "eve", "yeux").is_empty());
         let copie = copier(&ailleurs.join("eve-bouche-1.webp"), &local, "portrait-bouche-2").unwrap();
         assert_eq!(copie, local.join("portrait-bouche-2.webp"));
-        assert_eq!(fichiers(&local).len(), 8);
+        assert_eq!(fichiers(&local).len(), 9);
         retirer(&local);
         assert!(fichiers(&local).is_empty());
         assert!(
@@ -1232,45 +1038,16 @@ mod essais {
     }
 
     #[test]
-    fn elle_cligne_et_sa_bouche_suit_sa_voix() {
-        // Le clignement : les yeux se ferment vite, restent fermés, se rouvrent plus lentement ; ouverts hors de lui.
-        let f = [-0.1, 0.0, 0.15, 0.3, 0.4, 0.725, 1.0].map(fermeture);
-        let attendu = [0.0, 0.0, 0.5, 1.0, 1.0, 0.5, 0.0];
-        assert!(f.iter().zip(attendu).all(|(a, b)| (a - b).abs() < 1e-9), "{f:?}");
-        // Trois calques des yeux, de plus en plus fermés : ouverts, aucun ; puis celui d'en dessous et la part du suivant
-        // qui se fond en lui ; fermés, le dernier.
+    fn une_serie_se_fond_d_une_pose_a_l_autre() {
+        // Trois calques, de plus en plus marqués : rien, aucun ; puis celui d'en dessous et la part du suivant qui se fond
+        // en lui ; tout, le dernier.
         let k = [0.0, 0.2, 0.5, 1.0].map(|f| en_poses(f, 3));
         assert_eq!(k.map(|(k, _)| k), [0, 0, 1, 3]);
         assert!((k[1].1 - 0.6).abs() < 1e-6 && (k[2].1 - 0.5).abs() < 1e-6 && k[3].1 == 0.0, "{k:?}");
         assert_eq!(en_poses(1.0, 0), (0, 0.0));
-        // Trois bouches : la photo sous un souffle ; puis la pose d'en dessous et la part de la suivante qui s'y fond ; la
-        // plus grande, pour les plus fortes.
-        let poses = [0.0, 0.5, 0.8, 1.0].map(|o| en_poses(courbe_de_l_ouverture(o), 3));
-        let attendu = [(0, 0.0), (0, 0.7185), (1, 0.996), (3, 0.0)];
-        for ((k, part), (k2, part2)) in poses.into_iter().zip(attendu) {
-            assert!(k == k2 && (part - part2).abs() < 0.01, "{poses:?}");
-        }
-    }
-
-    #[test]
-    fn un_ressort_se_pose_sans_a_coup() {
-        // Vers 1, à la pulsation 10 : il ne dépasse jamais, il y est presque en une demi-seconde ; le même chemin à grands
-        // ou à petits pas.
-        let (mut a, mut b) = (Ressort::default(), Ressort::default());
-        let mut avant = 0.0;
-        for _ in 0..50 {
-            let x = a.vers(1.0, 10.0, 0.01);
-            assert!(x >= avant && x <= 1.0, "{x}");
-            avant = x;
-        }
-        assert!(a.x > 0.95 && a.x < 1.0, "{}", a.x);
-        for _ in 0..5 {
-            b.vers(1.0, 10.0, 0.1);
-        }
-        assert!((a.x - b.x).abs() < 1e-4, "{} et {}", a.x, b.x);
-        // Il part doucement : au premier centième de seconde, moins d'un centième du chemin, là où une approche
-        // exponentielle de même vitesse en aurait déjà fait près d'un dixième.
-        assert!(Ressort::default().vers(1.0, 10.0, 0.01) < 0.01);
+        // L'activité d'Eve, d'après l'état que publie le chef.
+        assert!(Activite::de("parole") == Activite::Parle && Activite::de("transcription") == Activite::Reflechit);
+        assert!(Activite::de("ecoute") == Activite::Ecoute && Activite::de("pret") == Activite::Repos);
     }
 
     #[test]
@@ -1282,22 +1059,22 @@ mod essais {
                 c.pixels[y * 200 + x] = Color32::from_rgb(10, 20, 30);
             }
         }
-        let r = recadrer(c);
+        let (image, part) = recadrer(c);
         let (x0, y0) = (100 - MARGE, 40 - MARGE);
-        assert_eq!(r.image.size, [10 + 2 * MARGE, 10 + 2 * MARGE]);
-        assert_eq!(r.image.pixels[MARGE * r.image.size[0] + MARGE], Color32::from_rgb(10, 20, 30));
-        assert!((r.uv.min.x - x0 as f32 / 200.0).abs() < 1e-6 && (r.uv.min.y - y0 as f32 / 100.0).abs() < 1e-6);
-        assert!((r.uv.width() - (10 + 2 * MARGE) as f32 / 200.0).abs() < 1e-6, "{:?}", r.uv);
+        assert_eq!(image.size, [10 + 2 * MARGE, 10 + 2 * MARGE]);
+        assert_eq!(image.pixels[MARGE * image.size[0] + MARGE], Color32::from_rgb(10, 20, 30));
+        assert_eq!(part, [x0, y0, 110 + MARGE, 50 + MARGE]);
         // Un point de l'image entière se retrouve dans le calque : le coin du carré, au bout de la marge.
-        let couche = Couche { texture: egui::TextureId::default(), uv: r.uv, part: 1.0 };
+        let uv = Rect::from_min_max(pos2(x0 as f32 / 200.0, y0 as f32 / 100.0), pos2(142.0 / 200.0, 82.0 / 100.0));
+        let couche = Couche { texture: egui::TextureId::default(), uv, part: 1.0, geometrie: None };
         let q = couche.dans(pos2(100.0 / 200.0, 40.0 / 100.0));
-        assert!((q.x * r.image.size[0] as f32 - MARGE as f32).abs() < 1e-3, "{q:?}");
+        assert!((q.x * image.size[0] as f32 - MARGE as f32).abs() < 1e-3, "{q:?}");
         // Contre le bord de l'image, la marge s'arrête à lui ; rien de visible : un pixel transparent, sur toute l'image.
         let mut bord = egui::ColorImage::new([50, 50], vec![Color32::TRANSPARENT; 50 * 50]);
         bord.pixels[0] = Color32::WHITE;
-        assert_eq!(recadrer(bord).image.size, [1 + MARGE, 1 + MARGE]);
-        let vide = recadrer(egui::ColorImage::new([50, 50], vec![Color32::TRANSPARENT; 50 * 50]));
-        assert_eq!((vide.image.size, vide.uv), ([1, 1], Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0))));
+        assert_eq!(recadrer(bord).0.size, [1 + MARGE, 1 + MARGE]);
+        let (vide, part) = recadrer(egui::ColorImage::new([50, 50], vec![Color32::TRANSPARENT; 50 * 50]));
+        assert_eq!((vide.size, part), ([1, 1], [0, 0, 50, 50]));
     }
 
     #[test]
@@ -1313,13 +1090,45 @@ mod essais {
             }
         }
         pose.pixels[100 * 120 + 10] = Color32::WHITE;
-        let c = calque(&photo, &pose);
+        let (c, masque) = calque(&photo, &pose, ELARGI);
         let alpha = |x: usize, y: usize| c.pixels[y * 120 + x].a();
         assert_eq!(alpha(55, 35), 255, "le carré, entier");
         assert!(alpha(48, 35) > 0, "et un peu autour, adouci");
         assert_eq!(alpha(10, 100), 0, "le pixel seul ne compte pas");
         assert_eq!(alpha(100, 100), 0, "le reste, transparent");
         assert_eq!(c.pixels[35 * 120 + 55], Color32::from_rgb(60, 40, 30), "la couleur de la pose");
+        // Le masque : la part de la pose qui se voit, pixel par pixel.
+        assert!(masque[35 * 120 + 55] == 1.0 && masque[100 * 120 + 100] == 0.0);
+        assert!((masque[35 * 120 + 48] - f32::from(alpha(48, 35)) / 255.0).abs() < 0.01);
+        // Étroit (les yeux), le masque s'arrête plus près de ce qui change : il ne déborde pas sur les sourcils. Une photo
+        // de 480 sur 480, un carré de 20 qui change en (230, 200) : au-dessus de lui, le masque s'étend deux fois moins.
+        let grande = egui::ColorImage::new([480, 480], vec![gris; 480 * 480]);
+        let mut pose = grande.clone();
+        for y in 200..220 {
+            for x in 230..250 {
+                pose.pixels[y * 480 + x] = Color32::from_rgb(60, 40, 30);
+            }
+        }
+        let portee = |elargi: usize| {
+            let (_, m) = calque(&grande, &pose, elargi);
+            (0..200).find(|&y| m[y * 480 + 240] > 0.0).map_or(0, |y| 200 - y)
+        };
+        let (large, etroite) = (portee(ELARGI), portee(ELARGI_DES_YEUX));
+        assert!(etroite > 0 && 2 * etroite <= large + 2, "{etroite} {large}");
+        // Le flou en boîte : chaque pixel, la moyenne de sa fenêtre, coupée aux bords de l'image.
+        let (l, h, r) = (9, 7, 2);
+        let image: Vec<f32> = (0..l * h).map(|i| ((i * 37) % 11) as f32).collect();
+        let mut floue = image.clone();
+        flou(&mut floue, l, h, r);
+        let image = &image;
+        for y in 0..h {
+            for x in 0..l {
+                let (xs, ys) = (x.saturating_sub(r)..(x + r + 1).min(l), y.saturating_sub(r)..(y + r + 1).min(h));
+                let n = (xs.len() * ys.len()) as f32;
+                let attendu: f32 = ys.flat_map(|yy| xs.clone().map(move |xx| image[yy * l + xx])).sum::<f32>() / n;
+                assert!((floue[y * l + x] - attendu).abs() < 1e-4, "({x}, {y}) : {} {attendu}", floue[y * l + x]);
+            }
+        }
     }
 
     #[test]

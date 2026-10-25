@@ -200,7 +200,8 @@ const INIT_DELAI: Duration = Duration::from_secs(120);
 const DIT_RECEMMENT: Duration = Duration::from_secs(30);
 /// L'état ne se publie pas plus souvent (le texte en cours d'écriture change à chaque mot).
 const PUBLICATION_MIN: Duration = Duration::from_millis(80);
-/// Le temps que le visage d'Eve garde l'émotion d'une réponse.
+/// Le temps, au plus, que le chef publie l'émotion du dernier passage dit, une fois Eve tue : le visage la quitte bien
+/// avant, le temps qu'une personne la garderait (sa tenue, `natif\portrait\emotions.rs`).
 const EMOTION_DUREE: Duration = Duration::from_secs(90);
 /// Le contexte de l'Adjointe reste une heure en cache chez Anthropic (cerveau.rs) : passé ce temps sans un tour, la
 /// question suivante repartirait à froid (13 à 24 s avant le premier mot, mesuré le 2026-10-22, au lieu de 5 à 6 s). Un
@@ -347,6 +348,92 @@ impl Chrono {
             t.poser(Etape::PremiereParole, entre(self.depuis, h));
         }
         t
+    }
+}
+
+/// Les émotions d'une réponse, passage par passage (« [joie] Bonne nouvelle ! [serieuse] Par contre… ») : le visage prend
+/// celle d'un passage quand il se dit, pas quand il s'écrit — la voix a souvent une phrase de retard sur Claude. Le ton
+/// du passage qui s'écrit, et le premier de la réponse ; celui de la dernière phrase donnée à la voix, et son numéro de
+/// parole ; les passages dont l'émotion attend que leur phrase se dise.
+#[derive(Default)]
+struct Passages {
+    ton: Option<parole::Emotion>,
+    premier: Option<parole::Emotion>,
+    ton_dit: Option<parole::Emotion>,
+    derniere: Option<u64>,
+    attente: VecDeque<Passage>,
+}
+
+/// Un passage qui attend de se dire : son émotion se montre quand la phrase d'avant (`avant`, son numéro de parole) a
+/// fini — dans le silence qui sépare les deux phrases, comme on prend son air avant de parler —, ou au plus tard quand la
+/// sienne (`parole`) s'entend.
+struct Passage {
+    avant: u64,
+    parole: u64,
+    emotion: parole::Emotion,
+}
+
+impl Passages {
+    /// Le ton change : le passage qui commence a cette émotion.
+    fn changer(&mut self, e: parole::Emotion) {
+        self.ton = Some(e);
+        self.premier.get_or_insert(e);
+    }
+
+    /// Une phrase de la réponse est donnée à la voix (`parole` : son numéro de parole ; aucun : elle ne se dit pas, en
+    /// sourdine) : l'émotion à montrer tout de suite, si son passage en change — la première phrase dite (le visage la
+    /// prend pendant que le son se prépare, un instant avant qu'il s'entende), ou une phrase qui ne se dit pas (elle
+    /// s'écrit : on la lit) ; celle d'une phrase qui en suit une autre attend son tour ([`Passages::voix`]).
+    fn phrase(&mut self, parole: Option<u64>) -> Option<parole::Emotion> {
+        let nouvelle = self.ton.filter(|&e| self.ton_dit != Some(e));
+        let montrer = match (nouvelle, parole, self.derniere) {
+            (Some(emotion), Some(parole), Some(avant)) => {
+                self.attente.push_back(Passage { avant, parole, emotion });
+                None
+            }
+            (Some(e), _, _) => {
+                self.attente.clear();
+                Some(e)
+            }
+            (None, _, _) => None,
+        };
+        if nouvelle.is_some() {
+            self.ton_dit = nouvelle;
+        }
+        if parole.is_some() {
+            self.derniere = parole;
+        }
+        montrer
+    }
+
+    /// La voix avance — le premier son de la parole `id` s'entend (`entendue`), ou elle a fini (dite, ou en échec) :
+    /// l'émotion du dernier passage qu'elle atteint, à montrer.
+    fn voix(&mut self, id: u64, entendue: bool) -> Option<parole::Emotion> {
+        let mut e = None;
+        while let Some(p) = self.attente.front()
+            && (p.parole <= id || (!entendue && p.avant <= id))
+        {
+            e = Some(p.emotion);
+            self.attente.pop_front();
+        }
+        e
+    }
+
+    /// La voix est coupée : les passages qui attendaient ne se diront pas ; la phrase suivante, s'il en vient une, montre
+    /// le sien tout de suite.
+    fn couper(&mut self) {
+        self.attente.clear();
+        self.derniere = None;
+    }
+
+    /// Aucun passage n'attend.
+    fn vide(&self) -> bool {
+        self.attente.is_empty()
+    }
+
+    /// L'émotion du premier passage de la réponse.
+    fn premier(&self) -> Option<parole::Emotion> {
+        self.premier
     }
 }
 
@@ -502,10 +589,11 @@ pub struct Chef {
     parle: bool,
     parole_id: u64,
     flux: EnFlux,
-    /// Le début du message de Claude qui arrive, retenu tant qu'il peut porter une émotion en tête (« [triste] ») ;
-    /// `None` une fois tranché.
-    tete: Option<String>,
-    /// L'émotion de la dernière réponse, que montre le visage d'Eve, et depuis quand.
+    /// Les émotions de la réponse qui arrive (« [triste] » en tête, « [serieuse] » où le ton change), ôtées du texte
+    /// ([`parole::Tons`]) ; ses passages, chacun avec la sienne, que le visage prend quand il se dit ([`Passages`]).
+    tons: parole::Tons,
+    passages: Passages,
+    /// L'émotion que montre le visage d'Eve — celle du passage qu'elle dit —, et depuis quand.
     emotion: Option<(parole::Emotion, Instant)>,
     dit_dans_le_tour: bool,
     commentaires: HashSet<&'static str>,
@@ -704,7 +792,8 @@ impl Chef {
             parle: false,
             parole_id: 0,
             flux: EnFlux::default(),
-            tete: None,
+            tons: parole::Tons::default(),
+            passages: Passages::default(),
             emotion: None,
             dit_dans_le_tour: false,
             commentaires: HashSet::new(),
@@ -902,7 +991,11 @@ impl Chef {
                 self.voix_liste = liste;
                 self.voix_choisie = choisie;
             }
-            Evt::VoixEntendue(id) => self.suivre_la_voix(id, true),
+            Evt::VoixEntendue(id) => {
+                self.suivre_la_voix(id, true);
+                let e = self.passages.voix(id, true);
+                self.montrer(e);
+            }
             Evt::VoixFinie(id) => {
                 if id == self.parole_id {
                     self.parle = false;
@@ -913,6 +1006,8 @@ impl Chef {
                     self.ecoute_suite = Some(Instant::now() + SUITE_DELAI);
                 }
                 self.suivre_la_voix(id, false);
+                let e = self.passages.voix(id, false);
+                self.montrer(e);
             }
             Evt::VoixErreur(e) => {
                 // La phrase suivante suit son cours (son VoixFinie viendra) : l'état de la parole ne change pas ici.
@@ -2337,8 +2432,20 @@ impl Chef {
         self.en_cours.clear();
         self.flux.nouveau_tour();
         // Le visage quitte l'émotion de la réponse d'avant ; la nouvelle viendra en tête de celle-ci.
-        self.tete = Some(String::new());
+        self.oublier_les_tons();
         self.emotion = None;
+    }
+
+    /// Les émotions de la réponse s'oublient (une autre commence) : celles qu'on retenait, ses passages.
+    fn oublier_les_tons(&mut self) {
+        (self.tons, self.passages) = (parole::Tons::default(), Passages::default());
+    }
+
+    /// Le visage prend l'émotion d'un passage, s'il y en a une.
+    fn montrer(&mut self, e: Option<parole::Emotion>) {
+        if let Some(e) = e {
+            self.emotion = Some((e, Instant::now()));
+        }
     }
 
     /// Envoie le message suivant si l'Adjointe est libre : un seul à la fois.
@@ -2610,44 +2717,42 @@ impl Chef {
                     self.chrono = None;
                     self.commencer_un_tour(Instant::now());
                 }
-                // Le début retenu du message d'avant, s'il n'a jamais tranché, avant que celui-ci ne commence.
-                self.vider_la_tete();
+                // Ce que le message d'avant retenait encore, avant que celui-ci ne commence (une émotion peut l'ouvrir).
+                self.vider_les_tons();
                 self.flux.nouveau_message();
                 if !self.en_cours.trim().is_empty() && !self.en_cours.ends_with("\n\n") {
                     self.en_cours.push_str("\n\n");
                 }
-                self.tete = Some(String::new());
+                self.tons = parole::Tons::default();
             }
             Flux::Texte(t) => {
-                // L'émotion en tête (« [triste] ») : le début retenu jusqu'à ce qu'il tranche, l'émotion ôtée et montrée
-                // par le visage ; elle ne se dit ni ne s'affiche.
-                let t = match self.tete.take() {
-                    None => t,
-                    Some(mut debut) => {
-                        debut.push_str(&t);
-                        match parole::emotion_du_debut(&debut) {
-                            None => {
-                                self.tete = Some(debut);
-                                return;
-                            }
-                            Some((emotion, reste)) => {
-                                if let Some(e) = emotion {
-                                    self.emotion = Some((e, Instant::now()));
-                                }
-                                reste.to_string()
-                            }
-                        }
-                    }
-                };
-                self.texte_de_la_reponse(&t);
+                // Les émotions (« [triste] » en tête, « [serieuse] » où le ton change) s'ôtent : elles ne se disent ni ne
+                // s'affichent ; le visage les prend quand leur passage se dit.
+                for m in self.tons.ajouter(&t) {
+                    self.morceau(m);
+                }
             }
             Flux::FinBloc => {
-                self.vider_la_tete();
+                self.vider_les_tons();
                 for p in self.flux.finir() {
                     self.dire_la_reponse(&p);
                 }
             }
             Flux::DebutTexte | Flux::Outil(_) => {}
+        }
+    }
+
+    /// Un morceau de la réponse : du texte, affiché et dit ; ou l'émotion du passage qui commence — ce qui la précède se
+    /// dit avec le ton d'avant ([`EnFlux::couper`]).
+    fn morceau(&mut self, m: parole::Morceau) {
+        match m {
+            parole::Morceau::Texte(t) => self.texte_de_la_reponse(&t),
+            parole::Morceau::Emotion(e) => {
+                for p in self.flux.couper() {
+                    self.dire_la_reponse(&p);
+                }
+                self.passages.changer(e);
+            }
         }
     }
 
@@ -2665,16 +2770,10 @@ impl Chef {
         }
     }
 
-    /// Le début retenu d'un message qui finit sans avoir tranché : son émotion, s'il n'a qu'elle ; sinon du texte, tel
-    /// quel (un « [ » sans son « ] »).
-    fn vider_la_tete(&mut self) {
-        let Some(debut) = self.tete.take() else { return };
-        let (emotion, reste) = parole::emotion_en_tete(&debut);
-        if let Some(e) = emotion {
-            self.emotion = Some((e, Instant::now()));
-        }
-        if !reste.trim().is_empty() {
-            self.texte_de_la_reponse(reste);
+    /// Ce que retenaient les émotions à la fin d'un bloc : une émotion seule au bout, un « [ » resté ouvert (du texte).
+    fn vider_les_tons(&mut self) {
+        for m in self.tons.finir() {
+            self.morceau(m);
         }
     }
 
@@ -2740,7 +2839,8 @@ impl Chef {
         if std::mem::take(&mut self.prechauffage) {
             self.en_cours.clear();
             self.flux.nouveau_tour();
-            (self.tete, self.emotion) = (None, None);
+            self.oublier_les_tons();
+            self.emotion = None;
             // Un préchauffage en erreur : la personne le sait avant sa première demande (un compte déconnecté, une
             // limite atteinte), au lieu d'une Eve « prête » qui échouera.
             if erreur {
@@ -2769,20 +2869,18 @@ impl Chef {
         }
         let interrompu = std::mem::take(&mut self.interrompu);
         if !interrompu {
-            self.vider_la_tete();
+            self.vider_les_tons();
             for p in self.flux.finir() {
                 self.dire_la_reponse(&p);
             }
         }
-        self.tete = None;
-        // La réponse entière, sans son émotion en tête (sans le flux, c'est ici qu'elle se lit).
-        let (emotion, texte_seul) = parole::emotion_en_tete(&texte);
-        if let Some(e) = emotion
-            && self.emotion.is_none()
-        {
-            self.emotion = Some((e, Instant::now()));
+        // La réponse entière, sans ses émotions (sans le flux, c'est ici qu'elle se lit). Rien n'en a été dit — elle ne
+        // se lit qu'à l'écran, ou d'un coup — et le visage n'a rien pris : l'émotion de tête, tout de suite.
+        let (emotions, texte_seul) = parole::sans_emotions(&texte);
+        if !interrompu && self.emotion.is_none() && self.passages.vide() {
+            self.montrer(self.passages.premier().or(emotions.first().copied()));
         }
-        let texte_seul = texte_seul.to_string();
+        self.tons = parole::Tons::default();
         let a_parle = self.flux.a_parle();
         let ecrit = std::mem::take(&mut self.en_cours);
         let affiche = if ecrit.trim().is_empty() { texte_seul.clone() } else { ecrit };
@@ -2846,10 +2944,13 @@ impl Chef {
         self.suivant();
     }
 
-    /// Une phrase de la réponse : dite, et la première de la demande, chronométrée.
+    /// Une phrase de la réponse : dite, et la première de la demande, chronométrée ; l'émotion de son passage, que le
+    /// visage prend tout de suite, ou quand la phrase d'avant aura fini ([`Passages::phrase`]).
     fn dire_la_reponse(&mut self, phrase: &str) {
         let parole_id = self.dire_phrase(phrase);
         self.premiere_phrase(parole_id);
+        let e = self.passages.phrase(parole_id);
+        self.montrer(e);
     }
 
     /// La première phrase de la réponse est donnée à la voix (`parole_id` : son numéro de parole ; aucun en sourdine).
@@ -3641,12 +3742,13 @@ impl Chef {
         self.dire_a_voix_haute(texte)
     }
 
-    /// Eve se tait tout de suite (ce qui attendait d'être dit est oublié).
+    /// Eve se tait tout de suite (ce qui attendait d'être dit est oublié, et l'émotion de ses passages).
     fn couper(&mut self) {
         self.voix.taire();
         self.parle = false;
         self.oui = None;
         self.fin_parole = Some(Instant::now());
+        self.passages.couper();
     }
 
     /// Un petit son ; le micro en sourdine pendant ce temps, et un peu après (l'écho de la pièce) : Eve ne s'entend pas
@@ -4295,6 +4397,60 @@ fn actions_du_jour() -> String {
 #[cfg(test)]
 mod essais {
     use super::*;
+
+    #[test]
+    fn le_visage_prend_le_ton_du_passage_qui_se_dit() {
+        use parole::Emotion::{Joie, Serieuse, Triste};
+        // « [joie] Bonne nouvelle ! [serieuse] Par contre… » : la première phrase montre la joie dès qu'elle est donnée à
+        // la voix ; la deuxième (le même ton) rien ; la troisième, sérieuse, attend que la deuxième ait fini, ou de
+        // s'entendre elle-même.
+        let mut p = Passages::default();
+        p.changer(Joie);
+        assert_eq!(p.phrase(Some(5)), Some(Joie));
+        assert_eq!(p.phrase(Some(6)), None);
+        p.changer(Serieuse);
+        assert_eq!(p.phrase(Some(8)), None, "elle attend son tour");
+        assert_eq!(p.voix(5, true), None);
+        assert_eq!(p.voix(5, false), None, "la phrase d'avant n'a pas fini");
+        assert_eq!(p.voix(6, true), None);
+        assert_eq!(p.voix(6, false), Some(Serieuse), "la phrase d'avant a fini : dans le silence, avant le son");
+        assert!(p.vide() && p.voix(8, true).is_none(), "montrée une fois");
+        // Sa phrase s'entend sans que la fin de l'autre ait été vue : elle se montre aussi.
+        let mut q = Passages::default();
+        q.changer(Joie);
+        q.phrase(Some(1));
+        q.changer(Triste);
+        q.phrase(Some(2));
+        assert_eq!(q.voix(2, true), Some(Triste));
+        // Deux passages d'avance : la voix qui les atteint d'un coup montre le dernier.
+        let mut r = Passages::default();
+        r.changer(Joie);
+        r.phrase(Some(1));
+        r.changer(Serieuse);
+        r.phrase(Some(2));
+        r.changer(Triste);
+        r.phrase(Some(3));
+        assert_eq!(r.voix(3, true), Some(Triste));
+        // Coupée : ce qui attendait ne se montre pas ; la phrase suivante, tout de suite.
+        let mut s = Passages::default();
+        s.changer(Joie);
+        s.phrase(Some(1));
+        s.changer(Serieuse);
+        s.phrase(Some(2));
+        s.couper();
+        assert_eq!(s.voix(1, false), None);
+        s.changer(Triste);
+        assert_eq!(s.phrase(Some(4)), Some(Triste));
+        // En sourdine (rien ne se dit) : chaque passage, dès qu'il s'écrit ; le premier de la réponse est retenu.
+        let mut t = Passages::default();
+        t.changer(Joie);
+        assert_eq!(t.phrase(None), Some(Joie));
+        t.changer(Serieuse);
+        assert_eq!(t.phrase(None), Some(Serieuse));
+        assert_eq!(t.premier(), Some(Joie));
+        // Sans émotion, rien.
+        assert_eq!(Passages::default().phrase(Some(1)), None);
+    }
 
     #[test]
     fn la_conversation_du_jour_reprend_dans_l_heure() {

@@ -133,6 +133,17 @@ impl EnFlux {
         phrases
     }
 
+    /// La fin d'un passage, au milieu d'une ligne : le ton change ici ([`Tons`]). Ce qui attendait la suite pour se
+    /// dire (une phrase finie dont on ne voyait pas encore le mot d'après, ou une phrase sans point) se dit tout de
+    /// suite, avec le ton d'avant ; la ligne continue.
+    pub fn couper(&mut self) -> Vec<String> {
+        let mut phrases = Vec::new();
+        if self.ligne_vue && !self.ligne_muette {
+            self.extraire(true, &mut phrases);
+        }
+        phrases
+    }
+
     fn extraire(&mut self, fin: bool, phrases: &mut Vec<String>) {
         loop {
             if self.fini || self.trop {
@@ -1142,7 +1153,8 @@ pub fn nettoyer_transcription(texte: &str) -> String {
 }
 
 /// L'émotion d'une réponse, que montre le visage d'Eve (son portrait) : Claude la met en tête de sa réponse, entre
-/// crochets (« [triste] »), et Eve l'ôte avant de la dire et de l'afficher ([`emotion_en_tete`]).
+/// crochets (« [triste] »), et en tête de la phrase où son ton change ; Eve l'ôte avant de la dire et de l'afficher
+/// ([`Tons`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Emotion {
     Joie,
@@ -1183,87 +1195,228 @@ impl Emotion {
     }
 
     /// L'émotion d'un mot, sans égard aux accents ni à la casse, et ses proches (« amusée », « drôle », « sérieux »,
-    /// « tristesse », « joyeuse ») ; `None` : ce n'en est pas une.
+    /// « tristesse », « joyeuse ») ; `None` : ce n'en est pas une — un mot entier seulement : le lien « [Jointure](…) »
+    /// n'est pas de la joie.
     pub fn de(mot: &str) -> Option<Emotion> {
-        let m = normaliser(mot);
-        let m = m.trim();
-        let racines: [(&str, Emotion); 10] = [
-            ("joi", Emotion::Joie),
-            ("joy", Emotion::Joie),
-            ("amus", Emotion::Amusee),
-            ("drol", Emotion::Amusee),
-            ("empath", Emotion::Empathie),
-            ("trist", Emotion::Triste),
-            ("surpri", Emotion::Surprise),
-            ("reflex", Emotion::Reflexion),
-            ("serieu", Emotion::Serieuse),
-            ("neutr", Emotion::Neutre),
+        let formes: [(&[&str], Emotion); 8] = [
+            (&["joie", "joyeuse", "joyeux", "joy"], Emotion::Joie),
+            (&["amusee", "amuse", "amusement", "drole"], Emotion::Amusee),
+            (&["empathie", "empathique"], Emotion::Empathie),
+            (&["triste", "tristesse"], Emotion::Triste),
+            (&["surprise", "surpris"], Emotion::Surprise),
+            (&["reflexion", "reflechie", "pensive"], Emotion::Reflexion),
+            (&["serieuse", "serieux"], Emotion::Serieuse),
+            (&["neutre"], Emotion::Neutre),
         ];
-        (!m.contains(' ')).then_some(())?;
-        racines.iter().find(|(r, _)| m.starts_with(r)).map(|&(_, e)| e)
+        let m = normaliser(mot);
+        formes.iter().find(|(f, _)| f.contains(&m.as_str())).map(|&(_, e)| e)
     }
 }
 
-/// L'émotion en tête d'un texte (« [triste] Je suis désolée… ») et le texte sans elle ; sans émotion reconnue en tête,
-/// le texte tel quel.
-pub fn emotion_en_tete(texte: &str) -> (Option<Emotion>, &str) {
-    let t = texte.trim_start();
-    if let Some(reste) = t.strip_prefix('[')
-        && let Some(fin) = reste.find(']')
-        && let Some(e) = Emotion::de(&reste[..fin])
-    {
-        return (Some(e), reste[fin + 1..].trim_start());
-    }
-    (None, texte)
+/// Un morceau d'une réponse qui arrive, passé par [`Tons`] : du texte, ou l'émotion du passage qui commence là.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Morceau {
+    Texte(String),
+    Emotion(Emotion),
 }
 
-/// Le début d'une réponse qui arrive en morceaux, examiné pour son émotion en tête : `None` tant qu'il peut encore en
-/// être une (rien encore, ou un « [ » sans son « ] » dans ses vingt premiers caractères), et tant que rien ne suit
-/// l'émotion (le texte qui viendra commencera sans blanc) ; puis l'émotion, s'il y en a une, et le texte qui la suit (le
-/// début tel quel, sinon).
-pub fn emotion_du_debut(debut: &str) -> Option<(Option<Emotion>, &str)> {
-    let t = debut.trim_start();
-    if t.is_empty() || (t.starts_with('[') && !t.contains(']') && t.chars().count() <= 20) {
-        return None;
+/// Au-delà de ce nombre de caractères, crochets compris, un « [ » encore ouvert n'ouvre pas une émotion.
+const LONGUEUR_D_UNE_EMOTION: usize = 24;
+
+/// Les émotions d'une réponse qui arrive en morceaux ([`Morceau`]) : Claude met la sienne en tête de sa réponse
+/// (« [triste] Je suis désolée… »), et en tête de la phrase où son ton change (« On commence lundi ! [serieuse] Par
+/// contre… ») ; chacune s'ôte du texte avec les blancs qui la suivent, et vient à sa place, entre ce qui la précède et ce
+/// qui la suit. Une émotion ne se reconnaît qu'en tête — du message, d'une ligne, ou d'une phrase (après « . », « ! »,
+/// « ? », « … » ou « : », et un blanc) —, jamais dans un bloc de code ni devant une adresse (un lien) : « les crochets
+/// [joie] » restent du texte. Un « [ » qui peut en ouvrir une se retient jusqu'à son « ] » et au caractère d'après.
+#[derive(Debug, Default)]
+pub struct Tons {
+    /// Un « [ » qui peut ouvrir une émotion, et ce qui l'a suivi ; fermé sur une émotion, elle attend le caractère
+    /// d'après (« ( » : c'était un lien).
+    retenu: String,
+    fermee: Option<Emotion>,
+    /// Le dernier caractère rendu qui n'est pas un blanc (aucun : le message commence), et s'il est suivi d'un blanc ;
+    /// une ligne commence (rien qu'un blanc depuis le saut de ligne).
+    dernier: Option<char>,
+    blanc: bool,
+    debut_de_ligne: bool,
+    /// Le début de la ligne en cours, ses trois premiers caractères qui ne sont pas des blancs (« ``` » ouvre ou ferme un
+    /// bloc de code), et si l'on est dans un bloc.
+    ligne: String,
+    dans_code: bool,
+    /// Les blancs qui suivent une émotion s'ôtent avec elle — en tête du message, les sauts de ligne aussi.
+    sauter: bool,
+}
+
+impl Tons {
+    /// Du texte arrive : ce qui peut se rendre, texte et émotions, dans l'ordre.
+    pub fn ajouter(&mut self, morceau: &str) -> Vec<Morceau> {
+        let mut sortie = Vec::new();
+        for c in morceau.chars() {
+            self.caractere(c, &mut sortie);
+        }
+        sortie
     }
-    match emotion_en_tete(debut) {
-        (Some(_), "") => None,
-        r => Some(r),
+
+    /// La fin d'un bloc de texte : une émotion qui attendait le caractère d'après se rend, un « [ » resté ouvert aussi
+    /// (du texte).
+    pub fn finir(&mut self) -> Vec<Morceau> {
+        let mut sortie = Vec::new();
+        if let Some(e) = self.fermee.take() {
+            self.retenu.clear();
+            self.sauter = true;
+            sortie.push(Morceau::Emotion(e));
+        }
+        self.rendre_le_retenu(&mut sortie);
+        sortie
     }
+
+    fn caractere(&mut self, c: char, sortie: &mut Vec<Morceau>) {
+        if let Some(e) = self.fermee.take() {
+            if c == '(' {
+                self.rendre_le_retenu(sortie);
+                self.rendre(c, sortie);
+                return;
+            }
+            self.retenu.clear();
+            self.sauter = true;
+            sortie.push(Morceau::Emotion(e));
+        } else if !self.retenu.is_empty() {
+            self.retenu.push(c);
+            if c == ']' {
+                let dedans = &self.retenu[1..self.retenu.len() - 1];
+                self.fermee = Emotion::de(dedans);
+                if self.fermee.is_none() {
+                    self.rendre_le_retenu(sortie);
+                }
+            } else if c == '\n' || self.retenu.chars().count() >= LONGUEUR_D_UNE_EMOTION {
+                self.rendre_le_retenu(sortie);
+            }
+            return;
+        }
+        if self.sauter {
+            if c == ' ' || c == '\t' || (self.dernier.is_none() && (c == '\n' || c == '\r')) {
+                return;
+            }
+            self.sauter = false;
+        }
+        if c == '[' && !self.dans_code && self.en_tete() {
+            self.retenu.push(c);
+        } else {
+            self.rendre(c, sortie);
+        }
+    }
+
+    /// Un « [ » peut-il ouvrir une émotion ici : en tête du message, d'une ligne, ou d'une phrase ?
+    fn en_tete(&self) -> bool {
+        self.dernier.is_none()
+            || self.debut_de_ligne
+            || (self.blanc && matches!(self.dernier, Some('.' | '!' | '?' | '…' | ':')))
+    }
+
+    /// Ce qui était retenu se rend tel quel : du texte.
+    fn rendre_le_retenu(&mut self, sortie: &mut Vec<Morceau>) {
+        self.fermee = None;
+        for c in std::mem::take(&mut self.retenu).chars() {
+            self.rendre(c, sortie);
+        }
+    }
+
+    /// Un caractère de texte, rendu ; ce qu'il dit de la suite (un blanc, une ligne qui commence, un bloc de code).
+    fn rendre(&mut self, c: char, sortie: &mut Vec<Morceau>) {
+        match sortie.last_mut() {
+            Some(Morceau::Texte(t)) => t.push(c),
+            _ => sortie.push(Morceau::Texte(c.to_string())),
+        }
+        if c == '\n' {
+            if self.ligne == "```" {
+                self.dans_code = !self.dans_code;
+            }
+            self.ligne.clear();
+            (self.debut_de_ligne, self.blanc) = (true, true);
+        } else if c.is_whitespace() {
+            self.blanc = true;
+        } else {
+            if self.ligne.chars().count() < 3 {
+                self.ligne.push(c);
+            }
+            (self.dernier, self.blanc, self.debut_de_ligne) = (Some(c), false, false);
+        }
+    }
+}
+
+/// Un texte entier sans ses émotions ([`Tons`]) : elles, dans l'ordre, et lui.
+pub fn sans_emotions(texte: &str) -> (Vec<Emotion>, String) {
+    let mut tons = Tons::default();
+    let mut morceaux = tons.ajouter(texte);
+    morceaux.extend(tons.finir());
+    let (mut emotions, mut reste) = (Vec::new(), String::new());
+    for m in morceaux {
+        match m {
+            Morceau::Texte(t) => reste.push_str(&t),
+            Morceau::Emotion(e) => emotions.push(e),
+        }
+    }
+    (emotions, reste)
 }
 
 /// La forme de la bouche sur une syllabe (d'après sa voyelle), pour le portrait d'Eve : ouverte (a, è, an, oi), ronde
-/// (o, ou, u, eu, on ; le « e » d'un mot d'une syllabe), étirée (i, é, ai, in, un) ; fermée, les lèvres closes, avant
-/// m, b, p.
+/// (o, ou, u, eu, on ; le « e » d'un mot d'une syllabe), étirée (i, é, ai, in, un) ; et sur une consonne des lèvres :
+/// fermée, les lèvres closes (m, b, p), ou la lèvre du bas sous les dents du haut (f, v).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Forme {
     Ouverte,
     Ronde,
     Etiree,
     Fermee,
+    Dents,
 }
 
-/// Une syllabe telle que la bouche la dit : la forme de sa voyelle, et si les lèvres se ferment avant elle (un m, un b
-/// ou un p la précède).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Une syllabe telle que la bouche la dit : la forme de sa voyelle et l'ouverture de la mâchoire qu'elle demande (de 0
+/// à 1, dans la série de bouches de sa forme : grande sur un a, petite sur un i ou un ou) ; ce que font les lèvres sur
+/// la consonne qui l'ouvre (`avant` : closes sur m, b, p, sous les dents sur f, v) et sur celle qui finit son mot sans
+/// ouvrir de syllabe (`apres` : « Sam », « comme », « neuf ») ; si une pause la suit (une ponctuation avant le mot
+/// suivant).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Syllabe {
     pub forme: Forme,
-    pub fermee_avant: bool,
+    pub machoire: f32,
+    pub avant: Option<Forme>,
+    pub apres: Option<Forme>,
+    pub pause_apres: bool,
 }
 
 /// Les voyelles du français écrit.
 const VOYELLES: &str = "aàâäeéèêëiîïoôöuùûüyœæ";
 
-/// Les syllabes d'un texte, telles que la bouche les dit : chaque groupe de voyelles d'un mot en est une, sa forme
-/// d'après ses lettres ([`forme_de`]) ; le « e » de fin d'un mot de plusieurs syllabes (« -e », « -es ») ne se dit pas,
-/// ni le « u » de « qu », ni celui de « gu » devant e ou i ; les lèvres se ferment avant une syllabe qu'un m, un b ou un
-/// p précède (« pr », « mp » compris ; pas « ph »). Une approximation du français écrit, pour la bouche et non pour
-/// l'oreille : un chiffre ou un sigle n'y a pas de syllabe, et la piste de la voix répartit ce qui manque.
+/// Ce qui, entre deux mots, fait une pause dans la voix.
+const PONCTUATION: [char; 10] = ['.', ',', ';', ':', '!', '?', '…', '—', '(', ')'];
+
+/// Les syllabes d'un texte, telles que la bouche les dit : chaque groupe de voyelles d'un mot en est une, sa forme et
+/// sa mâchoire d'après ses lettres ([`forme_de`]) ; le « e » de fin d'un mot de plusieurs syllabes (« -e », « -es », et
+/// le « -ent » d'un verbe après « ils » ou « elles ») ne se dit pas, ni le « u » de « qu », ni celui de « gu » devant e
+/// ou i. Les lèvres, sur la consonne qui ouvre une syllabe ([`levres`] : « pr », « mp », « fl » compris) et sur celle
+/// qui finit la dernière d'un mot (pas le m d'une nasale : « nom », « faim »). Une approximation du français écrit,
+/// pour la bouche et non pour l'oreille : un chiffre ou un sigle n'y a pas de syllabe, et la piste de la voix répartit
+/// ce qui manque.
 pub fn syllabes(texte: &str) -> Vec<Syllabe> {
     let voyelle = |c: char| VOYELLES.contains(c);
-    let mut sortie = Vec::new();
-    for mot in texte.split(|c: char| !c.is_alphabetic()).filter(|m| !m.is_empty()) {
+    let mut sortie: Vec<Syllabe> = Vec::new();
+    let mut reste = texte;
+    let mut precedent = String::new();
+    while let Some(debut_du_mot) = reste.find(char::is_alphabetic) {
+        let apres = &reste[debut_du_mot..];
+        let fin_du_mot = apres.find(|c: char| !c.is_alphabetic()).unwrap_or(apres.len());
+        let (mot, entre) = apres.split_at(fin_du_mot);
+        let prochain = entre.find(char::is_alphabetic).unwrap_or(entre.len());
+        reste = &entre[prochain..];
         let l: Vec<char> = mot.to_lowercase().chars().collect();
+        // Un verbe au pluriel — « ils tombent », « plongent-ils » — ne dit pas son « -ent ».
+        let suivant = reste.chars().take_while(|c| c.is_alphabetic()).collect::<String>().to_lowercase();
+        let pronom = |m: &str| m == "ils" || m == "elles";
+        let verbe =
+            l.ends_with(&['e', 'n', 't']) && (pronom(&precedent) || (&entre[..prochain] == "-" && pronom(&suivant)));
+        precedent = l.iter().collect();
         // Les groupes de voyelles du mot : leur début et leur fin (exclue).
         let mut groupes = Vec::new();
         let mut i = 0;
@@ -1286,93 +1439,190 @@ pub fn syllabes(texte: &str) -> Vec<Syllabe> {
         }
         let n = groupes.len();
         let mut precedente = 0;
+        let mut derniere = None;
         for (k, &(debut, fin)) in groupes.iter().enumerate() {
             let consonnes = &l[precedente..debut];
-            precedente = fin;
             let g: String = l[debut..fin].iter().collect();
             let suite = &l[fin..];
-            if g == "e" && k + 1 == n && n > 1 && matches!(suite, [] | ['s']) {
+            if g == "e" && k + 1 == n && n > 1 && (matches!(suite, [] | ['s']) || (verbe && suite == ['n', 't'])) {
                 continue;
             }
+            precedente = fin;
             // Nasale : un n ou un m, puis une consonne ou la fin du mot (ni « nn », ni « mm », ni une voyelle).
             let nasale = matches!(suite.first(), Some('n' | 'm'))
                 && suite.get(1).is_none_or(|&c| !voyelle(c) && c != 'n' && c != 'm');
-            let fermee_avant = consonnes
-                .iter()
-                .enumerate()
-                .any(|(j, &c)| matches!(c, 'm' | 'b' | 'p') && consonnes.get(j + 1) != Some(&'h'));
-            sortie.push(Syllabe { forme: forme_de(&g, nasale, suite, n), fermee_avant });
+            let (forme, machoire) = forme_de(&g, nasale, suite, n);
+            sortie.push(Syllabe { forme, machoire, avant: levres(consonnes), apres: None, pause_apres: false });
+            derniere = Some((g, fin));
+        }
+        // Après la dernière syllabe dite du mot : ce qui le finit (ses consonnes, et le « e » muet qui ne se dit pas).
+        if let (Some((g, fin)), Some(s)) = (derniere, sortie.last_mut()) {
+            let finale: Vec<char> = l[fin..].iter().copied().filter(|&c| !voyelle(c)).collect();
+            // Le m d'une nasale ne ferme pas les lèvres : « nom », « faim », « thym ».
+            let nasale = finale == ['m'] && ["o", "ai", "ei", "i", "y"].contains(&g.as_str());
+            s.apres = levres(&finale).filter(|_| !nasale);
+        }
+        // Une ponctuation suivie d'un blanc, ou de la fin : pas la virgule de « 1,5 ».
+        let separateur = &entre[..prochain];
+        let pause = separateur.char_indices().any(|(j, c)| {
+            PONCTUATION.contains(&c) && separateur[j + c.len_utf8()..].chars().next().is_none_or(char::is_whitespace)
+        });
+        if pause && let Some(s) = sortie.last_mut() {
+            s.pause_apres = true;
         }
     }
     sortie
 }
 
-/// La forme de la bouche pour un groupe de voyelles `g` : `nasale`, suivi d'un n ou d'un m qui se dit avec lui ;
-/// `suite`, les lettres qui le suivent dans le mot ; `n`, les syllabes du mot.
-fn forme_de(g: &str, nasale: bool, suite: &[char], n: usize) -> Forme {
+/// Ce que font les lèvres sur un groupe de consonnes : closes sur m, b, p ; la lèvre du bas sous les dents du haut sur
+/// f, v et « ph » ; la dernière des lèvres l'emporte (« mpl », « fr ») ; rien sinon.
+fn levres(consonnes: &[char]) -> Option<Forme> {
+    let suivie_d_un_h = |j: usize| consonnes.get(j + 1) == Some(&'h');
+    consonnes
+        .iter()
+        .enumerate()
+        .filter_map(|(j, &c)| match c {
+            'p' if suivie_d_un_h(j) => Some(Forme::Dents),
+            'm' | 'b' | 'p' => Some(Forme::Fermee),
+            'f' | 'v' => Some(Forme::Dents),
+            _ => None,
+        })
+        .last()
+}
+
+/// La forme de la bouche et l'ouverture de la mâchoire (de 0 à 1, dans la série de bouches de cette forme) pour un
+/// groupe de voyelles `g` : `nasale`, suivi d'un n ou d'un m qui se dit avec lui ; `suite`, les lettres qui le suivent
+/// dans le mot ; `n`, les syllabes du mot. La mâchoire, comme chez une vraie personne : grande sur un a, moyenne sur un
+/// è, un o ou une nasale, petite sur un i, un ou ou un u. Réglée au film du portrait : un a fort ouvre la bouche aux
+/// trois quarts de sa série, pas plus (tout en grand, elle criait ; à 0,7, elle bougeait à peine).
+fn forme_de(g: &str, nasale: bool, suite: &[char], n: usize) -> (Forme, f32) {
     use Forme::{Etiree, Ouverte, Ronde};
     let commence = |prefixes: &[&str]| prefixes.iter().any(|p| g.starts_with(p));
     if ["ou", "oû", "où"].iter().any(|p| g.contains(p)) {
-        Ronde
-    } else if commence(&["oi", "oî"]) {
-        Ouverte
-    } else if g.contains("au") || g.contains("eu") || commence(&["o", "ô", "ö", "œ"]) {
-        Ronde
+        (Ronde, 0.4)
+    } else if commence(&["oi", "oî", "oy"]) {
+        (Ouverte, 0.85)
+    } else if g.contains("eu") || commence(&["œ"]) {
+        (Ronde, 0.55)
+    } else if g.contains("au") || commence(&["o", "ô", "ö"]) {
+        // « on », « om » : une nasale, un peu moins ouverte.
+        (Ronde, if nasale { 0.65 } else { 0.75 })
     } else if commence(&["ui"]) {
-        Etiree
+        (Etiree, 0.5)
     } else if commence(&["u", "û", "ü", "ù"]) {
         // « un » : une nasale étirée.
-        if nasale { Etiree } else { Ronde }
-    } else if commence(&["ai", "aî", "ei", "é", "i", "î", "ï", "y"]) {
-        Etiree
+        if nasale { (Etiree, 0.75) } else { (Ronde, 0.4) }
+    } else if commence(&["ai", "aî", "ei", "é"]) {
+        (Etiree, 0.75)
+    } else if commence(&["i", "î", "ï", "y"]) {
+        // « in », « im » : une nasale, plus ouverte qu'un i.
+        (Etiree, if nasale { 0.75 } else { 0.5 })
     } else if commence(&["e"]) {
         // « en », « em » : ouverte ; « -er », « -ez », « -et » en fin de mot, « les », « des » : é ; le « e » d'un mot
         // d'une syllabe (« le », « de », « que ») : un peu arrondi ; sinon (« elle », « merci ») : è.
         match suite {
-            _ if nasale => Ouverte,
-            ['r'] | ['z'] | ['t'] => Etiree,
-            ['s'] if n == 1 => Etiree,
-            [] if n == 1 => Ronde,
-            _ => Ouverte,
+            _ if nasale => (Ouverte, 0.7),
+            ['r'] | ['z'] | ['t'] => (Etiree, 0.75),
+            ['s'] if n == 1 => (Etiree, 0.75),
+            [] if n == 1 => (Ronde, 0.5),
+            _ => (Ouverte, 0.7),
         }
+    } else if commence(&["a", "à", "â", "ä", "æ"]) {
+        // « an », « am » : une nasale, un peu moins ouverte.
+        (Ouverte, if nasale { 0.7 } else { 0.85 })
     } else {
-        Ouverte
+        // è, ê, ë.
+        (Ouverte, 0.7)
     }
 }
 
 #[cfg(test)]
 mod essais {
     #[test]
-    fn l_emotion_en_tete_s_ote() {
-        use super::{Emotion, emotion_du_debut, emotion_en_tete};
-        assert_eq!(emotion_en_tete("[triste] Je suis désolée."), (Some(Emotion::Triste), "Je suis désolée."));
-        assert_eq!(emotion_en_tete("  [Amusée]Ha ! Bonne blague."), (Some(Emotion::Amusee), "Ha ! Bonne blague."));
-        assert_eq!(emotion_en_tete("[sérieux] Parlons du budget."), (Some(Emotion::Serieuse), "Parlons du budget."));
-        // Sans émotion reconnue, le texte tel quel : un lien, une note entre crochets, une émotion qui n'est pas en tête.
-        let lien = "[Voir le plan](https://exemple.ca) ici";
-        assert_eq!(emotion_en_tete(lien), (None, lien));
-        assert_eq!(emotion_en_tete("Bonjour [joie]"), (None, "Bonjour [joie]"));
-        // En morceaux : on attend le « ] » ; un « [ » trop long n'ouvre pas une émotion.
-        assert_eq!(emotion_du_debut(""), None);
-        assert_eq!(emotion_du_debut("[tri"), None);
-        // L'émotion seule attend son texte : celui qui vient en morceaux après elle ne commence pas par un blanc.
-        assert_eq!(emotion_du_debut("[triste]"), None);
-        assert_eq!(emotion_du_debut("[triste] \n"), None);
-        assert_eq!(emotion_du_debut("[triste] Je"), Some((Some(Emotion::Triste), "Je")));
-        assert_eq!(emotion_du_debut("Bonjour"), Some((None, "Bonjour")));
-        let long = "[Ceci est une note bien trop longue";
-        assert_eq!(emotion_du_debut(long), Some((None, long)));
-        // Chaque émotion se relit par son nom.
+    fn les_emotions_s_otent_a_leur_place() {
+        use super::{Emotion, Morceau, Tons, sans_emotions};
+        use Emotion::{Amusee, Joie, Serieuse, Triste};
+        let ote = |t: &str| sans_emotions(t);
+        // En tête : ôtée avec ses blancs (et ses sauts de ligne), quelle que soit sa graphie.
+        assert_eq!(ote("[triste] Je suis désolée."), (vec![Triste], "Je suis désolée.".into()));
+        assert_eq!(ote("  [Amusée]Ha ! Bonne blague."), (vec![Amusee], "  Ha ! Bonne blague.".into()));
+        assert_eq!(ote("[sérieux]\n\nParlons du budget."), (vec![Serieuse], "Parlons du budget.".into()));
+        // En tête d'une phrase, d'une ligne : le ton change là.
+        let deux = "[joie] Le client a accepté ! [serieuse] Par contre, l'acompte est dû vendredi.";
+        let attendu = "Le client a accepté ! Par contre, l'acompte est dû vendredi.";
+        assert_eq!(ote(deux), (vec![Joie, Serieuse], attendu.into()));
+        assert_eq!(ote("C'est fait.\n[joie] Bravo."), (vec![Joie], "C'est fait.\nBravo.".into()));
+        // Ailleurs, du texte : au milieu d'une phrase, dans un bloc de code, un lien, une note, un mot qui n'en est pas
+        // une, un « [ » trop long.
+        for t in [
+            "Les crochets [joie] servent au visage.",
+            "Voici :\n```\n[joie]\n```\nFin.",
+            "[Voir le plan](https://exemple.ca) ici",
+            "[Joie](https://exemple.ca/joie) est un lien.",
+            "Fait. [note] Rien.",
+            "[Jointure] du toit.",
+            "[Ceci est une note bien trop longue pour une émotion] oui",
+        ] {
+            assert_eq!(ote(t), (vec![], t.into()), "{t:?}");
+        }
+        // En morceaux, coupé n'importe où : les mêmes morceaux, dans le même ordre ; une émotion seule au bout du message
+        // se rend à sa fin.
+        let texte = "[joie] Bonne nouvelle ! [serieuse] Par contre… [lien](x) et [amusee] pas ici.\n[triste] Hélas.";
+        for pas in [1, 2, 3, 5, 1000] {
+            let mut tons = Tons::default();
+            let mut morceaux = Vec::new();
+            for bout in texte.chars().collect::<Vec<_>>().chunks(pas) {
+                morceaux.extend(tons.ajouter(&bout.iter().collect::<String>()));
+            }
+            morceaux.extend(tons.finir());
+            let (mut emotions, mut reste) = (Vec::new(), String::new());
+            for m in morceaux {
+                match m {
+                    Morceau::Texte(t) => reste.push_str(&t),
+                    Morceau::Emotion(e) => {
+                        emotions.push((e, reste.chars().count()));
+                    }
+                }
+            }
+            assert_eq!(reste, "Bonne nouvelle ! Par contre… [lien](x) et [amusee] pas ici.\nHélas.", "pas {pas}");
+            assert_eq!(emotions, [(Joie, 0), (Serieuse, 17), (Triste, 60)], "pas {pas}");
+        }
+        let mut seule = Tons::default();
+        assert!(seule.ajouter("[joie]").is_empty(), "elle attend le caractère d'après (un lien ?)");
+        assert_eq!(seule.finir(), [Morceau::Emotion(Joie)]);
+        // Chaque émotion se relit par son nom ; un mot qui n'en commence qu'une, non.
         for e in Emotion::TOUTES {
             assert_eq!(Emotion::de(e.nom()), Some(e));
         }
+        assert_eq!((Emotion::de("Tristan"), Emotion::de("drôle")), (None, Some(Amusee)));
+    }
+
+    #[test]
+    fn le_ton_qui_change_coupe_la_phrase() {
+        // La phrase finie attend le mot d'après pour se dire ; le ton qui change la dit tout de suite, avec le sien.
+        let mut f = EnFlux::default();
+        assert!(f.ajouter("Le client a accepté. ").is_empty());
+        assert_eq!(f.couper(), ["Le client a accepté.".to_string()]);
+        assert!(f.ajouter("Par contre, l'acompte").is_empty());
+        assert_eq!(f.finir(), ["Par contre, l'acompte.".to_string()]);
+        // Une phrase sans point, coupée : un point pour la pause ; rien qui attend, rien.
+        let mut g = EnFlux::default();
+        assert!(g.ajouter("Bonne nouvelle").is_empty());
+        assert_eq!(g.couper(), ["Bonne nouvelle.".to_string()]);
+        assert!(g.couper().is_empty());
+        // Dans un tableau, rien ne se dit.
+        let mut h = EnFlux::default();
+        assert!(h.ajouter("| a | b |").is_empty());
+        assert!(h.couper().is_empty());
     }
 
     #[test]
     fn la_bouche_lit_les_syllabes() {
         use super::{Forme, syllabes};
         use Forme::{Etiree as I, Ouverte as A, Ronde as O};
-        let formes = |t: &str| syllabes(t).iter().map(|s| (s.forme, s.fermee_avant)).collect::<Vec<_>>();
+        // La forme de chaque syllabe, et si les lèvres se ferment avant elle.
+        let formes =
+            |t: &str| syllabes(t).iter().map(|s| (s.forme, s.avant == Some(Forme::Fermee))).collect::<Vec<_>>();
         assert_eq!(formes("Bonjour"), [(O, true), (O, false)]);
         assert_eq!(formes("merci"), [(A, true), (I, false)]);
         assert_eq!(formes("papa"), [(A, true), (A, true)]);
@@ -1393,6 +1643,45 @@ mod essais {
         // Un chiffre n'a pas de syllabe ici.
         assert_eq!(formes("Voici 240 $."), [(A, false), (I, false)]);
         assert!(syllabes("240 $ — !").is_empty());
+        // « oy » se dit comme « oi » : « envoyer ».
+        assert_eq!(formes("envoyer"), [(A, false), (A, false)]);
+        // La lèvre du bas sous les dents : f, v, « ph », avant la syllabe ou à la fin du mot ; la dernière consonne des
+        // lèvres l'emporte (« mpr » : le p).
+        let levres = |t: &str| syllabes(t).iter().map(|s| (s.avant, s.apres)).collect::<Vec<_>>();
+        let (f, d) = (Some(Forme::Fermee), Some(Forme::Dents));
+        assert_eq!(levres("vous fleur"), [(d, None), (d, None)]);
+        assert_eq!(levres("téléphone"), [(None, None), (None, None), (d, None)]);
+        assert_eq!(levres("neuf"), [(None, d)]);
+        assert_eq!(levres("comprend"), [(None, None), (f, None)]);
+    }
+
+    #[test]
+    fn la_bouche_lit_la_machoire_les_fins_de_mots_et_les_pauses() {
+        use super::{Forme, syllabes};
+        // La mâchoire de chaque voyelle : grande sur le a, moyenne sur le o et la nasale, petite sur le i et le ou.
+        let machoires = |t: &str| syllabes(t).iter().map(|s| s.machoire).collect::<Vec<_>>();
+        assert_eq!(machoires("la"), [0.85]);
+        assert_eq!(machoires("Paris"), [0.85, 0.5]);
+        assert_eq!(machoires("beau bon tout"), [0.75, 0.65, 0.4]);
+        assert_eq!(machoires("été dans"), [0.75, 0.75, 0.7]);
+        // Les lèvres se ferment après la dernière syllabe d'un mot qu'un m, un b ou un p finit (le « e » muet compris),
+        // pas après une nasale.
+        let apres = |t: &str| syllabes(t).iter().map(|s| s.apres == Some(Forme::Fermee)).collect::<Vec<_>>();
+        assert_eq!(apres("Sam"), [true]);
+        assert_eq!(apres("comme"), [true]);
+        assert_eq!(apres("type groupe"), [true, true]);
+        assert_eq!(apres("problème"), [false, true]);
+        assert_eq!(apres("nom faim"), [false, false]);
+        assert_eq!(apres("tombent"), [false, false]);
+        // Le « -ent » d'un verbe au pluriel ne se dit pas : le b de « tombent » finit « tom ».
+        assert_eq!(apres("ils tombent"), [false, true]);
+        assert_eq!(syllabes("plongent-ils dans").len(), 3);
+        assert_eq!(syllabes("le parent").len(), 3);
+        // Une pause après la ponctuation suivie d'un blanc, ou de la fin : pas la virgule d'un nombre.
+        let pauses = |t: &str| syllabes(t).iter().map(|s| s.pause_apres).collect::<Vec<_>>();
+        assert_eq!(pauses("Bonjour Sam. Je suis là"), [false, false, true, false, false, false]);
+        assert_eq!(pauses("Il reste 1,5 kilo, merci !"), [false, false, false, true, false, true]);
+        assert_eq!(pauses("Oui — d'accord."), [true, false, true]);
     }
 
     #[test]

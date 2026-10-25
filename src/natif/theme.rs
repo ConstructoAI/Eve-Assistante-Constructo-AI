@@ -1126,19 +1126,18 @@ impl Fenetre {
         // sinon.
         let parle = etat == "parole";
         let niveau = if parle {
-            crate::voix::bouche_du_moment().map_or(0.0, |(n, _)| n)
+            crate::voix::bouche_du_moment().map_or(0.0, |a| a.niveau)
         } else {
             self.etat.get("niveau").and_then(Value::as_f64).unwrap_or(0.0) as f32
         };
         let temps = ui.input(|i| i.time);
         let vivant = animations(ui.ctx());
-        // L'émotion de sa réponse ; pendant qu'elle réfléchit, son air pensif.
-        let emotion = if etat == "reflexion" {
-            Some(Emotion::Reflexion)
-        } else {
-            self.etat.get("emotion").and_then(Value::as_str).and_then(Emotion::de)
-        };
-        let pose = self.portrait.pose_du_moment(temps, parle, vivant, emotion).unwrap_or_default();
+        // L'émotion de sa réponse, et ce qu'elle fait (pendant qu'elle réfléchit, la mimique lui donne son air pensif).
+        let emotion = self.etat.get("emotion").and_then(Value::as_str).and_then(Emotion::de);
+        let activite = portrait::Activite::de(&etat);
+        // La voix de la personne, que le micro entend : en l'écoutant, Eve hoche à ses pauses.
+        self.portrait.entendre(if parle { 0.0 } else { niveau });
+        let pose = self.portrait.pose_du_moment(temps, activite, vivant, emotion).unwrap_or_default();
         let (centre, rayon) = (rect.center(), rect.width().min(rect.height()) * 0.4);
         let couleur = couleur_de_l_anneau(&etat, ui.visuals().dark_mode);
         let p = ui.painter();

@@ -6874,19 +6874,28 @@ impl eframe::App for EssaiDesProfils {
 
 // ---- Le portrait d'Eve et ses poses -------------------------------------------------------------------------------
 
-/// `eve --essai-portrait <dossier> [--captures DOSSIER] [--film DOSSIER [--voix DOSSIER]]` : le portrait d'Eve posé dans
-/// `dossier` (un dossier local : `portrait.png` et ses poses), dans toutes ses poses côte à côte — la photo, chaque
-/// clignement, chaque regard, chaque bouche, chaque émotion, des mélanges —, en grand comme la bannière les montre, sur
-/// son bleu : on y juge les calques et leurs bords. `--captures` en fait une image (`portrait.png`), puis ferme la
-/// fenêtre. `--film` le montre vivant, seul, dans un petit scénario ([`PHRASES_DU_FILM`]), et enregistre chacune de ses
-/// images à la cadence de l'écran (une vidéo s'en fait) ; `--voix` y prend des phrases dites (`phrase-1.wav`… : leur
-/// texte est celui du scénario), à la place d'une voix inventée.
+/// `eve --essai-portrait <dossier> [--captures DOSSIER] [--seules MOTS] [--rayon R] [--film DOSSIER [--voix DOSSIER]
+/// [--conversation | --emotions]]` : le portrait d'Eve posé dans `dossier` (un dossier local : `portrait.png` et ses
+/// poses), dans toutes ses poses côte à côte — la photo, chaque clignement, chaque regard, chaque bouche, chaque
+/// émotion, des mélanges —, en grand comme la bannière les montre, sur son bleu : on y juge les calques et leurs bords.
+/// `--seules` n'en garde que celles dont le nom porte l'un des mots dits (séparés par des virgules :
+/// « penchée,mi-chemin »), plus grandes ; `--rayon` donne à chaque disque ce rayon (en points : 65, celui de la
+/// bannière). `--captures` en fait une image (`portrait.png`, quand ses textures ont été refaites à sa taille) et une
+/// de sa toute première (`portrait-premiere.png`, avec les textures entières), puis ferme la fenêtre. `--film` le
+/// montre vivant, seul, dans un petit scénario ([`PHRASES_DU_FILM`] ; avec `--emotions`, [`PHRASES_DES_EMOTIONS`]), et
+/// enregistre chacune de ses images à la cadence de l'écran (une vidéo s'en fait) ; `--voix` y prend des phrases dites
+/// (`phrase-1.wav`… : leur texte est celui du scénario), à la place d'une voix inventée ; `--conversation` la fait
+/// d'abord écouter, puis réfléchir.
 pub fn portrait(args: &[String]) -> i32 {
     let valeur = |nom: &str| args.iter().position(|a| a == nom).and_then(|i| args.get(i + 1)).cloned();
     let captures = valeur("--captures").map(std::path::PathBuf::from);
     let film = valeur("--film").map(std::path::PathBuf::from);
     let voix = valeur("--voix").map(std::path::PathBuf::from);
-    let a_valeur = ["--captures", "--film", "--voix"];
+    let emotions = args.iter().any(|a| a == "--emotions");
+    let conversation = args.iter().any(|a| a == "--conversation");
+    let seules: Option<Vec<String>> = valeur("--seules").map(|m| m.split(',').map(|m| m.trim().to_string()).collect());
+    let rayon = valeur("--rayon").and_then(|r| r.parse::<f32>().ok()).filter(|r| *r > 4.0);
+    let a_valeur = ["--captures", "--film", "--voix", "--seules", "--rayon"];
     let dossier = args
         .iter()
         .enumerate()
@@ -6894,7 +6903,8 @@ pub fn portrait(args: &[String]) -> i32 {
         .map(|(_, a)| std::path::PathBuf::from(a));
     let Some(dossier) = dossier else {
         eprintln!(
-            "eve --essai-portrait <dossier> [--captures DOSSIER] [--film DOSSIER [--voix DOSSIER]] : le dossier local"
+            "eve --essai-portrait <dossier> [--captures DOSSIER] [--seules MOTS] [--rayon R] [--film DOSSIER [--voix \
+             DOSSIER] [--conversation | --emotions]] : le dossier local"
         );
         return 2;
     };
@@ -6905,7 +6915,9 @@ pub fn portrait(args: &[String]) -> i32 {
         }
     }
     if let Some(film) = film {
-        return filmer_le_portrait(dossier, film, voix.as_deref());
+        let d = voix.as_deref();
+        let scenario = if emotions { scenario_des_emotions(d) } else { scenario_du_film(d, conversation) };
+        return filmer_le_portrait(dossier, film, scenario);
     }
     let titre = "Eve — essai du portrait";
     let vue = egui::ViewportBuilder::default().with_title(titre).with_inner_size([1480.0, 960.0]).with_active(false);
@@ -6914,8 +6926,11 @@ pub fn portrait(args: &[String]) -> i32 {
         Ok(Box::new(EssaiDuPortrait {
             portrait: crate::natif::portrait::Portrait::nouveau(dossier),
             captures,
+            seules,
+            rayon,
             debut: None,
-            capture: false,
+            premiere: false,
+            capture_a: None,
         }))
     });
     match eframe::run_native(titre, options, creer) {
@@ -6927,12 +6942,17 @@ pub fn portrait(args: &[String]) -> i32 {
     }
 }
 
-/// La fenêtre de l'essai du portrait : le portrait, l'heure de sa première image prête, la capture demandée.
+/// La fenêtre de l'essai du portrait : le portrait, les poses gardées (`--seules`), le rayon de leurs disques
+/// (`--rayon`), l'heure de sa première image prête, les captures demandées (la toute première, puis l'autre et son
+/// heure).
 struct EssaiDuPortrait {
     portrait: crate::natif::portrait::Portrait,
     captures: Option<std::path::PathBuf>,
+    seules: Option<Vec<String>>,
+    rayon: Option<f32>,
     debut: Option<f64>,
-    capture: bool,
+    premiere: bool,
+    capture_a: Option<f64>,
 }
 
 impl eframe::App for EssaiDuPortrait {
@@ -6952,16 +6972,23 @@ impl eframe::App for EssaiDuPortrait {
             );
             return;
         };
-        // Toutes les poses dans la fenêtre : le nombre de colonnes qui leur laisse les plus grands disques.
-        let poses = visage.poses_d_essai();
-        let (cote, colonnes) = (3..=12)
-            .map(|c: usize| {
-                let rangees = poses.len().div_ceil(c) as f32;
-                let cote = ((zone.width() - 30.0) / c as f32 - 30.0).min((zone.height() - 40.0) / rangees - 50.0);
-                (cote, c)
-            })
-            .max_by(|a, b| a.0.total_cmp(&b.0))
-            .unwrap_or((210.0, 6));
+        // Toutes les poses dans la fenêtre (ou celles qui sont gardées) : le nombre de colonnes qui leur laisse les plus
+        // grands disques — ou, à un rayon donné, autant qu'il en tient en largeur.
+        let mut poses = visage.poses_d_essai();
+        if let Some(mots) = &self.seules {
+            poses.retain(|(nom, _)| mots.iter().any(|m| nom.contains(m.as_str())));
+        }
+        let (cote, colonnes) = match self.rayon {
+            Some(r) => (r / 0.4, (((zone.width() - 30.0) / (r / 0.4 + 30.0)) as usize).max(1)),
+            None => (1..=12)
+                .map(|c: usize| {
+                    let rangees = poses.len().div_ceil(c) as f32;
+                    let cote = ((zone.width() - 30.0) / c as f32 - 30.0).min((zone.height() - 40.0) / rangees - 50.0);
+                    (cote, c)
+                })
+                .max_by(|a, b| a.0.total_cmp(&b.0))
+                .unwrap_or((210.0, 6)),
+        };
         for (i, (nom, pose)) in poses.iter().enumerate() {
             let (c, r) = ((i % colonnes) as f32, (i / colonnes) as f32);
             let centre =
@@ -6976,18 +7003,25 @@ impl eframe::App for EssaiDuPortrait {
             }
             p.galley(centre + egui::vec2(-texte.size().x / 2.0, cote / 2.0), texte, egui::Color32::WHITE);
         }
-        // Une image, une seconde après que tout est là, puis la fenêtre se ferme.
+        // Une image de la toute première, avec les textures entières ; une autre quand elles ont été refaites à la taille
+        // des disques (quatre secondes au plus : un grand disque n'en a pas besoin) ; puis la fenêtre se ferme.
         let temps = ui.input(|i| i.time);
         let debut = *self.debut.get_or_insert(temps);
         if let Some(dossier) = &self.captures {
-            if !self.capture && temps - debut > 1.0 {
-                self.capture = true;
-                let chemin = dossier.join("portrait.png");
+            let capturer = |nom: &str| {
+                let chemin = dossier.join(nom);
                 ctx.request_screenshot(move |image| match enregistrer_png(&image, &chemin) {
                     Ok(()) => println!("capture : {}", chemin.display()),
                     Err(e) => eprintln!("capture {} : {e}", chemin.display()),
                 });
-            } else if temps - debut > 2.0 {
+            };
+            if !self.premiere {
+                self.premiere = true;
+                capturer("portrait-premiere.png");
+            } else if self.capture_a.is_none() && temps - debut > 1.0 && (visage.est_net() || temps - debut > 4.0) {
+                self.capture_a = Some(temps);
+                capturer("portrait.png");
+            } else if self.capture_a.is_some_and(|t| temps - t > 1.0) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
@@ -6997,8 +7031,9 @@ impl eframe::App for EssaiDuPortrait {
 // ---- Le film du portrait ------------------------------------------------------------------------------------------
 
 /// Les phrases du film de l'essai du portrait (`--film`), chacune avec l'émotion qui la dit : sans émotion, avec joie,
-/// avec tristesse, amusée.
-const PHRASES_DU_FILM: [(Option<parole::Emotion>, &str); 4] = [
+/// avec tristesse, amusée ; puis une question, sans émotion (un « non », un deux-points, une fin de phrase, une
+/// question qui attend sa réponse).
+const PHRASES_DU_FILM: [(Option<parole::Emotion>, &str); 5] = [
     (None, "Bonjour Sam. Je t'ai préparé le point de la journée : deux rendez-vous, et une facture à envoyer."),
     (Some(parole::Emotion::Joie), "Bonne nouvelle : le client a accepté la soumission. On commence lundi !"),
     (Some(parole::Emotion::Triste), "Je suis désolée : le chantier est retardé d'une semaine, à cause de la pluie."),
@@ -7006,49 +7041,132 @@ const PHRASES_DU_FILM: [(Option<parole::Emotion>, &str); 4] = [
         Some(parole::Emotion::Amusee),
         "Pourquoi les plongeurs plongent-ils en arrière ? Sinon, ils tombent dans le bateau !",
     ),
+    (None, "Non, pas cette semaine : le fournisseur est en retard. Veux-tu que je l'appelle demain matin ?"),
 ];
 
-/// Une étape du film : de quand (en secondes), l'émotion du visage, et la phrase qu'Eve dit, s'il en dit une (son rang
-/// et sa piste).
+/// Les phrases du film des émotions (`--film … --emotions`), comme Claude les écrit et que le chef les fait dire : une
+/// réponse empathique, une mauvaise nouvelle, une qui change de ton en cours de route (le sérieux, puis la joie : le
+/// deuxième passage suit le premier sans pause), une qui réfléchit tout haut. Chacune : son émotion, si elle suit la
+/// phrase d'avant dans la même réponse, son texte.
+const PHRASES_DES_EMOTIONS: [(parole::Emotion, bool, &str); 5] = [
+    (parole::Emotion::Empathie, false, "Je comprends, ce n'est pas facile. On va trouver une solution ensemble."),
+    (parole::Emotion::Triste, false, "Je suis désolée : le chantier est retardé d'une semaine."),
+    (parole::Emotion::Serieuse, false, "Il faudra verser l'acompte avant vendredi."),
+    (parole::Emotion::Joie, true, "Mais bonne nouvelle : le client a accepté la soumission !"),
+    (parole::Emotion::Reflexion, false, "Il y a deux façons de voir ça : le prix, ou le délai."),
+];
+
+/// Une étape du film : de quand (en secondes), l'émotion que publie le chef, ce que fait Eve quand elle ne parle pas,
+/// et la phrase qu'elle dit, s'il en dit une (son rang et sa piste).
 struct EtapeDuFilm {
     debut: f64,
     emotion: Option<parole::Emotion>,
+    activite: crate::natif::portrait::Activite,
     phrase: Option<(usize, voix::Piste)>,
 }
 
-/// Le scénario du film : Eve au repos, puis chaque phrase — son émotion vient d'abord, une seconde —, puis le calme
-/// revenu ; et sa fin. Une phrase dite (`phrase-1.wav`… dans `dites`), ou une voix inventée.
-fn scenario_du_film(dites: Option<&Path>) -> (Vec<EtapeDuFilm>, f64) {
-    let mut etapes = vec![EtapeDuFilm { debut: 0.0, emotion: None, phrase: None }];
+/// La piste de la phrase `k` du film, de texte `texte` : dite (`phrase-1.wav`… dans `dites`), ou une voix inventée.
+fn piste_du_film(dites: Option<&Path>, k: usize, texte: &str) -> voix::Piste {
+    match dites.and_then(|d| std::fs::read(d.join(format!("phrase-{}.wav", k + 1))).ok()) {
+        Some(wav) => voix::piste_du_son(&wav, texte),
+        None => {
+            let duree = Duration::from_secs_f64((parole::syllabes(texte).len() as f64 / 4.5).max(1.0));
+            voix::piste_de(voix_inventee(duree), texte)
+        }
+    }
+}
+
+/// Le scénario du film : Eve au repos, puis chaque phrase — son émotion vient d'abord, une seconde ; une question, Eve
+/// écoute d'abord la personne, puis réfléchit, et après l'avoir posée, écoute sa réponse —, puis le calme revenu ; et
+/// sa fin. Une phrase dite (`phrase-1.wav`… dans `dites`), ou une voix inventée. `conversation` : avant la première
+/// phrase aussi, Eve écoute la personne, puis réfléchit, comme quand on lui parle.
+fn scenario_du_film(dites: Option<&Path>, conversation: bool) -> (Vec<EtapeDuFilm>, f64) {
+    use crate::natif::portrait::Activite;
+    let etape = |debut, emotion, activite| EtapeDuFilm { debut, emotion, activite, phrase: None };
+    let mut etapes = vec![etape(0.0, None, Activite::Repos)];
     let mut t = 1.5;
     for (k, &(emotion, texte)) in PHRASES_DU_FILM.iter().enumerate() {
+        let question = texte.trim_end().ends_with('?');
+        if question || (conversation && k == 0) {
+            // La personne parle (trois secondes : [`voix_de_la_personne`]), puis Eve réfléchit quatre secondes (son air
+            // pensif a le temps de se poser, et ses yeux de chercher).
+            etapes.push(etape(t, None, Activite::Ecoute));
+            etapes.push(etape(t + 3.5, None, Activite::Reflechit));
+            t += 7.5;
+        }
         if emotion.is_some() {
-            etapes.push(EtapeDuFilm { debut: t, emotion, phrase: None });
+            etapes.push(etape(t, emotion, Activite::Repos));
             t += 1.2;
         }
-        let piste = match dites.and_then(|d| std::fs::read(d.join(format!("phrase-{}.wav", k + 1))).ok()) {
-            Some(wav) => voix::piste_du_son(&wav, texte),
-            None => {
-                let duree = Duration::from_secs_f64((parole::syllabes(texte).len() as f64 / 4.5).max(1.0));
-                voix::piste_de(voix_inventee(duree), texte)
-            }
-        };
+        let piste = piste_du_film(dites, k, texte);
         let duree = piste.duree().as_secs_f64();
-        etapes.push(EtapeDuFilm { debut: t, emotion, phrase: Some((k, piste)) });
-        t += duree + 0.8;
+        let apres = if question { Activite::Ecoute } else { Activite::Repos };
+        etapes.push(EtapeDuFilm { debut: t, emotion, activite: apres, phrase: Some((k, piste)) });
+        t += duree + if question { 3.0 } else { 0.8 };
     }
-    etapes.push(EtapeDuFilm { debut: t, emotion: None, phrase: None });
+    etapes.push(etape(t, None, Activite::Repos));
     (etapes, t + 2.5)
+}
+
+/// La voix de la personne qu'Eve écoute dans le film, `t` secondes après qu'elle s'est mise à l'écouter : le niveau du
+/// micro (de 0 à 1, comme le chef le publie), deux élans de parole à cinq syllabes par seconde séparés d'une courte
+/// pause, puis le silence.
+fn voix_de_la_personne(t: f64) -> f32 {
+    let parle = [(0.3, 1.6), (2.05, 2.9)].iter().any(|&(a, b)| (a..b).contains(&t));
+    if parle { 0.45 + 0.35 * (t * 5.0 * std::f64::consts::PI).sin().abs() as f32 } else { 0.03 }
+}
+
+/// Le scénario du film des émotions ([`PHRASES_DES_EMOTIONS`]), comme une vraie Eve les vit : pour chaque réponse, Eve se
+/// tait un moment après la précédente (elle garde son émotion le temps qu'il faut), la personne parle (l'émotion d'avant
+/// encore publiée), Claude réfléchit (l'air pensif ; la dernière fois longtemps : il va et vient), la première phrase est
+/// donnée à la voix (le chef publie son émotion, un instant avant le son), elle se dit ; le passage qui suit dans la même
+/// réponse part dans le silence de fin de la phrase d'avant, avec son émotion (le chef la publie quand la phrase d'avant
+/// finit).
+fn scenario_des_emotions(dites: Option<&Path>) -> (Vec<EtapeDuFilm>, f64) {
+    use crate::natif::portrait::Activite::{Ecoute, Parle, Reflechit, Repos};
+    let mut etapes = vec![EtapeDuFilm { debut: 0.0, emotion: None, activite: Repos, phrase: None }];
+    let (mut t, mut avant) = (1.5, None);
+    for (k, &(emotion, enchainee, texte)) in PHRASES_DES_EMOTIONS.iter().enumerate() {
+        let piste = piste_du_film(dites, k, texte);
+        if enchainee {
+            // La voix passe à cette phrase dans les 120 derniers ms de celle d'avant : le chef apprend là qu'elle a fini
+            // et publie l'émotion du passage ; le son vient un dixième de seconde plus tard (le lecteur de Windows).
+            t -= 0.12;
+            etapes.push(EtapeDuFilm { debut: t, emotion: Some(emotion), activite: Parle, phrase: None });
+            t += 0.1;
+        } else {
+            if k > 0 {
+                etapes.push(EtapeDuFilm { debut: t, emotion: avant, activite: Repos, phrase: None });
+                t += 3.0;
+            }
+            etapes.push(EtapeDuFilm { debut: t, emotion: avant, activite: Ecoute, phrase: None });
+            t += 1.6;
+            etapes.push(EtapeDuFilm { debut: t, emotion: None, activite: Reflechit, phrase: None });
+            t += if k + 1 == PHRASES_DES_EMOTIONS.len() { 9.0 } else { 2.0 };
+            etapes.push(EtapeDuFilm { debut: t, emotion: Some(emotion), activite: Parle, phrase: None });
+            t += 0.4;
+        }
+        let duree = piste.duree().as_secs_f64();
+        etapes.push(EtapeDuFilm { debut: t, emotion: Some(emotion), activite: Repos, phrase: Some((k, piste)) });
+        t += duree;
+        avant = Some(emotion);
+    }
+    etapes.push(EtapeDuFilm { debut: t, emotion: avant, activite: Repos, phrase: None });
+    (etapes, t + 4.5)
 }
 
 /// Une image du film à écrire : son instant (en ms depuis la première), l'image de la fenêtre, et la part à garder (en
 /// pixels : gauche, haut, droite, bas).
 type ImageDuFilm = (u64, Arc<egui::ColorImage>, [usize; 4]);
 
-/// Filme le portrait posé dans `dossier`, dans `film` : la fenêtre du film ([`FilmDuPortrait`]), qui se ferme d'elle-même
-/// à la fin, et trois fils qui en écrivent les images (un seul ne suivrait pas la cadence de l'écran).
-fn filmer_le_portrait(dossier: std::path::PathBuf, film: std::path::PathBuf, dites: Option<&Path>) -> i32 {
-    let (etapes, fin) = scenario_du_film(dites);
+/// Filme le portrait posé dans `dossier`, dans `film`, selon son `scenario` (ses étapes, et sa fin en secondes) : la
+/// fenêtre du film ([`FilmDuPortrait`]), qui se ferme d'elle-même à la fin, et trois fils qui en écrivent les images
+/// (un seul ne suivrait pas la cadence de l'écran).
+fn filmer_le_portrait(
+    dossier: std::path::PathBuf,
+    film: std::path::PathBuf,
+    (etapes, fin): (Vec<EtapeDuFilm>, f64),
+) -> i32 {
     println!("film du portrait : {:.1} s, dans {}", fin, film.display());
     let (envoi, recu) = mpsc::channel::<ImageDuFilm>();
     let recu = Arc::new(Mutex::new(recu));
@@ -7084,6 +7202,7 @@ fn filmer_le_portrait(dossier: std::path::PathBuf, film: std::path::PathBuf, dit
             debut: None,
             envoi: Some(envoi),
             ecrivains,
+            rendu: Vec::new(),
         }))
     });
     match eframe::run_native(titre, options, creer) {
@@ -7096,7 +7215,8 @@ fn filmer_le_portrait(dossier: std::path::PathBuf, film: std::path::PathBuf, dit
 }
 
 /// La fenêtre du film du portrait : le portrait, son scénario et sa fin, l'étape en cours, l'heure de sa première
-/// image ; les images à écrire, et les fils qui les écrivent.
+/// image ; les images à écrire, et les fils qui les écrivent ; ce que le processeur a mis à préparer chaque image du
+/// portrait (en millisecondes), dit à la fin.
 struct FilmDuPortrait {
     portrait: crate::natif::portrait::Portrait,
     etapes: Vec<EtapeDuFilm>,
@@ -7105,6 +7225,7 @@ struct FilmDuPortrait {
     debut: Option<f64>,
     envoi: Option<mpsc::Sender<ImageDuFilm>>,
     ecrivains: Vec<thread::JoinHandle<()>>,
+    rendu: Vec<f64>,
 }
 
 impl eframe::App for FilmDuPortrait {
@@ -7117,20 +7238,39 @@ impl eframe::App for FilmDuPortrait {
         let temps = ui.input(|i| i.time);
         let t = temps - *self.debut.get_or_insert(temps);
         // L'étape du moment : à chacune, sa phrase se fait entendre (ou plus rien), comme la voix d'Eve le fait.
+        use crate::natif::portrait::Activite;
         let k = self.etapes.iter().rposition(|e| e.debut <= t).unwrap_or(0);
         if self.etape != Some(k) {
             self.etape = Some(k);
             let phrase = self.etapes[k].phrase.as_ref();
             voix::faire_entendre(phrase.map(|(_, p)| p.clone()));
-            if let Some((n, _)) = phrase {
-                println!("phrase {} : à {:.0} ms", n + 1, t * 1000.0);
+            match (phrase, self.etapes[k].activite) {
+                (Some((n, _)), _) => {
+                    println!("phrase {} : à {:.0} ms", n + 1, t * 1000.0);
+                    // Ses repères, à leur instant dans le film : les gestes s'y accrochent.
+                    let (_, reperes) = voix::reperes_a_venir(Duration::ZERO).unwrap_or_default();
+                    let liste: Vec<String> = reperes
+                        .iter()
+                        .map(|r| format!("{:?} {:.0}", r.marque, (t + f64::from(r.a)) * 1000.0))
+                        .collect();
+                    println!("  repères : {}", liste.join(", "));
+                }
+                (None, Activite::Ecoute) => println!("elle écoute : à {:.0} ms", t * 1000.0),
+                (None, Activite::Reflechit) => println!("elle réfléchit : à {:.0} ms", t * 1000.0),
+                _ => {}
             }
         }
         let e = &self.etapes[k];
-        let parle = e.phrase.as_ref().is_some_and(|(_, p)| t < e.debut + p.duree().as_secs_f64());
-        let pose = self.portrait.pose_du_moment(temps, parle, true, e.emotion).unwrap_or_default();
+        let dite = e.phrase.as_ref().map_or(0.0, |(_, p)| p.duree().as_secs_f64());
+        let activite = if t < e.debut + dite { Activite::Parle } else { e.activite };
+        // La personne qu'elle écoute parle (le niveau du micro, depuis qu'elle écoute) : elle hoche à ses pauses.
+        let ecoute = activite == Activite::Ecoute;
+        self.portrait.entendre(if ecoute { voix_de_la_personne(t - e.debut - dite) } else { 0.0 });
+        let pose = self.portrait.pose_du_moment(temps, activite, true, e.emotion).unwrap_or_default();
         let (centre, rayon) = (zone.center() + egui::vec2(0.0, 40.0), 150.0);
+        let depart = Instant::now();
         visage.en_grand(ui.painter(), centre, rayon, &pose);
+        self.rendu.push(depart.elapsed().as_secs_f64() * 1000.0);
         if t >= self.fin {
             self.envoi = None;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -7152,6 +7292,18 @@ impl eframe::App for FilmDuPortrait {
     }
 
     fn on_exit(&mut self, _: Option<&eframe::glow::Context>) {
+        // Ce que le processeur a mis à préparer le portrait, image par image : la médiane, le 99e centile, le pire.
+        self.rendu.sort_by(f64::total_cmp);
+        if let Some(&pire) = self.rendu.last() {
+            let centile = |p: f64| self.rendu[((self.rendu.len() - 1) as f64 * p) as usize];
+            println!(
+                "rendu du portrait, sur {} images : {:.2} ms en médiane, {:.2} au 99e centile, {:.2} au pire",
+                self.rendu.len(),
+                centile(0.5),
+                centile(0.99),
+                pire
+            );
+        }
         self.envoi = None;
         voix::faire_entendre(None);
         for e in self.ecrivains.drain(..) {
