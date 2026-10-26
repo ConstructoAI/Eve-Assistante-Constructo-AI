@@ -10,7 +10,7 @@ license = "Apache-2.0"
 # La révision d'Eve (12.0.0 : la v12), sa seule source : la fenêtre la montre (« v12 »), `eve --version` la dit, le zip
 # (emballer.ps1) et l'étiquette du dépôt public (outils\publier.ps1) en prennent le nom. Une révision de plus : monter
 # ce nombre (13.0.0 pour la v13), et rien d'autre.
-version = "18.0.0"
+version = "19.0.0"
 edition = "2024"
 rust-version = "1.99"
 publish = false
@@ -45,6 +45,9 @@ png = "0.18.1"
 # pas en dessiner un avec son texte (celui de Direct2D ignore le texte), et une page d'Edge n'est plus là. Le texte se
 # dessine avec les polices du poste ; les images incrustées dans un SVG, rares, ne se dessinent pas (moins de code).
 resvg = { version = "0.45.1", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
+# Supertonic, une voix neuronale de plus (src\voix\supertonic.rs) : ONNX Runtime, sa bibliothèque (onnxruntime.dll)
+# chargée à l'exécution depuis le dossier de la voix — rien ne se télécharge à la compilation.
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic"] }
 
 [target."cfg(windows)".dependencies]
 # Les voix de Windows (WinRT : les voix françaises du Canada), la touche à tenir, l'heure locale ; les petits sons

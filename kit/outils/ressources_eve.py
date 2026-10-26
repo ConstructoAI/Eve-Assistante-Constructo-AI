@@ -6,6 +6,8 @@ ses sources publiques officielles, chaque fichier vérifié par sa somme SHA-256
     ressources_eve.py --installer --dossier <commun>          # télécharge ce qui manque (l'installateur, Eve.bat)
     ressources_eve.py --installer --carte-graphique --dossier <commun>
                                                               # et l'oreille d'une carte NVIDIA
+    ressources_eve.py --installer --supertonic --dossier <commun>
+                                                              # et Supertonic, une voix de plus
     ressources_eve.py --verifier --dossier <commun>           # relit chaque fichier en entier, ne télécharge rien
     ressources_eve.py --liste                                 # la table : adresse, taille, somme
 
@@ -18,6 +20,8 @@ le nom de la session Windows n'en a pas (Piper et le serveur de Whisper n'ouvren
         piper\piper\    Piper, le moteur de la voix, pour Windows
         whisper-gpu\    seulement sur demande : le serveur de Whisper pour une carte NVIDIA (CUDA 12.4), et
                         large-v3-turbo dans modeles\
+        supertonic\     seulement sur demande : Supertonic 2, une voix de plus (le modèle, ses cinq voix de
+                        femme, et ONNX Runtime 1.31 dans onnxruntime\)
 
   - Les sources : Hugging Face (ggerganov/whisper.cpp ; rhasspy/piper-voices, v1.0.0) et les publications GitHub
     officielles (rhasspy/piper 2023.11.14-2 ; ggml-org/whisper.cpp b5454, la v1.9.5). Les adresses de Hugging Face
@@ -32,6 +36,10 @@ le nom de la session Windows n'en a pas (Piper et le serveur de Whisper n'ouvren
     et Eve.bat le retélécharge au lancement suivant.
   - La carte graphique n'est jamais téléchargée d'office : 1,3 Go (le serveur et large-v3-turbo), seulement utiles avec
     une carte NVIDIA. Sans elle, Eve écoute par le processeur.
+  - Supertonic non plus : 348 Mo (son modèle, 263 Mo, sur Hugging Face, épinglé sur un commit de son dépôt d'archive ;
+    la publication officielle d'ONNX Runtime 1.31, dont on ne garde que la bibliothèque et ses licences). Son modèle est
+    sous licence OpenRAIL-M : l'usage commercial est permis, ses restrictions d'usage suivent la voix (son LICENSE est
+    téléchargé avec elle).
   - Rien d'autre ne part : une adresse de la table, sans jeton ni nom d'entreprise.
 
 Codes de sortie : 0, tout est là et juste ; 1, un téléchargement ou une vérification a échoué (le message le dit) ;
@@ -149,7 +157,45 @@ RESSOURCES = [
         "systeme": "win32",
         "carte_graphique": True,
     },
+    {
+        # La publication officielle d'ONNX Runtime 1.31 (MIT) : Supertonic en a besoin (celui de Piper, de 2023, ne lit
+        # pas ses graphes). On n'en garde que la bibliothèque, sa licence et ses avis de tiers.
+        "nom": "ONNX Runtime 1.31 (le moteur de Supertonic)",
+        "url": f"{GH}/microsoft/onnxruntime/releases/download/v1.31.0/onnxruntime-win-x64-1.31.0.zip",
+        "dans": "supertonic/onnxruntime",
+        "archive": True,
+        "garder": ("onnxruntime-win-x64-1.31.0/", ["lib/onnxruntime.dll", "LICENSE", "ThirdPartyNotices.txt"]),
+        "taille": 82887349,
+        "sha256": "3958d8a44984160692c1b4ffd0de3cb48f8c39f9d34bb31e433db06e30b82195",
+        "systeme": "win32",
+        "supertonic": True,
+    },
 ]
+
+# Supertonic 2 (Supertone : le modèle sous OpenRAIL-M), une voix de plus, seulement sur demande : son dépôt d'archive
+# sur Hugging Face, épinglé sur un commit ; ses cinq voix de femme.
+SUPERTONIC = f"{HF}/supertone-oss-archive/supertonic-2/resolve/7edbcd0bba8cd579100a353a9e0b2b49cad7c875"
+for _nom, _dans, _taille, _somme in [
+    ("la durée", "onnx/duration_predictor.onnx", 1521526,
+     "6d556b3691165c364be91dc0bd894656b5949f5acd2750d8ec2f954010845011"),
+    ("l'encodeur du texte", "onnx/text_encoder.onnx", 27431318,
+     "dd5f535ed629f7df86071043e15f541ce1b2ab7f1bdbce4c7892b307bca79fa3"),
+    ("le débruitage", "onnx/vector_estimator.onnx", 132471364,
+     "105e9d66fd8756876b210a6b4aa03fc393b1eaca3a8dadcc8d9a3bc785c86a35"),
+    ("le vocodeur", "onnx/vocoder.onnx", 101405066,
+     "19bd51f47a186069c752403518a40f7ea4c647455056d2511f7249691ecddf7c"),
+    ("sa fiche", "onnx/tts.json", 8699, "ee531d9af9b80438a2ed703e22155ee6c83b12595ab22fd3bb6de94c7502fe96"),
+    ("ses caractères", "onnx/unicode_indexer.json", 262196,
+     "b7662a73a0703f43b97c0f2e089f8e8325e26f5d841aca393b5a54c509c92df1"),
+    ("sa licence", "LICENSE", 15007, "0d944a9110fed9a9602d60e0423a272903e7bd21ab060490774efc77c2275e9f"),
+    ("la voix F1", "voice_styles/F1.json", 420050, "6106950ebeb8a5da29ea22075f605db659cd07dbc288a68292543d9129aa250f"),
+    ("la voix F2", "voice_styles/F2.json", 420293, "8b97feb16d79ac0447136796708feac5f83dbabe92a5be1168212653c38729ae"),
+    ("la voix F3", "voice_styles/F3.json", 419887, "7eda5bccb4e6eb7f228fa182462d5fcf982d77628234603599027f0734d70c29"),
+    ("la voix F4", "voice_styles/F4.json", 419642, "e056fc2bee393edc8bff761eb28f33fb461e8dad828c3b05348a010ac1b7bb79"),
+    ("la voix F5", "voice_styles/F5.json", 419709, "ce7645ad7e3c13cca04e0d62bf890ef9ac401988005ba8f5e9c9b59257bc6931"),
+]:
+    RESSOURCES.append({"nom": f"Supertonic 2, {_nom}", "url": f"{SUPERTONIC}/{_dans}", "dans": f"supertonic/{_dans}",
+                       "taille": _taille, "sha256": _somme, "supertonic": True})
 
 ESSAIS = 5            # tentatives par fichier, chacune reprend où la précédente s'est arrêtée
 DELAI_RESEAU = 30     # secondes sans un octet : la tentative s'arrête
@@ -162,11 +208,12 @@ class Echec(Exception):
     """Une erreur à dire telle quelle à la personne."""
 
 
-def ressources(carte_graphique=False):
-    """Les ressources de ce système ; celle de la carte graphique seulement si on la demande."""
+def ressources(carte_graphique=False, supertonic=False):
+    """Les ressources de ce système ; celles de la carte graphique et de Supertonic seulement si on les demande."""
     return [r for r in RESSOURCES
             if r.get("systeme", sys.platform) == sys.platform
-            and (carte_graphique or not r.get("carte_graphique"))]
+            and (carte_graphique or not r.get("carte_graphique"))
+            and (supertonic or not r.get("supertonic"))]
 
 
 def chemin(local, r):
@@ -356,8 +403,8 @@ def deplier(r, archive, local):
     os.replace(neuf, final)
 
 
-def installer(local, carte_graphique):
-    voulues = ressources(carte_graphique)
+def installer(local, carte_graphique, supertonic=False):
+    voulues = ressources(carte_graphique, supertonic)
     manquantes = [r for r in voulues if not presente(local, r)]
     if not manquantes:
         return 0
@@ -406,9 +453,10 @@ def installer(local, carte_graphique):
     return 0
 
 
-def verifier(local, carte_graphique):
+def verifier(local, carte_graphique, supertonic=False):
     """Relit chaque fichier en entier. Un fichier faux est effacé : le prochain lancement le retélécharge."""
-    voulues = ressources(carte_graphique or os.path.isdir(os.path.join(local, "whisper-gpu")))
+    voulues = ressources(carte_graphique or os.path.isdir(os.path.join(local, "whisper-gpu")),
+                         supertonic or os.path.isdir(os.path.join(local, "supertonic")))
     print(f"   Dossier commun : {local}")
     mauvais = 0
     for r in voulues:
@@ -449,6 +497,8 @@ def main(argv=None):
     g.add_argument("--liste", action="store_true", help="la table des ressources")
     p.add_argument("--carte-graphique", action="store_true",
                    help="aussi l'oreille d'une carte NVIDIA : le serveur de Whisper et large-v3-turbo (1,3 Go)")
+    p.add_argument("--supertonic", action="store_true",
+                   help="aussi Supertonic, une voix de plus : son modèle et ONNX Runtime (348 Mo)")
     p.add_argument("--dossier", help="le dossier commun de la voix et de l'oreille (%%LOCALAPPDATA%%\\Eve\\commun)")
     a = p.parse_args(argv)
     if a.liste:
@@ -461,8 +511,8 @@ def main(argv=None):
               file=sys.stderr)
         return 1
     if a.verifier:
-        return verifier(local, a.carte_graphique)
-    return installer(local, a.carte_graphique)
+        return verifier(local, a.carte_graphique, a.supertonic)
+    return installer(local, a.carte_graphique, a.supertonic)
 
 
 if __name__ == "__main__":

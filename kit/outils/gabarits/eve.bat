@@ -26,10 +26,17 @@ for %%F in (msvcp140.dll vcruntime140.dll vcruntime140_1.dll) do copy /y "%PROGR
 :carte
 REM L'oreille sur la carte graphique, si ce specialiste l'a : reprise ici si elle manque. Un echec ne bloque rien :
 REM Eve ecoute alors par le processeur.
-if not exist "%LOCAL%\whisper-gpu" goto :lancer
-if exist "%EVE%\commun\whisper-gpu\whisper-server.exe" goto :lancer
+if not exist "%LOCAL%\whisper-gpu" goto :supertonic
+if exist "%EVE%\commun\whisper-gpu\whisper-server.exe" goto :supertonic
 "%PROGRAMME%\python\python.exe" -X utf8 -s "%PROGRAMME%\outils\ressources_eve.py" --installer --carte-graphique --dossier "%EVE%\commun"
 for %%F in (msvcp140.dll vcruntime140.dll vcruntime140_1.dll) do copy /y "%PROGRAMME%\%%F" "%EVE%\commun\whisper-gpu\" >nul 2>nul
+
+:supertonic
+REM Supertonic, une voix de plus, si ce specialiste l'a : reprise ici si elle manque. Un echec ne bloque rien :
+REM Eve parle alors avec Piper.
+if not exist "%LOCAL%\supertonic" goto :lancer
+if exist "%EVE%\commun\supertonic\onnxruntime\lib\onnxruntime.dll" if exist "%EVE%\commun\supertonic\onnx\vocoder.onnx" goto :lancer
+"%PROGRAMME%\python\python.exe" -X utf8 -s "%PROGRAMME%\outils\ressources_eve.py" --installer --supertonic --dossier "%EVE%\commun"
 
 :lancer
 set "EVE_DOSSIER=%~dp0"

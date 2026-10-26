@@ -69,10 +69,49 @@ fn propre(l: &str) -> String {
         .join(" ")
 }
 
+/// Ce qui sépare une phrase dite de la précédente dans le texte : la voix marque une pause plus longue entre deux
+/// lignes (les éléments d'une liste), et plus encore entre deux paragraphes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Saut {
+    /// La suite de la même ligne.
+    #[default]
+    Phrase,
+    /// Une autre ligne.
+    Ligne,
+    /// Un autre paragraphe : une ligne vide avant elle.
+    Paragraphe,
+}
+
+/// Une phrase à dire, et ce qui la sépare de la précédente ([`EnFlux`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Phrase {
+    pub texte: String,
+    pub saut: Saut,
+}
+
+impl std::fmt::Display for Phrase {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(&self.texte)
+    }
+}
+
+impl PartialEq<&str> for Phrase {
+    fn eq(&self, autre: &&str) -> bool {
+        self.texte == *autre
+    }
+}
+
+impl PartialEq<String> for Phrase {
+    fn eq(&self, autre: &String) -> bool {
+        self.texte == *autre
+    }
+}
+
 /// La parole en flux : la réponse de l'Adjointe arrive mot à mot pendant qu'elle l'écrit ; les phrases en sortent dès
 /// qu'elles sont complètes, pour que la voix commence avant la fin de la réponse. Les règles sont celles de
 /// [`pour_la_voix`] : seul ce qui précède les trois tirets se dit, sans markdown, ni tableau, ni bloc de code (ni
 /// carte), ni adresse web ; au-delà de [`LONGUEUR_MAX`] caractères dits dans le tour, « Le reste est à l'écran. »
+/// Chaque phrase dit aussi ce qui la sépare de la précédente ([`Saut`]) : la voix s'y arrête plus ou moins.
 #[derive(Debug, Default)]
 pub struct EnFlux {
     /// Le texte reçu et pas encore dit : la ligne en cours, depuis sa dernière phrase complète.
@@ -92,10 +131,13 @@ pub struct EnFlux {
     trop: bool,
     /// Sans la limite de [`LONGUEUR_MAX`] : toutes les phrases, pour les pages de « la suite » ([`pages_pour_la_voix`]).
     illimite: bool,
+    /// Ce qui sépare la prochaine phrase de la dernière dite : une fin de ligne, une ligne vide passées depuis.
+    saut: Saut,
 }
 
 impl EnFlux {
     /// Un nouveau message de l'Adjointe dans le même tour : les tirets du précédent ne valent plus ; le compte reste.
+    /// Sa première phrase ouvre un paragraphe.
     pub fn nouveau_message(&mut self) {
         self.tampon.clear();
         self.ligne_vue = false;
@@ -103,6 +145,7 @@ impl EnFlux {
         self.dans_code = false;
         self.fini = false;
         self.dit_message = false;
+        self.saut = Saut::Paragraphe;
     }
 
     /// Un nouveau tour : tout repart de zéro.
@@ -116,7 +159,7 @@ impl EnFlux {
     }
 
     /// Du texte arrive ; rend les phrases prêtes à dire.
-    pub fn ajouter(&mut self, morceau: &str) -> Vec<String> {
+    pub fn ajouter(&mut self, morceau: &str) -> Vec<Phrase> {
         self.tampon.push_str(morceau);
         let mut phrases = Vec::new();
         self.extraire(false, &mut phrases);
@@ -124,7 +167,7 @@ impl EnFlux {
     }
 
     /// La fin d'un bloc de texte : ce qui reste se dit (une dernière phrase sans point final).
-    pub fn finir(&mut self) -> Vec<String> {
+    pub fn finir(&mut self) -> Vec<Phrase> {
         let mut phrases = Vec::new();
         self.extraire(true, &mut phrases);
         self.tampon.clear();
@@ -136,7 +179,7 @@ impl EnFlux {
     /// La fin d'un passage, au milieu d'une ligne : le ton change ici ([`Tons`]). Ce qui attendait la suite pour se
     /// dire (une phrase finie dont on ne voyait pas encore le mot d'après, ou une phrase sans point) se dit tout de
     /// suite, avec le ton d'avant ; la ligne continue.
-    pub fn couper(&mut self) -> Vec<String> {
+    pub fn couper(&mut self) -> Vec<Phrase> {
         let mut phrases = Vec::new();
         if self.ligne_vue && !self.ligne_muette {
             self.extraire(true, &mut phrases);
@@ -144,7 +187,7 @@ impl EnFlux {
         phrases
     }
 
-    fn extraire(&mut self, fin: bool, phrases: &mut Vec<String>) {
+    fn extraire(&mut self, fin: bool, phrases: &mut Vec<Phrase>) {
         loop {
             if self.fini || self.trop {
                 self.tampon.clear();
@@ -158,10 +201,11 @@ impl EnFlux {
                 };
                 let l = ligne.trim();
                 if l.is_empty() {
-                    // Une ligne vide (ou pas encore commencée).
+                    // Une ligne vide (ou pas encore commencée) : un paragraphe finit.
                     match nl {
                         Some(p) => {
                             self.tampon.drain(..=p);
+                            self.saut = Saut::Paragraphe;
                             continue;
                         }
                         None => {
@@ -205,6 +249,7 @@ impl EnFlux {
                         self.tampon.drain(..=p);
                         self.ligne_vue = false;
                         self.ligne_muette = false;
+                        self.saut = self.saut.max(Saut::Ligne);
                         continue;
                     }
                     None => {
@@ -227,6 +272,7 @@ impl EnFlux {
                     let phrase: String = self.tampon.drain(..=p).collect();
                     self.ligne_vue = false;
                     self.dire(&phrase, true, phrases);
+                    self.saut = self.saut.max(Saut::Ligne);
                 }
                 None if fin => {
                     let phrase = std::mem::take(&mut self.tampon);
@@ -238,7 +284,7 @@ impl EnFlux {
         }
     }
 
-    fn dire(&mut self, brut: &str, fin_de_ligne: bool, phrases: &mut Vec<String>) {
+    fn dire(&mut self, brut: &str, fin_de_ligne: bool, phrases: &mut Vec<Phrase>) {
         let t = propre(brut);
         let t = t.trim();
         if t.is_empty() {
@@ -246,14 +292,15 @@ impl EnFlux {
         }
         let t = if fin_de_ligne { ponctuer(t) } else { t.to_string() };
         let n = t.chars().count();
+        let saut = std::mem::take(&mut self.saut);
         if !self.illimite && self.dit > 0 && self.dit + n > LONGUEUR_MAX {
-            phrases.push("Le reste est à l'écran.".into());
+            phrases.push(Phrase { texte: "Le reste est à l'écran.".into(), saut });
             self.trop = true;
             return;
         }
         self.dit += n;
         self.dit_message = true;
-        phrases.push(t);
+        phrases.push(Phrase { texte: t, saut });
     }
 }
 
@@ -279,7 +326,7 @@ pub fn pages_pour_la_voix(texte: &str) -> Vec<String> {
         let mut f = EnFlux { illimite: true, ..EnFlux::default() };
         let mut phrases = f.ajouter(&lignes.join("\n"));
         phrases.extend(f.finir());
-        phrases
+        phrases.into_iter().map(|p| p.texte).collect::<Vec<String>>()
     };
     let mut pages = paginer(toutes(&avant));
     pages.extend(paginer(toutes(&apres)));
@@ -691,18 +738,33 @@ fn replier_les_boucles(texte: &str) -> String {
 }
 
 /// La fin de la première phrase complète de `s` (l'index qui suit sa ponctuation et ses guillemets fermants), si l'on
-/// peut déjà en décider : il faut voir ce qui suit un point, qui peut aussi finir « J.L. » ou une initiale.
-/// `ligne_finie` : rien ne viendra plus après `s` sur cette ligne.
-fn fin_de_phrase(s: &str, ligne_finie: bool) -> Option<usize> {
+/// peut déjà en décider : il faut voir ce qui suit — un point peut aussi finir « J.L. » ou une initiale, et une phrase
+/// continue après une question, une exclamation ou des points de suspension suivis d'une minuscule (« Il a crié
+/// « Ouaf ! » de toutes ses forces », « la deuxième boîte… elle suivra ») : la couper là y mettrait une pause de fin de
+/// phrase. `ligne_finie` : rien ne viendra plus après `s` sur cette ligne.
+pub fn fin_de_phrase(s: &str, ligne_finie: bool) -> Option<usize> {
     let c: Vec<(usize, char)> = s.char_indices().collect();
+    let espace = |x: char| matches!(x, ' ' | '\t' | '\u{a0}' | '\u{202f}');
     for k in 0..c.len() {
         let ch = c[k].1;
         if !matches!(ch, '.' | '!' | '?' | '…') {
             continue;
         }
         let mut j = k + 1;
-        while j < c.len() && matches!(c[j].1, '»' | '"' | ')' | '\'' | '’') {
-            j += 1;
+        loop {
+            // Les guillemets qui ferment la citation, collés à elle ou après une espace (« Ouaf ! »).
+            while j < c.len() && matches!(c[j].1, '»' | '"' | ')' | '\'' | '’' | '”') {
+                j += 1;
+            }
+            let mut m = j;
+            while m < c.len() && espace(c[m].1) {
+                m += 1;
+            }
+            if m > j && m < c.len() && c[m].1 == '»' {
+                j = m;
+                continue;
+            }
+            break;
         }
         // La ponctuation au bout de ce qu'on a : la suite n'est pas encore là (en fin de ligne, la ligne entière se
         // dit d'un coup).
@@ -713,29 +775,28 @@ fn fin_de_phrase(s: &str, ligne_finie: bool) -> Option<usize> {
             continue;
         }
         let fin = c[j].0;
+        let mut m = j;
+        while m < c.len() && c[m].1.is_whitespace() {
+            m += 1;
+        }
+        // Ce qui suit : pas encore là, il faut l'attendre — sauf au bout de la ligne.
+        let Some(&(_, suivant)) = c.get(m) else {
+            return ligne_finie.then_some(fin);
+        };
         if ch == '.' {
             let debut_mot = c[..k].iter().rposition(|(_, x)| x.is_whitespace()).map(|p| p + 1).unwrap_or(0);
             let mot: String = c[debut_mot..k].iter().map(|(_, x)| *x).collect();
             if est_abreviation(&mot) {
                 continue;
             }
-            let mut m = j;
-            while m < c.len() && c[m].1.is_whitespace() {
-                m += 1;
-            }
-            if m >= c.len() {
-                if ligne_finie {
-                    return Some(fin);
-                }
-                return None;
-            }
-            let suivant = c[m].1;
             if !(suivant.is_uppercase()
                 || suivant.is_ascii_digit()
                 || matches!(suivant, '«' | '"' | '(' | '-' | '—' | '['))
             {
                 continue;
             }
+        } else if suivant.is_lowercase() {
+            continue;
         }
         return Some(fin);
     }
@@ -743,7 +804,7 @@ fn fin_de_phrase(s: &str, ligne_finie: bool) -> Option<usize> {
 }
 
 /// Le mot qui précède un point en fait-il une abréviation plutôt qu'une fin de phrase ?
-fn est_abreviation(mot: &str) -> bool {
+pub fn est_abreviation(mot: &str) -> bool {
     const ABREVIATIONS: [&str; 12] = ["mme", "mlle", "st", "ste", "av", "boul", "no", "env", "ex", "dr", "me", "app"];
     let m = mot.trim_start_matches(['(', '«', '"', '\'']);
     // « M.B », « p.ex » : un point dans le mot ; « M », « J » : une initiale.
@@ -1835,6 +1896,7 @@ mod essais {
         let mut f = EnFlux::default();
         let mut dit = f.ajouter(&texte);
         dit.extend(f.finir());
+        let dit: Vec<String> = dit.into_iter().map(|p| p.texte).collect();
         assert_eq!(dit.last().map(String::as_str), Some("Le reste est à l'écran."));
         assert_eq!(pages[0], dit[..dit.len() - 1].join(" "));
         // Chaque phrase une fois, le tableau à l'écran seulement, puis le détail, dans sa page.
@@ -2019,6 +2081,10 @@ mod essais {
 
     /// Le texte donné morceau par morceau (`pas` caractères à la fois), comme il arrive de l'Adjointe.
     fn en_flux(texte: &str, pas: usize) -> Vec<String> {
+        en_flux_avec_sauts(texte, pas).into_iter().map(|p| p.texte).collect()
+    }
+
+    fn en_flux_avec_sauts(texte: &str, pas: usize) -> Vec<Phrase> {
         let mut f = EnFlux::default();
         let c: Vec<char> = texte.chars().collect();
         let mut phrases = Vec::new();
@@ -2027,6 +2093,58 @@ mod essais {
         }
         phrases.extend(f.finir());
         phrases
+    }
+
+    #[test]
+    fn une_phrase_continue_apres_une_minuscule() {
+        // « Ouaf ! » de toutes ses forces : une seule phrase, pas une fin de phrase après la citation.
+        for pas in [1, 3, 1000] {
+            assert_eq!(
+                en_flux("Elle a crié « Ouaf ! » de toutes ses forces. Le facteur a sursauté.", pas),
+                ["Elle a crié « Ouaf ! » de toutes ses forces.", "Le facteur a sursauté."],
+                "pas {pas}"
+            );
+            assert_eq!(
+                en_flux("Il manque la deuxième boîte… elle devrait suivre demain. Rien d'autre.", pas),
+                ["Il manque la deuxième boîte… elle devrait suivre demain.", "Rien d'autre."],
+                "pas {pas}"
+            );
+            // Une majuscule après : deux phrases, la citation fermée avec la première.
+            assert_eq!(
+                en_flux("Il a dit « Bravo ! » Puis il est parti. Tu viens ? Oui.", pas),
+                ["Il a dit « Bravo ! »", "Puis il est parti.", "Tu viens ?", "Oui."],
+                "pas {pas}"
+            );
+        }
+    }
+
+    #[test]
+    fn chaque_phrase_dit_ce_qui_la_separe_de_la_precedente() {
+        let texte = "Voici le point. Lundi est calme.\n\nMercredi, c'est chargé :\n- la réunion ;\n- la natation.";
+        for pas in [1, 4, 1000] {
+            let sauts: Vec<(String, Saut)> =
+                en_flux_avec_sauts(texte, pas).into_iter().map(|p| (p.texte, p.saut)).collect();
+            assert_eq!(
+                sauts,
+                [
+                    ("Voici le point.".to_string(), Saut::Phrase),
+                    ("Lundi est calme.".to_string(), Saut::Phrase),
+                    ("Mercredi, c'est chargé :".to_string(), Saut::Paragraphe),
+                    ("la réunion ;".to_string(), Saut::Ligne),
+                    ("la natation.".to_string(), Saut::Ligne),
+                ],
+                "pas {pas}"
+            );
+        }
+        // Un tableau entre deux lignes : la ligne d'après s'en sépare au moins d'une ligne.
+        let p = en_flux_avec_sauts("Voici :\n| a | b |\n|---|---|\nEt la suite.", 1000);
+        assert_eq!(p.last().map(|p| p.saut), Some(Saut::Ligne));
+        // Un nouveau message de Claude dans le même tour : un paragraphe.
+        let mut f = EnFlux::default();
+        f.ajouter("Je regarde.\n");
+        f.finir();
+        f.nouveau_message();
+        assert_eq!(f.ajouter("C'est fait. Rien").first().map(|p| p.saut), Some(Saut::Paragraphe));
     }
 
     #[test]

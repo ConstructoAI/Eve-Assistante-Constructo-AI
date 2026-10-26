@@ -8,10 +8,12 @@
 //!   (Caroline, Nathalie, Claude) — toujours là, même sans Piper : c'est le repli quand il flanche.
 //!
 //! Le chef donne chaque phrase dès que l'Adjointe l'écrit (`dire`, des identifiants croissants). Le fil de la voix ne
-//! s'arrête sur aucune : il l'écrit aussitôt à Piper, lit ses WAV à mesure qu'ils arrivent et les joue dans l'ordre
-//! par deux lecteurs de Windows (`MediaPlayer`, qui jouent seuls pendant que le fil veille) — Piper prépare la phrase
-//! suivante pendant que celle-ci se dit, l'autre lecteur l'ouvre d'avance, et elle part dans le silence final de
-//! celle-ci. `taire` coupe par numéro tout ce qui a été donné jusque-là ; ce qui vient après se dit normalement.
+//! s'arrête sur aucune : il l'écrit aussitôt à Piper, lit ses WAV à mesure qu'ils arrivent, les façonne (le raccord :
+//! ni souffle ni clic à leurs bords, chaque phrase au même niveau) et les joue dans l'ordre par deux lecteurs de
+//! Windows (`MediaPlayer`, qui jouent seuls pendant que le fil veille) — Piper prépare la phrase suivante pendant que
+//! celle-ci se dit, l'autre lecteur l'ouvre d'avance, et elle part à son heure : à la fin de la voix de celle-ci, plus
+//! la pause que demande la ponctuation. Une phrase que Piper n'aurait pas à temps se coupe à une virgule. `taire`
+//! coupe par numéro tout ce qui a été donné jusque-là ; ce qui vient après se dit normalement.
 //! `Evt::VoixFinie(id)` part une fois, et une seule, par identifiant, dans l'ordre : quand c'est dit, coupé ou en
 //! échec ; avant lui, `Evt::VoixEntendue(id)` quand le premier son de la parole s'entend (rien si elle ne s'entend pas).
 
@@ -29,7 +31,8 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use eve::parole::{self, Forme};
+use eve::diction;
+use eve::parole::{self, Forme, Saut};
 
 use crate::chef::Evt;
 use crate::journal;
@@ -38,7 +41,13 @@ use crate::reglages::{Reglages, VOIX_PAR_DEFAUT, dossier_local};
 use lecture::{Lecteur, Synthetiseur};
 pub use prosodie::{Marque, Repere};
 
+mod inspiration;
 mod prosodie;
+mod raccord;
+mod supertonic;
+
+/// Supertonic se mène comme Piper ([`Piper`]) : sa « voix » est ce préfixe et son style (« supertonic/F3 »).
+const SUPERTONIC: &str = "supertonic/";
 
 /// Le pas du fil quand la voix travaille : la file avance (et se coupe) au moins à ce rythme.
 const PAS: Duration = Duration::from_millis(20);
@@ -52,12 +61,23 @@ const DELAI_WINDOWS: Duration = Duration::from_secs(20);
 const DELAI_WAV: Duration = Duration::from_secs(2);
 /// Un son qui ne démarre pas dans ce délai est en échec.
 const DELAI_DEMARRAGE: Duration = Duration::from_secs(5);
-/// Le son suivant part à ce temps de la fin du précédent, dans son silence final : le lecteur de Windows met de 60 à
-/// 120 ms à le faire entendre (mesuré le 2026-10-22), et la pause entre les phrases reste celle que Piper a voulue.
-const AVANCE: Duration = Duration::from_millis(120);
 /// Les WAV d'une séance précédente (plus vieux que ceci) se suppriment au démarrage ; ceux d'une autre Eve qui
 /// tournerait en même temps (un essai) sont plus jeunes.
 const AGE_RESTE: Duration = Duration::from_secs(60);
+/// Ce que Piper met par seconde de voix, avant de l'avoir mesuré (mesuré le 2026-10-26 sur un Core i5-3470 : 0,12 au
+/// calme, de 0,2 à 0,3 quand Eve parle et que sa fenêtre s'anime, jusqu'à 0,9 sous une autre charge) ; et la voix que
+/// donne un caractère au débit 1 (0,062 s au débit 0,85).
+const FACTEUR_DE_PIPER: f64 = 0.3;
+const VOIX_PAR_CARACTERE: f64 = 0.053;
+/// L'inspiration avant de parler (le réglage `souffle`) : son numéro au lecteur (aucun morceau ne l'a), et le silence
+/// qui doit la précéder — entre deux phrases d'une même réponse, ou deux paroles qui se suivent, on n'inspire pas.
+const NUMERO_DE_L_INSPIRATION: u64 = u64::MAX;
+const SILENCE_AVANT_INSPIRATION: Duration = Duration::from_millis(1_500);
+/// Ce que la première phrase d'une réponse peut attendre Piper (rien ne se dit encore) : plus longue, elle se coupe à
+/// une virgule ([`File::couper_pour_la_synthese`]) — sa première partie se dit pendant que Piper fait la suite. Une
+/// phrase qui en suit une autre doit être prête à la fin de la pause d'avant, à cette marge près.
+const ATTENTE_DU_PREMIER_SON: f64 = 0.5;
+const MARGE_DE_PIPER: f64 = 0.05;
 
 /// Une voix du poste : son identifiant (« piper:fr_FR-upmc-medium#0 », « windows:Microsoft Caroline ») et son nom.
 #[derive(Clone, Debug, Serialize)]
@@ -72,6 +92,7 @@ enum Ordre {
     Dire {
         id: u64,
         texte: String,
+        saut: Saut,
     },
     Choisir(String),
     /// Réveille le fil : le seuil de la coupure est dans [`Coupure`].
@@ -459,8 +480,14 @@ impl Voix {
     /// Dit un texte (une phrase, ou plusieurs) après ce qui a été donné avant ; `Evt::VoixFinie(id)` quand c'est dit,
     /// coupé ou en échec.
     pub fn dire(&self, id: u64, texte: &str) {
+        self.dire_apres(id, texte, Saut::Phrase);
+    }
+
+    /// Dit un texte après ce qui a été donné avant, `saut` les séparant dans le texte (une autre ligne, un autre
+    /// paragraphe) : la voix s'y arrête un peu plus.
+    pub fn dire_apres(&self, id: u64, texte: &str, saut: Saut) {
         self.coupure.emettre(id);
-        let _ = self.tx.send(Ordre::Dire { id, texte: texte.to_string() });
+        let _ = self.tx.send(Ordre::Dire { id, texte: texte.to_string(), saut });
     }
 
     /// Se tait tout de suite : coupe ce qui se dit et tout ce qui a été donné jusqu'ici. Un `dire` qui suit se dit
@@ -484,7 +511,13 @@ fn lancer(reglages: &Reglages, rapport: Sender<Evt>, trace: Option<Sender<Trace>
     let coupure = Arc::new(Coupure::default());
     let c = coupure.clone();
     let (voulue, debit, douceur) = (reglages.voix.clone(), reglages.debit, Douceur::de(reglages.douceur));
-    thread::spawn(move || Fil::ouvrir(&voulue, debit, douceur, c, rapport, trace).mener(&rx));
+    // L'inspiration avant de parler, si le réglage la veut : faite une fois, adoucie comme la voix.
+    let souffle = reglages.souffle.then(|| {
+        let mut w = inspiration::inspiration(22_050);
+        adoucir(&mut w, douceur);
+        w
+    });
+    thread::spawn(move || Fil::ouvrir(&voulue, debit, douceur, souffle, c, rapport, trace).mener(&rx));
     Voix { tx, coupure }
 }
 
@@ -559,6 +592,8 @@ enum Trace {
 struct Douceur {
     bruit: f32,
     rythme: f32,
+    /// Le silence que Piper pose après chaque phrase (il les sépare dans son WAV) ; la pause après un point en vient
+    /// ([`raccord::pause_de_phrase`]).
     silence: f32,
     /// La fréquence de coupure du passe-bas (Hz) ; 0 : aucun.
     coupure: f32,
@@ -572,7 +607,12 @@ impl Douceur {
             // « Encore un peu plus douce » : une voix plus calme, des aigus plus adoucis. Le
             // rythme reste celui de Piper (0,8) : à 0,30, `noise_w` divisait la durée des sons par deux — 11,6 syllabes
             // par seconde, le double d'un débit naturel, et Whisper n'y comprenait plus rien (mesuré ; à l'écoute :
-            // « robotique… ou trop vite »).
+            // « robotique… ou trop vite »). Mesuré aussi le 2026-10-26 (huit phrases, trois tirages) : le calme de
+            // `noise_scale` 0,45 rend la voix plus nette sans l'aplatir — l'oreille d'Eve en entend 5,6 % des mots de
+            // travers, contre 10,6 % à 0,667, et sa mélodie garde 3,9 demi-tons d'écart, contre 3,7 ; le passe-bas ôte
+            // 1,8 dB à la présence de la voix (2 à 4,5 kHz) et 6 dB à ses aigus, sans que l'oreille ni un juge (UTMOS22)
+            // s'en ressentent ; un adoucisseur des seules sifflantes, essayé à sa place, était moins bien noté (0,05 à
+            // 0,1 de moins).
             1 => Douceur { bruit: 0.45, rythme: 0.8, silence: 0.35, coupure: 5000.0, gain: 0.85 },
             _ => Douceur { bruit: 0.40, rythme: 0.8, silence: 0.40, coupure: 4000.0, gain: 0.80 },
         }
@@ -613,7 +653,6 @@ fn entete(wav: &[u8]) -> Option<Entete> {
 }
 
 /// Un WAV mono, PCM 16 bits.
-#[cfg_attr(not(windows), allow(dead_code))]
 fn wav_mono(echantillons: &[i16], taux: u32) -> Vec<u8> {
     let taille = (echantillons.len() * 2) as u32;
     let mut o = Vec::with_capacity(44 + taille as usize);
@@ -652,7 +691,6 @@ fn ramener(wav: &mut Vec<u8>) -> bool {
 }
 
 /// Le silence à la fin d'un WAV (16 bits) : ce qui suit son dernier échantillon audible.
-#[cfg_attr(not(windows), allow(dead_code))]
 fn silence_final(wav: &[u8]) -> Duration {
     let Some(e) = entete(wav) else { return Duration::ZERO };
     let fin = (e.debut + e.taille).min(wav.len());
@@ -784,6 +822,12 @@ pub fn lister() -> Vec<VoixDispo> {
             }
         }
     }
+    // Supertonic, si son modèle et ONNX Runtime sont posés : « Supertonic F3 ».
+    for style in supertonic::styles() {
+        let femme = style.starts_with('F');
+        let nom = libelle(&format!("Supertonic {style}"), "neuronale", femme);
+        l.push(VoixDispo { id: format!("supertonic:{style}"), nom, femme });
+    }
     l.extend(voix_windows());
     l.sort_by_key(|v| (v.id != VOIX_PAR_DEFAUT, !v.femme));
     l
@@ -808,24 +852,84 @@ fn voix_de_repli(liste: &[VoixDispo]) -> Option<&VoixDispo> {
     windows().find(|v| v.femme).or_else(|| windows().next())
 }
 
-/// Le texte en phrases : la première se dit pendant que Piper prépare la suivante.
+/// Le texte en phrases : la première se dit pendant que Piper prépare la suivante. Aux vraies fins de phrase seulement,
+/// celles de la parole en flux ([`parole::fin_de_phrase`]) — couper à un point-virgule hache la phrase à l'oreille, et
+/// une phrase continue après « Ouaf ! » de… ; une phrase de moins de 20 caractères se dit avec la suivante.
 pub fn decouper(texte: &str) -> Vec<String> {
-    let car: Vec<char> = texte.chars().collect();
     let mut phrases = Vec::new();
     let mut courante = String::new();
-    for (i, &c) in car.iter().enumerate() {
-        courante.push(c);
-        // Aux vraies fins de phrase seulement : couper à un point-virgule hache la phrase à l'oreille.
-        let fin = matches!(c, '.' | '!' | '?' | '…') && car.get(i + 1).is_none_or(|n| n.is_whitespace());
-        if fin && courante.trim().chars().count() >= 20 {
+    let mut reste = texte.trim();
+    while let Some(fin) = parole::fin_de_phrase(reste, true) {
+        courante.push_str(&reste[..fin]);
+        reste = reste[fin..].trim_start();
+        if courante.trim().chars().count() >= 20 {
             phrases.push(courante.trim().to_string());
             courante.clear();
+        } else {
+            courante.push(' ');
         }
     }
+    courante.push_str(reste);
     if !courante.trim().is_empty() {
         phrases.push(courante.trim().to_string());
     }
     phrases
+}
+
+/// Les derniers mots d'un texte (`n` mots qui ont des lettres, et la ponctuation qui les suit).
+fn derniers_mots(texte: &str, n: usize) -> String {
+    let mots: Vec<&str> = texte.split_whitespace().collect();
+    let mut debut = mots.len();
+    let mut vus = 0;
+    while debut > 0 && vus < n {
+        debut -= 1;
+        if mots[debut].chars().any(char::is_alphanumeric) {
+            vus += 1;
+        }
+    }
+    mots[debut..].join(" ")
+}
+
+/// Un texte précédé de son contexte, et la part de ce contexte (en caractères, de 0 à 1).
+fn avec_contexte(contexte: &str, texte: &str) -> (String, f32) {
+    let s = format!("{contexte} {texte}");
+    let part = contexte.chars().count() as f32 / s.chars().count().max(1) as f32;
+    (s, part)
+}
+
+/// Où couper une phrase pour la synthèse : après une virgule, un point-virgule, un deux-points ou un tiret entre deux
+/// espaces — jamais dans une citation ni entre parenthèses —, chaque partie d'au moins [`PARTIE_MIN`] caractères. Les
+/// frontières, dans l'ordre (l'index qui suit la ponctuation).
+fn frontieres(texte: &str) -> Vec<usize> {
+    let car: Vec<(usize, char)> = texte.char_indices().collect();
+    let total = car.len();
+    let mut dedans = 0i32;
+    let mut out = Vec::new();
+    for (k, &(i, c)) in car.iter().enumerate() {
+        match c {
+            '«' | '(' => dedans += 1,
+            '»' | ')' => dedans -= 1,
+            _ => {}
+        }
+        let suivi = car.get(k + 1).is_some_and(|&(_, s)| s.is_whitespace());
+        let precede = k > 0 && car[k - 1].1.is_whitespace();
+        let ponctuation = matches!(c, ',' | ';' | ':') || (matches!(c, '—' | '–') && precede);
+        if dedans == 0 && ponctuation && suivi && k + 1 >= PARTIE_MIN && total - (k + 1) > PARTIE_MIN {
+            out.push(i + c.len_utf8());
+        }
+    }
+    out
+}
+
+/// Où couper une phrase que Piper n'aurait pas à temps (`pret` : quand il aurait fini tel début de la phrase ;
+/// `limite` : quand il le faut) : à la frontière la plus loin qui serait prête à temps, sinon à la première. Rien :
+/// elle sera prête, ou ne se coupe nulle part.
+fn ou_couper(texte: &str, pret: impl Fn(&str) -> Instant, limite: Instant) -> Option<usize> {
+    if pret(texte) <= limite {
+        return None;
+    }
+    let f = frontieres(texte);
+    f.iter().rev().find(|&&k| pret(&texte[..k]) <= limite).or(f.first()).copied()
 }
 
 // ---- La file ------------------------------------------------------------------------------------------------------
@@ -850,9 +954,23 @@ struct Morceau<A> {
     numero: u64,
     /// Le dernier morceau de sa parole : quand il est fini, la parole l'est.
     dernier: bool,
+    /// Ce qu'il dit (la bouche du portrait le suit).
     texte: String,
+    /// La pause avant lui, de la fin de la voix du morceau d'avant au début de la sienne : celle de la ponctuation qui
+    /// le précède, et d'un saut de ligne ou de paragraphe ([`raccord::pause_apres`], [`raccord::pause_de_saut`]).
+    pause: Duration,
+    /// La seconde partie d'une phrase coupée pour la synthèse ([`File::couper_pour_la_synthese`]) : ce que dit Piper —
+    /// les derniers mots de la première partie, puis elle —, et la part de ce contexte (de 0 à 1), que le raccord ôte.
+    synthese: Option<(String, f32)>,
     etat: Etat<A>,
 }
+
+/// Une partie de phrase coupée pour la synthèse a au moins ce nombre de caractères : plus court, Piper dit mal.
+const PARTIE_MIN: usize = 20;
+/// La seconde partie se dit avec ce nombre de mots de la première : Piper la prononce alors comme la suite d'une
+/// phrase, pas comme une nouvelle (mesuré le 2026-10-26 sur huit phrases : sans contexte, la seconde partie partait
+/// 22 Hz plus haut en médiane que dans la phrase entière ; avec trois mots, 5 Hz — l'écart d'une synthèse à l'autre).
+const MOTS_DE_CONTEXTE: usize = 3;
 
 /// Ce qui reste à dire, dans l'ordre. Rien n'en sort que par la tête : chaque parole se termine donc une fois, à son
 /// tour, dans quelque ordre que ses sons arrivent. (Le son est générique : un WAV en mémoire sur le poste, un simple
@@ -860,19 +978,24 @@ struct Morceau<A> {
 struct File<A> {
     morceaux: VecDeque<Morceau<A>>,
     compteur: u64,
+    /// La pause après un point ([`raccord::pause_de_phrase`]).
+    pause: Duration,
+    /// La pause qui suivra le dernier morceau ajouté, selon ce qui le finit.
+    apres: Duration,
 }
 
 impl<A> File<A> {
-    fn nouvelle() -> File<A> {
-        File { morceaux: VecDeque::new(), compteur: 0 }
+    fn nouvelle(pause: Duration) -> File<A> {
+        File { morceaux: VecDeque::new(), compteur: 0, pause, apres: pause }
     }
 
     fn vide(&self) -> bool {
         self.morceaux.is_empty()
     }
 
-    /// Une parole de plus, une phrase par morceau ; vide ou déjà coupée : un morceau muet, qui se termine à son tour.
-    fn ajouter(&mut self, id: u64, texte: &str, coupee: bool) {
+    /// Une parole de plus, une phrase par morceau, `saut` la séparant de la précédente ; vide ou déjà coupée : un
+    /// morceau muet, qui se termine à son tour.
+    fn ajouter(&mut self, id: u64, texte: &str, coupee: bool, saut: Saut) {
         let phrases = if coupee { Vec::new() } else { decouper(texte) };
         if phrases.is_empty() {
             self.compteur += 1;
@@ -881,25 +1004,64 @@ impl<A> File<A> {
                 numero: self.compteur,
                 dernier: true,
                 texte: String::new(),
+                pause: Duration::ZERO,
+                synthese: None,
                 etat: Etat::Muet,
             });
             return;
         }
         let n = phrases.len();
+        let mut pause = self.apres + raccord::pause_de_saut(saut, self.pause);
         for (i, texte) in phrases.into_iter().enumerate() {
             self.compteur += 1;
+            let apres = raccord::pause_apres(&texte, self.pause);
             self.morceaux.push_back(Morceau {
                 id,
                 numero: self.compteur,
                 dernier: i + 1 == n,
                 texte,
+                pause,
+                synthese: None,
                 etat: Etat::AFaire,
             });
+            pause = apres;
         }
+        self.apres = pause;
+    }
+
+    /// Coupe un morceau encore à faire en deux, à la frontière `k` de son texte (après sa virgule, son deux-points) :
+    /// la première partie garde sa place ; la seconde, un nouveau morceau juste après, se dit après la pause de cette
+    /// ponctuation, et se synthétise avec les derniers mots de la première ([`MOTS_DE_CONTEXTE`]). Son numéro.
+    fn couper_pour_la_synthese(&mut self, numero: u64, k: usize) -> Option<u64> {
+        let pos = self.morceaux.iter().position(|m| m.numero == numero && matches!(m.etat, Etat::AFaire))?;
+        let pause = self.pause;
+        let m = &mut self.morceaux[pos];
+        let (premiere, seconde) = (m.texte.get(..k)?.trim_end().to_string(), m.texte.get(k..)?.trim().to_string());
+        if premiere.chars().count() < PARTIE_MIN || seconde.chars().count() < PARTIE_MIN {
+            return None;
+        }
+        // Le contexte que la première partie avait déjà (elle est elle-même une seconde partie), qui reste devant elle.
+        let avant = m.synthese.take().map(|(s, _)| s[..s.len() - m.texte.len()].trim_end().to_string());
+        m.synthese = avant.map(|c| avec_contexte(&c, &premiere));
+        let contexte = derniers_mots(&premiere, MOTS_DE_CONTEXTE);
+        let entre = raccord::pause_apres(&premiere, pause);
+        m.texte = premiere;
+        let (id, dernier) = (m.id, std::mem::replace(&mut m.dernier, false));
+        self.compteur += 1;
+        let synthese = Some(avec_contexte(&contexte, &seconde));
+        let nouveau =
+            Morceau { id, numero: self.compteur, dernier, texte: seconde, pause: entre, synthese, etat: Etat::AFaire };
+        self.morceaux.insert(pos + 1, nouveau);
+        Some(self.compteur)
     }
 
     fn morceau(&mut self, numero: u64) -> Option<&mut Morceau<A>> {
         self.morceaux.iter_mut().find(|m| m.numero == numero)
+    }
+
+    /// Ce que Piper doit dire pour un morceau : son texte, ou son texte précédé de son contexte.
+    fn a_synthetiser(m: &Morceau<A>) -> &str {
+        m.synthese.as_ref().map_or(m.texte.as_str(), |(s, _)| s.as_str())
     }
 
     /// Le morceau est encore à dire : ni coupé, ni en échec, ni fini.
@@ -917,13 +1079,20 @@ impl<A> File<A> {
         lecture
     }
 
-    /// Les morceaux à préparer, dans l'ordre.
+    /// Les morceaux à préparer, dans l'ordre : leur numéro, et ce que la voix doit en dire ([`File::a_synthetiser`]).
     fn a_faire(&self) -> Vec<(u64, String)> {
-        self.morceaux.iter().filter(|m| matches!(m.etat, Etat::AFaire)).map(|m| (m.numero, m.texte.clone())).collect()
+        self.morceaux
+            .iter()
+            .filter(|m| matches!(m.etat, Etat::AFaire))
+            .map(|m| (m.numero, Self::a_synthetiser(m).to_string()))
+            .collect()
     }
 
     fn premier_a_faire(&self) -> Option<(u64, String)> {
-        self.morceaux.iter().find(|m| matches!(m.etat, Etat::AFaire)).map(|m| (m.numero, m.texte.clone()))
+        self.morceaux
+            .iter()
+            .find(|m| matches!(m.etat, Etat::AFaire))
+            .map(|m| (m.numero, Self::a_synthetiser(m).to_string()))
     }
 
     fn en_preparation(&mut self, numero: u64, depuis: Instant) {
@@ -999,14 +1168,23 @@ impl<A> File<A> {
         self.morceaux.front().filter(|m| matches!(m.etat, Etat::EnCours)).map_or("", |m| m.texte.as_str())
     }
 
-    /// Le son qui se dira juste après celui en cours, s'il est déjà prêt : il peut s'ouvrir d'avance.
-    fn prochain_pret(&self) -> Option<(u64, &A)> {
+    /// Le son qui se dira juste après celui en cours, s'il est déjà prêt (il peut s'ouvrir d'avance), et la pause
+    /// avant lui.
+    fn prochain_pret(&self) -> Option<(u64, &A, Duration)> {
         let mut suite = self.morceaux.iter();
         if !matches!(suite.next()?.etat, Etat::EnCours) {
             return None;
         }
         match suite.find(|m| !matches!(m.etat, Etat::Muet)) {
-            Some(Morceau { numero, etat: Etat::Pret(son), .. }) => Some((*numero, son)),
+            Some(Morceau { numero, pause, etat: Etat::Pret(son), .. }) => Some((*numero, son, *pause)),
+            _ => None,
+        }
+    }
+
+    /// Le prochain morceau à se dire, s'il est prêt et que rien ne se dit : son numéro, la pause avant lui, son son.
+    fn pause_en_tete(&self) -> Option<(u64, Duration, &A)> {
+        match self.morceaux.iter().find(|m| !matches!(m.etat, Etat::Muet))? {
+            Morceau { numero, pause, etat: Etat::Pret(son), .. } => Some((*numero, *pause, son)),
             _ => None,
         }
     }
@@ -1029,9 +1207,15 @@ impl<A> File<A> {
 // ---- Piper -------------------------------------------------------------------------------------------------------
 
 /// Piper, gardé ouvert : une ligne JSON par phrase (`{"text", "output_file"}`), une ligne par WAV écrit, dans l'ordre
-/// des phrases.
+/// des phrases. Supertonic ([`supertonic`]) parle la même langue, dans un fil d'Eve plutôt qu'un processus.
 struct Piper {
-    enfant: Child,
+    /// Le processus de Piper ; aucun pour Supertonic.
+    enfant: Option<Child>,
+    /// Le traitement de ses WAV ([`adoucir`]) : la douceur d'Eve pour Piper ; pour Supertonic, son gain seul (le
+    /// passe-bas a été réglé sur la voix de Piper).
+    douceur: Douceur,
+    /// Supertonic : les phrases jusqu'à ce numéro sont coupées, il les saute (un modèle se recharge en secondes).
+    oubli: Option<Arc<AtomicU64>>,
     /// Les lignes JSON pour Piper, écrites par un fil : un tuyau plein (Piper ne lit la phrase suivante qu'après avoir
     /// fini la sienne) n'arrête jamais la voix.
     entree: Sender<String>,
@@ -1053,6 +1237,24 @@ struct Piper {
 
 impl Piper {
     fn lancer(tige: &str, locuteur: Option<u32>, debit: f64, douceur: Douceur, dossier: &Path) -> io::Result<Piper> {
+        if let Some(style) = tige.strip_prefix(SUPERTONIC) {
+            let s = supertonic::Supertonic::lancer(style, supertonic::vitesse(debit), dossier);
+            return Ok(Piper {
+                enfant: None,
+                douceur: Douceur { coupure: 0.0, ..douceur },
+                oubli: Some(s.oubli),
+                entree: s.entree,
+                sorties: s.sorties,
+                pret: s.pret,
+                erreur: s.erreur,
+                fil_erreurs: None,
+                voix: (tige.to_string(), locuteur),
+                lance: Instant::now(),
+                pret_dit: false,
+                attendus: VecDeque::new(),
+                derniere_sortie: None,
+            });
+        }
         let mut c = Command::new(dossier_piper().join("piper.exe"));
         // Les WAV s'écrivent sous un nom relatif, dans le dossier courant de Piper : un chemin accentué (un profil
         // Windows « Hélène ») ne passerait pas par le JSON, que Piper relit dans la page de code du poste.
@@ -1139,7 +1341,9 @@ impl Piper {
         });
 
         Ok(Piper {
-            enfant,
+            enfant: Some(enfant),
+            douceur,
+            oubli: None,
             entree,
             sorties,
             pret,
@@ -1157,7 +1361,11 @@ impl Piper {
     fn envoyer(&mut self, numero: u64, texte: &str, nom: &str, dossier: &Path) -> Result<(), String> {
         // Une ligne par phrase : les retours à la ligne du texte n'ont rien à faire dans le JSON de Piper.
         let texte = texte.split_whitespace().collect::<Vec<_>>().join(" ");
-        let ligne = format!("{}\n", json!({ "text": texte, "output_file": nom }));
+        // Supertonic reçoit aussi le numéro du morceau : il saute ceux qui sont coupés.
+        let ligne = match self.oubli {
+            Some(_) => format!("{}\n", json!({ "text": texte, "output_file": nom, "numero": numero })),
+            None => format!("{}\n", json!({ "text": texte, "output_file": nom })),
+        };
         self.entree.send(ligne).map_err(|_| "Piper ne lit plus ses phrases".to_string())?;
         self.attendus.push_back((numero, dossier.join(nom)));
         Ok(())
@@ -1175,10 +1383,13 @@ impl Piper {
         }
     }
 
-    /// Arrête Piper s'il tourne encore, et attend que sa sortie d'erreur soit lue jusqu'au bout.
+    /// Arrête Piper s'il tourne encore, et attend que sa sortie d'erreur soit lue jusqu'au bout. (Le fil de Supertonic
+    /// finit de lui-même, quand ses phrases cessent d'arriver.)
     fn finir(&mut self) {
-        let _ = self.enfant.kill();
-        let _ = self.enfant.wait();
+        if let Some(e) = self.enfant.as_mut() {
+            let _ = e.kill();
+            let _ = e.wait();
+        }
         if let Some(f) = self.fil_erreurs.take() {
             let _ = f.join();
         }
@@ -1191,11 +1402,30 @@ impl Drop for Piper {
     }
 }
 
-/// Un WAV annoncé par Piper, à lire dès qu'il est complet.
+/// Un WAV annoncé par Piper, à lire dès qu'il est complet ; le temps que Piper a mis à le faire (s'il ne faisait que
+/// lui), et son traitement, celui du moteur qui l'a écrit.
 struct ALire {
     numero: u64,
     chemin: PathBuf,
     depuis: Instant,
+    synthese: Option<Duration>,
+    douceur: Douceur,
+}
+
+/// Un son prêt à se dire : son WAV, où sa voix commence et où elle se tait (depuis son début) — la pause se compte de
+/// la fin d'une voix au début de la suivante.
+struct Son {
+    wav: Vec<u8>,
+    tete: Duration,
+    voix: Duration,
+}
+
+impl Son {
+    /// Un WAV tel quel (que le raccord n'a pas façonné) : sa voix se tait où commence son silence final.
+    fn tel_quel(wav: Vec<u8>) -> Son {
+        let voix = duree_wav(&wav).unwrap_or_default().saturating_sub(silence_final(&wav));
+        Son { wav, tete: Duration::ZERO, voix }
+    }
 }
 
 /// La voix qui parle : Piper (son modèle et sa locutrice) ou une voix de Windows (son nom).
@@ -1212,6 +1442,8 @@ fn moteur(choisie: &str) -> Moteur {
             Some((tige, n)) => Moteur::Piper(tige.to_string(), n.parse().ok()),
             None => Moteur::Piper(reste.to_string(), None),
         }
+    } else if let Some(style) = choisie.strip_prefix("supertonic:") {
+        Moteur::Piper(format!("{SUPERTONIC}{style}"), None)
     } else if let Some(nom) = choisie.strip_prefix("windows:") {
         Moteur::Windows(nom.to_string())
     } else {
@@ -1238,19 +1470,19 @@ enum Panne {
     Illisible(String),
 }
 
-/// Le morceau qui se dit : sa parole, s'il s'entend déjà (l'horloge du lecteur a commencé), et l'instant où son son
-/// commence — estimé quand le lecteur le reçoit, puis lu sur son horloge ([`lecture::Lecteur::debut`]).
+/// Le morceau qui se dit : sa parole, s'il s'entend déjà (l'horloge du lecteur a commencé), l'instant où son son
+/// commence — estimé quand le lecteur le reçoit, puis lu sur son horloge ([`lecture::Lecteur::debut`]) —, et où sa
+/// voix se tait (depuis ce début).
 struct EnLecture {
     id: u64,
     entendu: bool,
     debut: Instant,
+    voix: Duration,
 }
 
 /// Ce que dit le lecteur du son en cours.
 enum Lu {
     EnCours,
-    /// Il ne reste que son silence final (ce temps) : le son suivant peut partir.
-    Silence(Duration),
     Fini,
     Echec(String),
 }
@@ -1296,7 +1528,19 @@ struct Fil {
     douceur: Douceur,
     /// Le dossier des WAV de Piper (`parole`).
     dossier: PathBuf,
-    file: File<Vec<u8>>,
+    file: File<Son>,
+    /// Quand la voix du dernier son s'est tue (ou se taira, s'il se dit encore) : le son suivant part de là, après sa
+    /// pause ; et quand le fil doit se réveiller pour le faire partir à l'heure.
+    tait: Option<Instant>,
+    reveil: Option<Instant>,
+    /// La vitesse de Piper sur ce poste, apprise phrase après phrase : le temps qu'il met par seconde de voix (son
+    /// facteur temps réel, de 0,1 au calme à près de 1 quand le processeur est pris), et la voix d'un caractère.
+    facteur: f64,
+    par_caractere: f64,
+    /// Depuis quand Piper prépare la première phrase qu'on attend de lui (rien : il attend).
+    synthese_depuis: Option<Instant>,
+    /// L'inspiration qu'on entend avant qu'elle parle (le réglage `souffle`), son WAV ; rien : éteinte.
+    inspiration: Option<Vec<u8>>,
     piper: Option<Piper>,
     /// Les pannes de Piper à la suite (un WAV bien lu remet le compte à zéro) : à la deuxième, le repli.
     pannes: u32,
@@ -1323,6 +1567,7 @@ impl Fil {
         voulue: &str,
         debit: f64,
         douceur: Douceur,
+        inspiration: Option<Vec<u8>>,
         coupure: Arc<Coupure>,
         rapport: Sender<Evt>,
         trace: Option<Sender<Trace>>,
@@ -1344,7 +1589,13 @@ impl Fil {
             debit,
             douceur,
             dossier,
-            file: File::nouvelle(),
+            file: File::nouvelle(raccord::pause_de_phrase(douceur.silence)),
+            tait: None,
+            reveil: None,
+            facteur: FACTEUR_DE_PIPER,
+            par_caractere: VOIX_PAR_CARACTERE / debit.clamp(0.5, 2.0),
+            synthese_depuis: None,
+            inspiration,
             piper: None,
             pannes: 0,
             a_lire: VecDeque::new(),
@@ -1368,10 +1619,13 @@ impl Fil {
         fil
     }
 
-    /// La boucle : les ordres sans attendre, puis un tour de la file ; jusqu'à ce que la `Voix` disparaisse.
+    /// La boucle : les ordres sans attendre, puis un tour de la file ; jusqu'à ce que la `Voix` disparaisse. Quand un
+    /// son doit partir à son heure, le fil se réveille à cette heure-là.
     fn mener(mut self, rx: &Receiver<Ordre>) {
         loop {
-            match rx.recv_timeout(if self.occupe() { PAS } else { PAS_AU_REPOS }) {
+            let pas = if self.occupe() { PAS } else { PAS_AU_REPOS };
+            let pas = self.reveil.map_or(pas, |r| r.saturating_duration_since(Instant::now()).min(pas));
+            match rx.recv_timeout(pas) {
                 Ok(o) => {
                     self.ordre(o);
                     while let Ok(o) = rx.try_recv() {
@@ -1396,13 +1650,36 @@ impl Fil {
 
     fn ordre(&mut self, o: Ordre) {
         match o {
-            Ordre::Dire { id, texte } => {
+            Ordre::Dire { id, texte, saut } => {
                 // Coupée avant d'arriver jusqu'ici : elle se termine à son tour, sans un mot.
                 let coupee = id <= self.coupure.seuil();
-                self.file.ajouter(id, &texte, coupee);
+                // Le texte tel qu'il se dit (« 14 h 30 » : « quatorze heures trente ») : la voix, quelle qu'elle soit,
+                // et la bouche du portrait, qui en suit les syllabes, reçoivent les mêmes mots.
+                self.file.ajouter(id, &diction::tel_qu_il_se_dit(&texte), coupee, saut);
+                if !coupee {
+                    self.inspirer();
+                }
             }
             Ordre::Choisir(id) => self.choisir(id),
             Ordre::Taire => {}
+        }
+    }
+
+    /// Avant de parler après un silence — une phrase de quelques mots au moins —, elle inspire, si le réglage le veut :
+    /// le souffle se joue tout de suite (le portrait inspire au même moment : le chef vient de dire « parole »), et la
+    /// première phrase part juste après lui — ou dès qu'elle est prête, si Piper la fait attendre.
+    fn inspirer(&mut self) {
+        let Some(wav) = &self.inspiration else { return };
+        let silence = self.tait.is_none_or(|t| t.elapsed() >= SILENCE_AVANT_INSPIRATION);
+        let Some(m) = self.file.morceaux.iter().find(|m| !matches!(m.etat, Etat::Muet)) else { return };
+        if self.lecture.is_some() || !silence || m.texte.chars().count() < 20 {
+            return;
+        }
+        let (pause, duree) = (m.pause, duree_wav(wav).unwrap_or_default());
+        if let Ok(attente) = self.lecteur.jouer(NUMERO_DE_L_INSPIRATION, wav.clone()) {
+            // La pause d'avant la première phrase se compte depuis la fin du souffle : elle n'y dure qu'un instant.
+            let fin = Instant::now() + attente + duree + inspiration::APRES;
+            self.tait = Some(fin.checked_sub(pause).unwrap_or(fin));
         }
     }
 
@@ -1441,6 +1718,8 @@ impl Fil {
             return;
         }
         self.coupe_vue = seuil;
+        // Ce qui suit la coupure part tout de suite : rien ne la précède.
+        self.tait = None;
         if self.file.couper(seuil) {
             self.lecteur.arreter();
             self.lecture = None;
@@ -1452,9 +1731,17 @@ impl Fil {
         {
             s.annuler();
         }
-        let coupees =
-            self.piper.as_ref().map_or(0, |p| p.attendus.iter().filter(|(n, _)| !self.file.vivant(*n)).count());
-        if coupees > 0 {
+        let coupees = self
+            .piper
+            .as_ref()
+            .map_or(0, |p| p.attendus.iter().filter(|(n, _)| *n != 0 && !self.file.vivant(*n)).count());
+        // Supertonic saute ce qui est coupé, sans se recharger (ses phrases ont des numéros croissants).
+        if let Some(p) = self.piper.as_ref()
+            && let Some(oubli) = &p.oubli
+        {
+            let derniere = p.attendus.iter().map(|(n, _)| *n).filter(|&n| !self.file.vivant(n)).max();
+            oubli.fetch_max(derniere.unwrap_or(0), Ordering::SeqCst);
+        } else if coupees > 0 {
             journal::ecrire(&format!(
                 "voix : coupée ; Piper relancé plutôt que d'attendre {coupees} phrase(s) coupée(s)"
             ));
@@ -1463,8 +1750,16 @@ impl Fil {
     }
 
     fn lancer_piper(&mut self, tige: &str, locuteur: Option<u32>) {
+        self.synthese_depuis = None;
         match Piper::lancer(tige, locuteur, self.debit, self.douceur, &self.dossier) {
-            Ok(p) => {
+            Ok(mut p) => {
+                // Une phrase d'échauffement, jamais dite (aucun morceau n'a le numéro 0) : la première synthèse de
+                // Piper coûte une centaine de millisecondes de plus que les suivantes (mesuré) — pas à la réponse.
+                self.fichiers += 1;
+                let nom = format!("phrase-{}-{}.wav", std::process::id(), self.fichiers);
+                if p.envoyer(0, "Bonjour.", &nom, &self.dossier).is_ok() {
+                    self.synthese_depuis = Some(Instant::now());
+                }
                 self.piper = Some(p);
                 self.tracer(Trace::PiperLance(Instant::now()));
             }
@@ -1483,6 +1778,7 @@ impl Fil {
 
     /// Arrête Piper : les WAV qu'il a annoncés se lisent tels quels ; ce qu'il préparait encore est refait ou abandonné.
     fn arreter_piper(&mut self, mut p: Piper, suite: Suite) {
+        self.synthese_depuis = None;
         p.finir();
         let attendus = std::mem::take(&mut p.attendus);
         drop(p);
@@ -1509,15 +1805,19 @@ impl Fil {
                     p.pret.store(true, Ordering::SeqCst);
                     let chemin = PathBuf::from(&ligne);
                     let chemin = if chemin.is_absolute() { chemin } else { self.dossier.join(chemin) };
+                    // Le temps que Piper a mis à cette phrase ; il passe aussitôt à la suivante, s'il en a une.
+                    let synthese = self.synthese_depuis.map(|d| maintenant.saturating_duration_since(d));
                     match p.attendus.pop_front() {
                         Some((numero, attendu)) => {
                             if attendu != chemin {
                                 self.a_supprimer.push((attendu, maintenant));
                             }
-                            self.a_lire.push_back(ALire { numero, chemin, depuis: maintenant });
+                            let douceur = p.douceur;
+                            self.a_lire.push_back(ALire { numero, chemin, depuis: maintenant, synthese, douceur });
                         }
                         None => self.a_supprimer.push((chemin, maintenant)),
                     }
+                    self.synthese_depuis = (!p.attendus.is_empty()).then_some(maintenant);
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -1557,9 +1857,9 @@ impl Fil {
             }
             match lire_wav(&a.chemin, fin || maintenant.duration_since(a.depuis) > DELAI_WAV) {
                 Ok(None) => self.a_lire.push_back(a),
-                Ok(Some(mut wav)) => {
-                    adoucir(&mut wav, self.douceur);
-                    self.file.pret(a.numero, wav);
+                Ok(Some(wav)) => {
+                    let son = self.son(a.numero, wav, a.synthese, a.douceur);
+                    self.file.pret(a.numero, son);
                     self.pannes = 0;
                     self.a_supprimer.push((a.chemin, maintenant));
                 }
@@ -1572,6 +1872,43 @@ impl Fil {
             }
         }
         erreur
+    }
+
+    /// Un WAV de la voix, prêt à se dire : façonné par le raccord (le souffle de ses bords ôté, chaque phrase au même
+    /// niveau, fondue, ses pauses selon la ponctuation), puis adouci. Le temps que Piper y a mis (`synthese`) lui
+    /// apprend sa vitesse sur ce poste.
+    fn son(&mut self, numero: u64, wav: Vec<u8>, synthese: Option<Duration>, douceur: Douceur) -> Son {
+        let Some(m) = self.file.morceaux.iter().find(|m| m.numero == numero) else { return Son::tel_quel(wav) };
+        let synthetise = File::a_synthetiser(m).chars().count();
+        let consigne = raccord::Consigne {
+            silence: Duration::from_secs_f32(douceur.silence),
+            texte: &m.texte,
+            pause: self.file.pause,
+            contexte: m.synthese.as_ref().map(|s| s.1),
+        };
+        let mut son = match raccord::faconner(&wav, &consigne) {
+            Some(f) => Son { wav: f.wav, tete: f.tete, voix: f.voix },
+            None => Son::tel_quel(wav.clone()),
+        };
+        adoucir(&mut son.wav, douceur);
+        // Toute la voix que Piper a faite (son contexte compris, sans son silence de fin) : par caractère, et le temps
+        // qu'il y a mis. Une phrase trop courte n'apprend rien (son temps est surtout celui de Piper qui démarre).
+        let brute = duree_wav(&wav).unwrap_or_default().as_secs_f64() - f64::from(douceur.silence);
+        if let Some(s) = synthese
+            && synthetise >= 15
+            && brute > 0.5
+        {
+            let facteur = (s.as_secs_f64() / brute).clamp(0.03, 3.0);
+            self.facteur += 0.3 * (facteur - self.facteur);
+            let par_caractere = ((brute - 0.1) / synthetise as f64).clamp(0.02, 0.2);
+            self.par_caractere += 0.3 * (par_caractere - self.par_caractere);
+        }
+        son
+    }
+
+    /// La voix que donnera un texte de `caracteres` caractères, d'après ce que Piper a déjà dit.
+    fn voix_estimee(&self, caracteres: usize) -> f64 {
+        0.1 + self.par_caractere * caracteres as f64
     }
 
     /// Une panne de Piper. Arrêté, il est relancé à la phrase suivante ; mais s'il ne démarre pas, ou au deuxième échec
@@ -1673,18 +2010,82 @@ impl Fil {
             self.lancer_piper(tige, locuteur);
         }
         let maintenant = Instant::now();
-        for (numero, texte) in self.file.a_faire() {
+        while let Some((numero, _)) = self.file.premier_a_faire() {
+            self.couper_si_en_retard(numero, maintenant);
+            let Some((numero, texte)) = self.file.premier_a_faire() else { return };
             self.fichiers += 1;
             let nom = format!("phrase-{}-{}.wav", std::process::id(), self.fichiers);
             // Sans Piper (le repli vient d'avoir lieu), la voix de Windows reprend au tour suivant.
             let Some(p) = self.piper.as_mut() else { return };
+            let libre = p.attendus.is_empty();
             if let Err(e) = p.envoyer(numero, &texte, &nom, &self.dossier) {
                 let detail = p.detail();
                 self.panne(Panne::Arret(format!("{e}{detail}")));
                 return;
             }
+            if libre {
+                self.synthese_depuis = Some(maintenant);
+            }
             self.file.en_preparation(numero, maintenant);
         }
+    }
+
+    /// Une phrase que Piper n'aurait pas à temps se coupe à une virgule (ou un deux-points, un point-virgule) : sa
+    /// première partie se dit pendant que Piper fait la suite. À temps : la première phrase d'une réponse, au plus
+    /// [`ATTENTE_DU_PREMIER_SON`] après maintenant ; une phrase qui en suit une autre, à la fin de la pause qui la
+    /// précède. La coupure : la plus loin qui serait prête à temps, sinon la première.
+    fn couper_si_en_retard(&mut self, numero: u64, maintenant: Instant) {
+        let Some(besoin) = self.attendu_a(numero, maintenant) else { return };
+        let libre = self.piper_libre(maintenant);
+        let Some(m) = self.file.morceaux.iter().find(|m| m.numero == numero) else { return };
+        let tolerance = if besoin <= maintenant { ATTENTE_DU_PREMIER_SON } else { MARGE_DE_PIPER };
+        let limite = besoin + Duration::from_secs_f64(tolerance);
+        let contexte = File::a_synthetiser(m).chars().count() - m.texte.chars().count();
+        let pret = |texte: &str| {
+            libre + Duration::from_secs_f64(self.facteur * self.voix_estimee(contexte + texte.chars().count()))
+        };
+        if let Some(k) = ou_couper(&m.texte, pret, limite) {
+            self.file.couper_pour_la_synthese(numero, k);
+        }
+    }
+
+    /// Quand le son du morceau `numero` sera attendu : à la fin de la voix qui se dit (ou qui s'est tue), plus la pause
+    /// et la voix de chaque morceau avant lui (sa durée s'il est prêt, sinon son estimation), plus sa propre pause ;
+    /// jamais avant maintenant.
+    fn attendu_a(&self, numero: u64, maintenant: Instant) -> Option<Instant> {
+        let mut fin = self.lecture.as_ref().map(|l| l.debut + l.voix).or(self.tait);
+        for m in &self.file.morceaux {
+            if matches!(m.etat, Etat::Muet | Etat::EnCours) {
+                continue;
+            }
+            let debut = fin.map_or(maintenant, |f| (f + m.pause).max(maintenant));
+            if m.numero == numero {
+                return Some(debut);
+            }
+            let voix = match &m.etat {
+                Etat::Pret(s) => s.voix,
+                _ => Duration::from_secs_f64(self.voix_estimee(m.texte.chars().count())),
+            };
+            fin = Some(debut + voix);
+        }
+        None
+    }
+
+    /// Quand Piper aura fini tout ce qu'on lui a déjà donné, d'après sa vitesse.
+    fn piper_libre(&self, maintenant: Instant) -> Instant {
+        let Some(p) = &self.piper else { return maintenant };
+        let mut t = self.synthese_depuis.unwrap_or(maintenant);
+        for (n, _) in &p.attendus {
+            // Une phrase coupée depuis, ou l'échauffement (« Bonjour. ») : courte.
+            let caracteres = self
+                .file
+                .morceaux
+                .iter()
+                .find(|m| m.numero == *n)
+                .map_or(8, |m| File::a_synthetiser(m).chars().count());
+            t += Duration::from_secs_f64(self.facteur * self.voix_estimee(caracteres));
+        }
+        t.max(maintenant)
     }
 
     fn preparer_windows(&mut self, nom: &str) {
@@ -1704,7 +2105,10 @@ impl Fil {
             }
             match resultat {
                 Some(Ok(wav)) => {
-                    self.file.pret(numero, wav);
+                    // Le raccord et le gain d'Eve, comme Piper ; pas le passe-bas, réglé sur la voix de Piper (comme
+                    // pour Supertonic).
+                    let son = self.son(numero, wav, None, Douceur { coupure: 0.0, ..self.douceur });
+                    self.file.pret(numero, son);
                     self.erreur_windows_dite = false;
                 }
                 Some(Err(e)) => self.echec_windows(numero, e),
@@ -1747,8 +2151,11 @@ impl Fil {
         }
     }
 
-    /// Le son en cours fini, le suivant part aussitôt ; les paroles se terminent à mesure que la tête avance.
+    /// Le son en cours, puis le suivant, qui part à son heure : à la fin de la voix d'avant, plus sa pause — même s'il
+    /// était prêt plus tôt, ou s'il arrive tard (la pause reste entière) —, moins le temps que le lecteur met à le
+    /// faire entendre. Les paroles se terminent à mesure que la tête avance.
     fn jouer(&mut self) {
+        self.reveil = None;
         if let Some(l) = self.lecture.as_mut() {
             let lu = self.lecteur.sonder();
             // Le début du son, lu sur l'horloge du lecteur : la bouche s'y recale (elle partait de l'estimation).
@@ -1761,7 +2168,7 @@ impl Fil {
             }
             let entendu = !l.entendu && debut.is_some();
             l.entendu |= entendu;
-            let (id, depuis) = (l.id, l.debut);
+            let (id, depuis, tait) = (l.id, l.debut, l.debut + l.voix);
             if entendu {
                 self.tracer(Trace::Son { id, a: depuis });
                 // Le premier son de cette parole s'entend : le chef en tient le temps de la première parole.
@@ -1771,27 +2178,30 @@ impl Fil {
                 }
             }
             let maintenant = Instant::now();
-            // La fin du son : maintenant, ou la fin de son silence final quand le suivant part pendant ce silence.
+            // La fin du son, là où sa voix s'est tue : le son suivant part de là.
             let fin = match lu {
                 Lu::EnCours => {
-                    // Le son qui suit s'ouvre déjà dans l'autre lecteur : il partira sans attendre.
-                    if let Some((numero, wav)) = self.file.prochain_pret() {
-                        self.lecteur.precharger(numero, wav);
+                    // Le son qui suit s'ouvre déjà dans l'autre lecteur ; à son heure, il part, et celui-ci finit son
+                    // silence de fin sans qu'on l'attende.
+                    let Some((numero, son, pause)) = self.file.prochain_pret() else { return };
+                    self.lecteur.precharger(numero, &son.wav);
+                    let depart = depart(tait, pause, self.lecteur.attente(numero) + son.tete);
+                    if maintenant < depart {
+                        self.reveil = Some(depart);
+                        return;
                     }
-                    return;
+                    tait.min(maintenant)
                 }
-                // Rien de prêt à enchaîner : celui-ci finit son silence.
-                Lu::Silence(_) if self.file.prochain_pret().is_none() => return,
-                Lu::Silence(reste) => maintenant + reste,
                 Lu::Fini => {
                     self.erreur_lecture_dite = false;
-                    maintenant
+                    tait.min(maintenant)
                 }
                 Lu::Echec(e) => {
                     self.echec_lecture(e);
                     maintenant
                 }
             };
+            self.tait = Some(fin);
             self.lecture = None;
             self.plus_rien_ne_s_entend();
             if let Some((id, dernier)) = self.file.lecture_finie() {
@@ -1802,11 +2212,19 @@ impl Fil {
             }
         }
         loop {
+            // Le son suivant attend son heure : la fin de la voix d'avant, plus sa pause.
+            if let (Some(tait), Some((numero, pause, son))) = (self.tait, self.file.pause_en_tete()) {
+                let depart = depart(tait, pause, self.lecteur.attente(numero) + son.tete);
+                if Instant::now() < depart {
+                    self.reveil = Some(depart);
+                    return;
+                }
+            }
             let (finies, suivant) = self.file.avancer();
             for id in finies {
                 self.finir(id);
             }
-            let Some((numero, id, wav)) = suivant else { return };
+            let Some((numero, id, Son { wav, voix, .. })) = suivant else { return };
             let piste = piste_du_son(&wav, self.file.texte_en_cours());
             match self.lecteur.jouer(numero, wav) {
                 Ok(attente) => {
@@ -1814,7 +2232,7 @@ impl Fil {
                     // après les avoir calculées ([`regler_le_retard_de_l_ecran`]), et le début de la phrase s'y voit.
                     let debut = Instant::now() + attente;
                     entendre(Some((debut, piste)));
-                    self.lecture = Some(EnLecture { id, entendu: false, debut });
+                    self.lecture = Some(EnLecture { id, entendu: false, debut, voix });
                     self.tracer(Trace::Debut { id, a: Instant::now() });
                     return;
                 }
@@ -1862,6 +2280,12 @@ impl Fil {
         }
         self.supprimer();
     }
+}
+
+/// L'heure où donner le son suivant au lecteur : à la fin de la voix d'avant (`tait`), plus sa pause, moins ce qui
+/// précède sa voix (`avance` : le temps que le lecteur met à le faire entendre, et la marge avant sa voix).
+fn depart(tait: Instant, pause: Duration, avance: Duration) -> Instant {
+    (tait + pause).checked_sub(avance).unwrap_or(tait)
 }
 
 /// Les WAV restés d'une séance précédente.
@@ -1921,7 +2345,7 @@ mod lecture {
     use windows::Storage::Streams::{DataReader, DataWriter, InMemoryRandomAccessStream};
     use windows::core::HSTRING;
 
-    use super::{AVANCE, DELAI_DEMARRAGE, Lu, Synthese, duree_wav, silence_final};
+    use super::{DELAI_DEMARRAGE, Lu, Synthese, duree_wav};
 
     fn texte(e: windows::core::Error) -> String {
         e.to_string()
@@ -1953,8 +2377,6 @@ mod lecture {
         /// L'instant où le son en cours a commencé, d'après l'horloge du lecteur ([`super::debut_du_son`]).
         debut: Option<Instant>,
         duree: Option<Duration>,
-        /// Le silence à la fin du son en cours.
-        silence: Duration,
     }
 
     /// Ce que met le son à partir après `Play()`, mesuré dans le son qui sort du poste (le 2026-10-25) : ouvert
@@ -1976,7 +2398,6 @@ mod lecture {
                 a_joue: None,
                 debut: None,
                 duree: None,
-                silence: Duration::ZERO,
             }
         }
 
@@ -2027,7 +2448,6 @@ mod lecture {
             self.a_joue = None;
             self.debut = None;
             self.duree = duree_wav(&wav);
-            self.silence = silence_final(&wav);
             Ok(if ouvert { ATTENTE_OUVERT_D_AVANCE } else { ATTENTE_OUVERT_A_L_INSTANT })
         }
 
@@ -2048,13 +2468,6 @@ mod lecture {
                 self.a_joue.get_or_insert_with(Instant::now);
                 if let Ok(p) = session.Position().map(Duration::from) {
                     self.debut = super::debut_du_son(Instant::now(), self.depuis.elapsed(), p, self.debut);
-                    // Dans son silence final, assez près de la fin : le son suivant peut partir.
-                    if let Some(d) = self.duree {
-                        let reste = d.saturating_sub(p);
-                        if reste <= AVANCE.min(self.silence) {
-                            return Lu::Silence(reste);
-                        }
-                    }
                 }
             } else if self.a_joue.is_some() && (etat == MediaPlaybackState::Paused || etat == MediaPlaybackState::None)
             {
@@ -2068,6 +2481,11 @@ mod lecture {
                 return Lu::Fini;
             }
             Lu::EnCours
+        }
+
+        /// Le temps que le son `numero` mettrait à s'entendre si on le donnait maintenant : ouvert d'avance ou non.
+        pub fn attente(&self, numero: u64) -> Duration {
+            if self.precharge == Some((numero, true)) { ATTENTE_OUVERT_D_AVANCE } else { ATTENTE_OUVERT_A_L_INSTANT }
         }
 
         /// L'instant où le son en cours a commencé de s'entendre, lu sur l'horloge du lecteur ; `None` : pas encore.
@@ -2168,6 +2586,9 @@ mod lecture {
         pub fn debut(&self) -> Option<Instant> {
             None
         }
+        pub fn attente(&self, _numero: u64) -> Duration {
+            Duration::ZERO
+        }
         pub fn arreter(&mut self) {}
     }
 
@@ -2208,7 +2629,7 @@ mod essais {
 
     /// Une file d'essai : le son est un simple nom.
     fn file() -> File<&'static str> {
-        File::nouvelle()
+        File::nouvelle(Duration::from_millis(450))
     }
 
     fn numeros(f: &File<&'static str>) -> Vec<u64> {
@@ -2218,8 +2639,8 @@ mod essais {
     /// Les ordres reçus par le fil, versés dans la file comme il le fait.
     fn verser(rx: &Receiver<Ordre>, f: &mut File<&'static str>, c: &Coupure) {
         for o in rx.try_iter() {
-            if let Ordre::Dire { id, texte } = o {
-                f.ajouter(id, &texte, id <= c.seuil());
+            if let Ordre::Dire { id, texte, saut } = o {
+                f.ajouter(id, &texte, id <= c.seuil(), saut);
             }
         }
     }
@@ -2228,9 +2649,9 @@ mod essais {
     fn chaque_parole_se_termine_une_fois_et_dans_l_ordre() {
         let mut f = file();
         let t = Instant::now();
-        f.ajouter(1, "Deux choses pressent aujourd'hui. Appeler Toitures Exemple pour le gypse.", false);
-        f.ajouter(2, "  \n ", false);
-        f.ajouter(3, "Puis valider le plan du fournisseur.", false);
+        f.ajouter(1, "Deux choses pressent aujourd'hui. Appeler Toitures Exemple pour le gypse.", false, Saut::Phrase);
+        f.ajouter(2, "  \n ", false, Saut::Phrase);
+        f.ajouter(3, "Puis valider le plan du fournisseur.", false, Saut::Phrase);
         let n = numeros(&f);
         assert_eq!(n.len(), 4);
         assert_eq!(f.a_faire().iter().map(|a| a.0).collect::<Vec<_>>(), vec![n[0], n[1], n[3]]);
@@ -2314,8 +2735,8 @@ mod essais {
     fn un_piper_relance_refait_ce_qu_il_preparait() {
         let mut f = file();
         let t = Instant::now();
-        f.ajouter(1, "Une phrase que Piper préparait quand on l'a relancé.", false);
-        f.ajouter(2, "Une autre, qu'une panne a fait abandonner.", false);
+        f.ajouter(1, "Une phrase que Piper préparait quand on l'a relancé.", false, Saut::Phrase);
+        f.ajouter(2, "Une autre, qu'une panne a fait abandonner.", false, Saut::Phrase);
         let n = numeros(&f);
         f.en_preparation(n[0], t);
         f.en_preparation(n[1], t);
@@ -2337,8 +2758,8 @@ mod essais {
     fn fermer_termine_tout_ce_qui_restait() {
         let mut f = file();
         let t = Instant::now();
-        f.ajouter(7, "Une phrase qui se dit quand tout se ferme.", false);
-        f.ajouter(8, "Une autre qui attendait.", false);
+        f.ajouter(7, "Une phrase qui se dit quand tout se ferme.", false, Saut::Phrase);
+        f.ajouter(8, "Une autre qui attendait.", false, Saut::Phrase);
         let n = numeros(&f);
         f.en_preparation(n[0], t);
         f.pret(n[0], "sept");
@@ -2351,10 +2772,10 @@ mod essais {
     fn le_son_qui_suit_s_ouvre_d_avance_s_il_est_pret() {
         let mut f = file();
         let t = Instant::now();
-        f.ajouter(1, "La phrase qui se dit en ce moment même.", false);
-        f.ajouter(2, "", false);
-        f.ajouter(3, "Celle qui suit, déjà prête.", false);
-        f.ajouter(4, "Puis une autre, encore chez Piper.", false);
+        f.ajouter(1, "La phrase qui se dit en ce moment même.", false, Saut::Phrase);
+        f.ajouter(2, "", false, Saut::Phrase);
+        f.ajouter(3, "Celle qui suit, déjà prête.", false, Saut::Phrase);
+        f.ajouter(4, "Puis une autre, encore chez Piper.", false, Saut::Phrase);
         let n = numeros(&f);
         for k in [n[0], n[2], n[3]] {
             f.en_preparation(k, t);
@@ -2367,7 +2788,91 @@ mod essais {
         assert!(f.prochain_pret().is_none(), "la parole 3 passe avant la 4");
         f.pret(n[2], "trois");
         // La parole vide (2) se terminera à son tour : la suivante à se dire est la 3.
-        assert_eq!(f.prochain_pret(), Some((n[2], &"trois")));
+        assert_eq!(f.prochain_pret().map(|(n, s, _)| (n, s)), Some((n[2], &"trois")));
+    }
+
+    #[test]
+    fn chaque_morceau_attend_la_pause_de_ce_qui_le_precede() {
+        let mut f = file();
+        f.ajouter(1, "Tu veux que je le note ? C'est fait.", false, Saut::Phrase);
+        f.ajouter(2, "Mercredi, c'est chargé :", false, Saut::Paragraphe);
+        f.ajouter(3, "la réunion de parents ;", false, Saut::Ligne);
+        let pauses: Vec<u128> = f.morceaux.iter().map(|m| m.pause.as_millis()).collect();
+        // Après un point (d'office), après la question, un paragraphe après un point, une ligne après un deux-points.
+        assert_eq!(pauses, [450, 563, 450 + 270, 360 + 68]);
+        // Une phrase continue après une minuscule : une seule phrase, une seule pause.
+        assert_eq!(
+            decouper("Elle a crié « Ouaf ! » de toutes ses forces. Le facteur a sursauté."),
+            ["Elle a crié « Ouaf ! » de toutes ses forces.", "Le facteur a sursauté."]
+        );
+        // Le son suivant est donné au lecteur un peu avant la fin de la pause : le temps qu'il met à l'entendre.
+        let (t0, ms) = (Instant::now(), Duration::from_millis);
+        assert_eq!(depart(t0, ms(450), ms(15)), t0 + ms(435));
+    }
+
+    #[test]
+    fn une_longue_phrase_se_coupe_pour_la_synthese() {
+        let texte =
+            "Le premier groupe de mots est ici, le deuxième groupe de mots est là, et le troisième groupe finit.";
+        let k: Vec<usize> = frontieres(texte);
+        assert_eq!(
+            k.iter().map(|&k| &texte[..k]).collect::<Vec<_>>(),
+            [
+                "Le premier groupe de mots est ici,",
+                "Le premier groupe de mots est ici, le deuxième groupe de mots est là,"
+            ]
+        );
+        // Ni dans une citation, ni entre parenthèses, ni trop près d'un bout.
+        assert!(frontieres("Il a dit « oui, mais pas maintenant, ni demain » à son frère hier.").is_empty());
+        assert!(frontieres("Oui, c'est noté pour demain matin à neuf heures.").is_empty());
+        // Coupée en deux, puis la seconde partie en deux : chacune se dit après la pause de sa virgule, et se
+        // synthétise avec les trois derniers mots qui la précèdent.
+        let mut f = file();
+        f.ajouter(1, texte, false, Saut::Phrase);
+        let n = numeros(&f)[0];
+        let seconde = f.couper_pour_la_synthese(n, k[0]).expect("coupée");
+        let k2 = f.morceaux[1].texte.find("là,").unwrap() + "là,".len();
+        f.couper_pour_la_synthese(seconde, k2).expect("coupée encore");
+        let m: Vec<(&str, u128, Option<&str>, bool)> = f
+            .morceaux
+            .iter()
+            .map(|m| (m.texte.as_str(), m.pause.as_millis(), m.synthese.as_ref().map(|s| s.0.as_str()), m.dernier))
+            .collect();
+        assert_eq!(
+            m,
+            [
+                ("Le premier groupe de mots est ici,", 450, None, false),
+                (
+                    "le deuxième groupe de mots est là,",
+                    270,
+                    Some("mots est ici, le deuxième groupe de mots est là,"),
+                    false
+                ),
+                ("et le troisième groupe finit.", 270, Some("mots est là, et le troisième groupe finit."), true),
+            ]
+        );
+        let part = f.morceaux[2].synthese.as_ref().unwrap().1;
+        assert!((part - 12.0 / 42.0).abs() < 1e-6, "{part}");
+        // Ce que Piper dit : le contexte avec la partie.
+        assert_eq!(f.a_faire()[2].1, "mots est là, et le troisième groupe finit.");
+        // Une partie trop courte : pas de coupure.
+        let mut g = file();
+        g.ajouter(1, "Oui, c'est noté pour demain.", false, Saut::Phrase);
+        assert!(g.couper_pour_la_synthese(numeros(&g)[0], 4).is_none());
+    }
+
+    #[test]
+    fn on_ne_coupe_que_ce_qui_serait_en_retard() {
+        let texte =
+            "Le premier groupe de mots est ici, le deuxième groupe de mots est là, et le troisième groupe finit.";
+        let t0 = Instant::now();
+        // Piper fait 10 caractères par 100 ms.
+        let pret = |t: &str| t0 + Duration::from_millis(10 * t.chars().count() as u64);
+        // À temps : pas de coupure ; un peu tard : la frontière la plus loin qui tient ; bien trop tard : la première.
+        assert_eq!(ou_couper(texte, pret, t0 + Duration::from_millis(1_000)), None);
+        assert_eq!(ou_couper(texte, pret, t0 + Duration::from_millis(800)), Some(71));
+        assert_eq!(ou_couper(texte, pret, t0 + Duration::from_millis(100)), Some(34));
+        assert_eq!(ou_couper("Une phrase sans virgule qui serait en retard.", pret, t0), None);
     }
 
     /// Un WAV comme ceux de Piper : 22 050 Hz, 16 bits, mono.
@@ -2539,6 +3044,7 @@ mod essais {
     fn la_voix_choisie_dit_son_moteur_et_son_repli() {
         assert_eq!(moteur("piper:fr_FR-upmc-medium#0"), Moteur::Piper("fr_FR-upmc-medium".into(), Some(0)));
         assert_eq!(moteur("piper:fr_FR-siwis-medium"), Moteur::Piper("fr_FR-siwis-medium".into(), None));
+        assert_eq!(moteur("supertonic:F3"), Moteur::Piper("supertonic/F3".into(), None));
         assert_eq!(moteur("windows:Microsoft Caroline"), Moteur::Windows("Microsoft Caroline".into()));
         assert_eq!(moteur(""), Moteur::Aucun);
         let v = |id: &str, femme| VoixDispo { id: id.into(), nom: id.into(), femme };
@@ -2664,8 +3170,8 @@ mod essais {
             ms(premier - donnees[0]),
             donne(1).map_or(f64::NAN, |d| ms(d - donnees[0]))
         );
-        // Les trous, de la fin d'un WAV (silence final compris : 0,35 s, la pause voulue entre les phrases) au son
-        // suivant, donné au lecteur puis entendu ; négatif, le suivant s'entend avant la fin de ce silence.
+        // Les pauses, de la fin de la voix d'un son au son suivant, donné au lecteur puis entendu : celle d'un point
+        // (les phrases en finissent toutes par un), à la précision du lecteur près.
         let ecart = |a: Instant, b: Instant| if a >= b { ms(a - b) } else { -ms(b - a) };
         let mut fin_precedente: Option<(u64, Instant)> = None;
         let mut trous = Vec::new();
@@ -2706,7 +3212,9 @@ mod essais {
         assert_eq!(finies, vec![1, 2, 3, 4]);
         assert!(coupure < Duration::from_millis(50), "la coupure a pris {:.1} ms", ms(coupure));
         for (id, trou) in trous {
-            assert!(trou.abs() < 150.0, "un trou de {trou:.0} ms avant {id}");
+            let voulue = raccord::pause_de_phrase(Douceur::de(Reglages::default().douceur).silence);
+            let voulue = voulue.as_secs_f64() * 1000.0;
+            assert!((trou - voulue).abs() < 80.0, "une pause de {trou:.0} ms avant {id}, pour {voulue:.0} ms");
         }
     }
 }

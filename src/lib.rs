@@ -7,6 +7,8 @@
 //!
 //! Cette bibliothèque est la partie pure, sans micro ni fenêtre, qui compile partout et pourra entrer dans
 //! Entrepreneur Général :
+//! - [`diction`] : le texte tel qu'il se dit, juste avant la voix (les nombres, les heures, les montants, les sigles,
+//!   les mots anglais) ;
 //! - [`garde`] : ce qui demande l'accord de la personne avant de partir (et ce qui ne part jamais) ;
 //! - [`mesures`] : le temps de chaque étape d'une demande et le coût de chaque tour, notés au journal et relus par
 //!   `eve --mesures` ;
@@ -16,6 +18,7 @@
 //!   contrôle des SDK officiels : l'initialisation, les crochets, les permissions, l'interruption).
 
 pub mod annuler;
+pub mod diction;
 pub mod garde;
 pub mod mesures;
 pub mod parole;

@@ -2795,7 +2795,7 @@ impl Chef {
             return;
         }
         self.annonce = true;
-        self.dire_phrase(phrase);
+        self.dire_phrase(phrase, parole::Saut::Phrase);
     }
 
     fn fin_du_tour(&mut self, texte: String, erreur: bool, cout: Option<f64>, duree_ms: Option<u64>) {
@@ -2944,10 +2944,11 @@ impl Chef {
         self.suivant();
     }
 
-    /// Une phrase de la réponse : dite, et la première de la demande, chronométrée ; l'émotion de son passage, que le
-    /// visage prend tout de suite, ou quand la phrase d'avant aura fini ([`Passages::phrase`]).
-    fn dire_la_reponse(&mut self, phrase: &str) {
-        let parole_id = self.dire_phrase(phrase);
+    /// Une phrase de la réponse : dite (après ce qui la sépare de la précédente : la voix s'y arrête plus ou moins), et
+    /// la première de la demande, chronométrée ; l'émotion de son passage, que le visage prend tout de suite, ou quand
+    /// la phrase d'avant aura fini ([`Passages::phrase`]).
+    fn dire_la_reponse(&mut self, phrase: &parole::Phrase) {
+        let parole_id = self.dire_phrase(&phrase.texte, phrase.saut);
         self.premiere_phrase(parole_id);
         let e = self.passages.phrase(parole_id);
         self.montrer(e);
@@ -3723,12 +3724,17 @@ impl Chef {
     /// Une phrase déjà écrite à l'écran (la réponse) : en sourdine, rien de plus ; le micro n'a pas à se taire. Le
     /// numéro de la parole, si elle se dit.
     fn dire_a_voix_haute(&mut self, texte: &str) -> Option<u64> {
+        self.dire_apres(texte, parole::Saut::Phrase)
+    }
+
+    /// Une phrase dite à voix haute après ce qui la sépare de la précédente dans le texte (`saut`).
+    fn dire_apres(&mut self, texte: &str, saut: parole::Saut) -> Option<u64> {
         if self.reglages.sourdine {
             return None;
         }
         self.parole_id += 1;
         self.parle = true;
-        self.voix.dire(self.parole_id, texte);
+        self.voix.dire_apres(self.parole_id, texte, saut);
         let maintenant = Instant::now();
         self.dit_recemment.retain(|(quand, _)| maintenant.duration_since(*quand) < DIT_RECEMMENT);
         self.dit_recemment.push_back((maintenant, texte.to_string()));
@@ -3736,10 +3742,10 @@ impl Chef {
     }
 
     /// Une phrase de la réponse (ou un commentaire du travail) : elle prend la file de la voix, sans rien couper.
-    fn dire_phrase(&mut self, texte: &str) -> Option<u64> {
+    fn dire_phrase(&mut self, texte: &str, saut: parole::Saut) -> Option<u64> {
         self.dit_dans_le_tour = true;
         self.dernier_dit = Some(Instant::now());
-        self.dire_a_voix_haute(texte)
+        self.dire_apres(texte, saut)
     }
 
     /// Eve se tait tout de suite (ce qui attendait d'être dit est oublié, et l'émotion de ses passages).

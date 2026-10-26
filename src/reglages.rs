@@ -25,13 +25,14 @@ pub const VOCABULAIRE: &str = "Entrepreneur Général, Eve, Adjointe, chantier, 
 pub const VOIX_PAR_DEFAUT: &str = "piper:fr_FR-upmc-medium#0";
 
 /// Ce qu'Eve ne prend qu'en démarrant : son nom et celui de l'entreprise (le titre de sa fenêtre, l'amorce de
-/// l'oreille), le dossier de l'Adjointe, l'oreille et son vocabulaire, le débit et la douceur de la voix, le port de la
-/// vitrine, la fenêtre, l'avance des rappels, et les privilèges de Claude — son espace d'actions se fixe au démarrage.
+/// l'oreille), le dossier de l'Adjointe, l'oreille et son vocabulaire, le débit, la douceur et l'inspiration de la
+/// voix, le port de la vitrine, la fenêtre, l'avance des rappels, et les privilèges de Claude — son espace d'actions se
+/// fixe au démarrage.
 /// Le reste vaut tout de suite (le modèle et l'effort de Claude : entre deux demandes, la conversation reprise ; le
 /// préchauffage : à la conversation suivante).
-const AU_DEMARRAGE: [&str; 14] = [
+const AU_DEMARRAGE: [&str; 15] = [
     "nom", "entreprise", "adjointe", "oreille", "oreille_carte", "oreille_eveil", "vocabulaire", "debit", "douceur",
-    "port", "fenetre", "fenetre_native", "alertes.minutes_avant", "privileges",
+    "souffle", "port", "fenetre", "fenetre_native", "alertes.minutes_avant", "privileges",
 ];
 
 /// Une vérification de `reglages.json` au plus par seconde ([`Reglages::relire`]).
@@ -75,6 +76,8 @@ pub struct Reglages {
     /// La douceur de la voix neuronale : 0 telle quelle, 1 douce (le réglage A : une voix plus calme, des pauses un
     /// peu plus longues, les aigus adoucis), 2 plus douce encore (le réglage B).
     pub douceur: u8,
+    /// L'inspiration qu'on entend avant qu'Eve parle, très douce, au moment où son portrait inspire : éteinte d'office.
+    pub souffle: bool,
     /// La touche à tenir pour parler : ctrl_droit, ctrl_gauche, alt_droit, f8, f9, pause, arret_defil.
     pub touche: String,
     /// Le modèle de Claude.
@@ -234,6 +237,7 @@ impl Default for Reglages {
             voix: VOIX_PAR_DEFAUT.into(),
             debit: 0.85,
             douceur: 1,
+            souffle: false,
             touche: "ctrl_droit".into(),
             modele: "claude-sonnet-5-5".into(),
             // « medium » : au plus haut, une question simple a pris sept minutes ; la voix demande vite.

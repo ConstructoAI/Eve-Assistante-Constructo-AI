@@ -52,6 +52,12 @@ LUI PARLER
 · Tiens la touche choisie pendant que tu parles, ou commence ta phrase par « Eve, … » (si tu as gardé le mot d'éveil).
 · Ctrl+Alt+E affiche ou cache sa fenêtre. Tu peux aussi écrire tes demandes en bas de la fenêtre.
 · « Eve, stop » la coupe pendant qu'elle parle. La sourdine (dans ses réglages) la fait répondre par écrit.
+· Sa voix se choisit dans ses réglages : Piper (« Jessica », d'office), les voix de Windows, et Supertonic 2 si tu la
+  poses, une voix plus naturelle (cinq voix de femme, « Supertonic F1 » à « F5 » ; 348 Mo, un processeur un peu plus
+  sollicité). Pour la poser : programme\python\python.exe programme\outils\ressources_eve.py --installer --supertonic
+  --dossier %LOCALAPPDATA%\Eve\commun (dans %LOCALAPPDATA%\Eve), puis une jonction « supertonic » dans le dossier
+  du spécialiste (%LOCALAPPDATA%\Eve\specialistes\<son nom court>) vers commun\supertonic, comme celle de « voix » ;
+  relance Eve. Ou demande-le à Eve elle-même.
 · Elle a d'office la liberté de Claude Code : chercher sur le Web, lire et écrire des fichiers, lancer des commandes
   sur ton ordinateur, travailler à plusieurs en parallèle, se servir de Chrome, des connecteurs de ton compte claude.ai,
   des serveurs MCP de ton poste et de Constructo AI ; regarder une pièce jointe ou une page photographiée avec la caméra

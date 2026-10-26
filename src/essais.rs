@@ -2,7 +2,7 @@
 //! - `eve --voix` : les voix du poste ;
 //! - `eve --essai-voix [--id ID] texte…` : la voix dit un texte ;
 //! - `eve --essai-oreille fichier.wav [modèle]` : l'oreille transcrit un fichier — sur la carte graphique comme Eve,
-//!   si son serveur est là ;
+//!   si son serveur est là ; `eve --essai-oreille dossier [modèle]` : chacun de ses WAV, sur le processeur ;
 //! - `eve --essai-micro [secondes]` : le micro écoute, puis le bilan de ses paquets — perd-il du son ? ;
 //! - `eve --essai-cartes [dossier] [scène]` : les cartes de la fenêtre native, dans une fenêtre à part ;
 //! - `eve --essai-musique [secondes] [dossier] [--marge]` : la musique du centre de commande, et ce qu'en entend le
@@ -199,6 +199,9 @@ pub fn oreille(r: &Reglages, args: &[String]) -> i32 {
         eprintln!("usage : eve --essai-oreille fichier.wav");
         return 2;
     };
+    if Path::new(fichier).is_dir() {
+        return oreille_d_un_dossier(r, Path::new(fichier), args.get(1));
+    }
     let audio = match micro::lire_wav(Path::new(fichier)) {
         Ok(a) => a,
         Err(e) => {
@@ -7318,4 +7321,40 @@ impl eframe::App for FilmDuPortrait {
             let _ = e.join();
         }
     }
+}
+
+/// `eve --essai-oreille dossier [modèle]` : chaque WAV d'un dossier, transcrit par l'oreille du processeur comme Eve
+/// transcrit une phrase (la fenêtre de la phrase, son amorce), le modèle chargé une fois — pour comparer ce qu'on
+/// entend de deux voix, ou de deux façons de dire un texte. Une ligne par fichier : « nom (calcul) : texte ».
+fn oreille_d_un_dossier(r: &Reglages, dossier: &Path, modele: Option<&String>) -> i32 {
+    let modele = modele.map(std::path::PathBuf::from).unwrap_or_else(|| r.chemin_oreille());
+    let parametres = whisper_rs::WhisperContextParameters::default();
+    let contexte = match whisper_rs::WhisperContext::new_with_params(&modele, parametres) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("le modèle ne se charge pas : {e}");
+            return 1;
+        }
+    };
+    let Ok(mut etat) = contexte.create_state() else {
+        eprintln!("Whisper ne démarre pas");
+        return 1;
+    };
+    let mut wavs: Vec<std::path::PathBuf> = std::fs::read_dir(dossier)
+        .map(|d| d.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "wav")).collect())
+        .unwrap_or_default();
+    wavs.sort();
+    let (amorce, fils) = (r.vocabulaire_complet(), oreille::fils_de_calcul());
+    for wav in wavs {
+        let nom = wav.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        match micro::lire_wav(&wav) {
+            Ok(audio) => {
+                let t0 = Instant::now();
+                let texte = oreille::transcrire(&mut etat, &audio, &amorce, fils);
+                println!("{nom} ({:.1} s) : {texte}", t0.elapsed().as_secs_f32());
+            }
+            Err(e) => println!("{nom} : illisible ({e})"),
+        }
+    }
+    0
 }
