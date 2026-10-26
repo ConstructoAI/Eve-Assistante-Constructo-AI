@@ -1,10 +1,12 @@
 //! La mimique du portrait d'Eve : ce que fait son visage d'une image à l'autre, partie par partie — ses émotions
 //! ([`super::emotions`]), sa bouche ([`super::bouche`]), les gestes de sa tête et de ses sourcils ([`super::gestes`]), son
-//! regard ([`super::regard`]) —, chacune sur ses ressorts ([`Ressort`]), assemblées en une pose ([`super::Pose`]).
+//! buste et son souffle ([`super::corps`]), son regard ([`super::regard`]) —, chacune sur ses ressorts ([`Ressort`]),
+//! assemblées en une pose ([`super::Pose`]).
 
 use eve::parole::Emotion;
 
 use super::bouche::Bouche;
+use super::corps::Buste;
 use super::emotions::Emotions;
 use super::gestes::Gestes;
 use super::regard::Regard;
@@ -90,6 +92,7 @@ pub(super) struct Mimique {
     emotions: Emotions,
     bouche: Bouche,
     gestes: Gestes,
+    buste: Buste,
     regard: Regard,
     hasard: Hasard,
     vu_a: f64,
@@ -104,10 +107,10 @@ impl Mimique {
     }
 
     /// La pose du visage `v` à l'heure `temps` (celle de la fenêtre), Eve à son `activite`, l'émotion de sa réponse
-    /// `emotion` : les émotions d'abord (celle qui domine donne ses bouches et sa tête), puis la bouche, les gestes (la
-    /// tête suit la bouche), le regard. `vivant` : les animations de Windows sont permises — sans elles, ni souffle, ni
-    /// regard de côté, ni tête qui bouge, et la pose dit quand la redessiner (au prochain clignement, une fois tout
-    /// posé).
+    /// `emotion` : les émotions d'abord (celle qui domine donne ses bouches et sa tête ; elles couvrent le visage
+    /// calme), puis la bouche, les gestes (la tête suit la bouche), le buste, le regard. `vivant` : les animations de
+    /// Windows sont permises — sans elles, ni souffle, ni regard de côté, ni tête qui bouge, et la pose dit quand la
+    /// redessiner (au prochain clignement, une fois tout posé).
     pub(super) fn pose(
         &mut self,
         v: &Visage,
@@ -122,8 +125,9 @@ impl Mimique {
         let mut pose = Pose::default();
         let h = &mut self.hasard;
         self.emotions.avancer(&m, v, emotion, &mut pose);
-        self.bouche.avancer(&m, v, self.emotions.dominante(), &mut pose);
+        self.bouche.avancer(&m, v, &self.emotions, &mut pose);
         self.gestes.avancer(&m, v, self.bouche.ouverture(), &self.emotions, h, &mut pose);
+        self.buste.avancer(&m, &self.emotions, &mut pose);
         self.regard.avancer(&m, v, &self.emotions, h, &mut pose);
         if !vivant && !m.parle() && self.emotions.posees() && self.bouche.posee() {
             pose.apres = self.regard.prochain_clin(temps);

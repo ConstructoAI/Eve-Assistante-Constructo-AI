@@ -5,7 +5,7 @@
 //! autre posture quand elle reprend. Quand elle écoute, la tête penchée vers la personne, et un petit hochement quand
 //! celle-ci s'arrête un instant ; quand elle réfléchit, la tête un peu relevée, immobile ; au repos, une posture gardée
 //! longtemps, puis une autre, et les sourcils de loin en loin. Son émotion leur donne leur élan : plus vifs dans la
-//! joie, plus retenus dans la tristesse. Et son souffle. Rien ne flotte : chaque mouvement va quelque part et s'y pose.
+//! joie, plus retenus dans la tristesse. Rien ne flotte : chaque mouvement va quelque part et s'y pose.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -136,8 +136,8 @@ pub(super) struct Gestes {
 
 impl Gestes {
     /// Les gestes à cette image, la bouche à son `ouverture`, les `emotions` du visage : les sourcils (sous l'émotion :
-    /// une émotion qui a les siens les couvre), la tête (et le penchant de l'émotion) et le souffle. Sans les
-    /// animations de Windows, rien ne bouge.
+    /// une émotion qui a les siens les couvre) et la tête (et le penchant de l'émotion). Sans les animations de
+    /// Windows, rien ne bouge.
     pub(super) fn avancer(
         &mut self,
         m: &Moment,
@@ -152,9 +152,6 @@ impl Gestes {
         let (tete, leves) = self.bouger(m, ouverture, emotions.penchant(), elan(emotions.dominante()), phrase, h);
         pose.serie(Strate::Dessous, sourcils, leves, 1.0);
         if m.vivant {
-            // Le souffle : une inspiration toutes les quatre secondes et demie (elle ne fait que grandir : le cadre
-            // reste dans l'image).
-            pose.souffle = 0.003 * (1.0 + (m.temps * std::f64::consts::TAU / 4.5).sin()) as f32;
             pose.tete = tete;
         }
     }

@@ -273,9 +273,9 @@ impl Visage {
     fn sources(&self) -> Vec<(egui::TextureId, Arc<egui::ColorImage>, [usize; 2])> {
         let [l, h] = self.taille;
         let place = |uv: Rect| [(uv.min.x * l as f32).round() as usize, (uv.min.y * h as f32).round() as usize];
-        let calques = self.calques.iter().flatten().chain(
-            self.expressions.iter().flat_map(|x| std::iter::once(&x.visage).chain(&x.bouches).chain(&x.levres_closes)),
-        );
+        let des_emotions =
+            self.expressions.iter().flat_map(|x| std::iter::once(&x.visage).chain(&x.bouches).chain(&x.levres_closes));
+        let calques = self.calques.iter().flatten().chain(des_emotions).chain(&self.calme);
         std::iter::once((self.texture.id(), self.image.clone(), [0, 0]))
             .chain(calques.map(|c| (c.texture.id(), c.image.clone(), place(c.uv))))
             .collect()
@@ -340,6 +340,7 @@ mod essais {
             taille: [64, 48],
             calques: [vec![calque.clone()], vec![], vec![], vec![], vec![], vec![], vec![]],
             expressions: Vec::new(),
+            calme: None,
             fond: None,
             cadre: Rect::from_min_max(pos2(0.0, 0.0), pos2(0.75, 1.0)),
             demande: Arc::default(),

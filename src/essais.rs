@@ -7076,10 +7076,15 @@ fn piste_du_film(dites: Option<&Path>, k: usize, texte: &str) -> voix::Piste {
     }
 }
 
+/// Le temps que met une phrase à s'entendre après que le chef a dit « parole » — dès qu'il la donne à la voix : Piper
+/// la prépare, le lecteur de Windows l'ouvre ; de 0,3 à 1,3 s au journal de l'Assistante. Eve inspire pendant ce temps.
+const AVANT_LE_SON: f64 = 0.6;
+
 /// Le scénario du film : Eve au repos, puis chaque phrase — son émotion vient d'abord, une seconde ; une question, Eve
-/// écoute d'abord la personne, puis réfléchit, et après l'avoir posée, écoute sa réponse —, puis le calme revenu ; et
-/// sa fin. Une phrase dite (`phrase-1.wav`… dans `dites`), ou une voix inventée. `conversation` : avant la première
-/// phrase aussi, Eve écoute la personne, puis réfléchit, comme quand on lui parle.
+/// écoute d'abord la personne, puis réfléchit, et après l'avoir posée, écoute sa réponse ; le chef dit « parole » un
+/// peu avant le son ([`AVANT_LE_SON`]) —, puis le calme revenu ; et sa fin. Une phrase dite (`phrase-1.wav`… dans
+/// `dites`), ou une voix inventée. `conversation` : avant la première phrase aussi, Eve écoute la personne, puis
+/// réfléchit, comme quand on lui parle.
 fn scenario_du_film(dites: Option<&Path>, conversation: bool) -> (Vec<EtapeDuFilm>, f64) {
     use crate::natif::portrait::Activite;
     let etape = |debut, emotion, activite| EtapeDuFilm { debut, emotion, activite, phrase: None };
@@ -7096,8 +7101,10 @@ fn scenario_du_film(dites: Option<&Path>, conversation: bool) -> (Vec<EtapeDuFil
         }
         if emotion.is_some() {
             etapes.push(etape(t, emotion, Activite::Repos));
-            t += 1.2;
+            t += 1.2 - AVANT_LE_SON;
         }
+        etapes.push(etape(t, emotion, Activite::Parle));
+        t += AVANT_LE_SON;
         let piste = piste_du_film(dites, k, texte);
         let duree = piste.duree().as_secs_f64();
         let apres = if question { Activite::Ecoute } else { Activite::Repos };
@@ -7257,6 +7264,7 @@ impl eframe::App for FilmDuPortrait {
                 }
                 (None, Activite::Ecoute) => println!("elle écoute : à {:.0} ms", t * 1000.0),
                 (None, Activite::Reflechit) => println!("elle réfléchit : à {:.0} ms", t * 1000.0),
+                (None, Activite::Parle) => println!("elle va parler : à {:.0} ms", t * 1000.0),
                 _ => {}
             }
         }

@@ -162,6 +162,12 @@ impl Emotions {
         if self.part.x >= self.part_avant.x { self.emotion } else { self.avant }
     }
 
+    /// La part du visage que les émotions couvrent, de 0 à 1 : celle qui vient posée sur celle qui s'efface.
+    pub(super) fn couverture(&self) -> f32 {
+        let part = |e: Option<Emotion>, r: &Ressort| if e.is_some() { r.x.clamp(0.0, 1.0) } else { 0.0 };
+        1.0 - (1.0 - part(self.emotion, &self.part)) * (1.0 - part(self.avant, &self.part_avant))
+    }
+
     /// Le penchant que les émotions donnent à la tête, chacune selon sa part.
     pub(super) fn penchant(&self) -> Tete {
         [(self.emotion, self.part.x), (self.avant, self.part_avant.x)].into_iter().fold(
@@ -226,6 +232,7 @@ mod essais {
             taille: [1, 1],
             calques: Default::default(),
             expressions,
+            calme: None,
             fond: None,
             cadre: entiere,
             demande: Default::default(),
@@ -251,13 +258,13 @@ mod essais {
         // Elle dit sa joie, puis se tait : la joie reste cinq secondes, puis le calme revient, et elle ne revient pas.
         let (mut e, mut t) = (Emotions::default(), 0.0);
         avancer(&mut e, &v, &mut t, 2.0, Activite::Parle, joie);
-        assert_eq!(e.emotion, joie);
+        assert!(e.emotion == joie && e.couverture() > 0.99, "elle couvre le visage");
         avancer(&mut e, &v, &mut t, 4.8, Activite::Repos, joie);
         assert_eq!(e.emotion, joie, "encore là");
         avancer(&mut e, &v, &mut t, 0.4, Activite::Repos, joie);
         assert_eq!(e.emotion, None, "partie");
         avancer(&mut e, &v, &mut t, 1.5, Activite::Repos, joie);
-        assert!(e.posees() && e.dominante().is_none());
+        assert!(e.posees() && e.dominante().is_none() && e.couverture() < 0.01);
         // On lui parle : la joie s'efface aussitôt ; la tristesse reste.
         let mut f = Emotions::default();
         avancer(&mut f, &v, &mut t, 1.0, Activite::Parle, joie);

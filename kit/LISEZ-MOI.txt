@@ -71,12 +71,14 @@ LUI PARLER
   cercle. Ses poses, de la même taille et posées à côté d'elle sous son nom (eve.png, puis eve-yeux-1.png… les yeux
   qui se ferment, eve-regard-1.png… des regards, eve-sourcils-1.png… les sourcils levés, eve-bouche-1.png… la bouche et
   la mâchoire de plus en plus ouvertes, eve-rond-1.png… arrondie pour o et ou, eve-large-1.png… étirée pour i et é,
-  eve-ferme-1.png… les lèvres jointes pour m, b, p, f et v ; et une par émotion : eve-emotion-joie.png, -amusee,
+  eve-ferme-1.png… les lèvres jointes pour m, b, p, f et v, eve-calme.png son sourire calme pour t'écouter et te
+  parler, les lèvres closes ; et une par émotion : eve-emotion-joie.png, -amusee,
   -empathie, -triste, -surprise, -reflexion, -serieuse, chacune avec ses bouches pour parler,
   eve-emotion-joie-bouche-1…, et ses lèvres closes, eve-emotion-joie-ferme.png), viennent avec elle et l'animent :
   elle cligne, te regarde, cherche des yeux quand elle réfléchit, respire ; sa tête accompagne ses phrases (un
   hochement à la fin d'un groupe de mots, la tête penchée au bout d'une question) et se penche vers toi quand tu lui
-  parles ; sa bouche suit sa voix et les mots qu'elle dit (en sourdine, elle ne bouge pas) ; son visage prend
+  parles ; sa bouche suit sa voix et les mots qu'elle dit, d'un sourire plus calme que celui de sa photo (en
+  sourdine, elle ne bouge pas) ; son visage prend
   l'émotion de chaque passage de sa réponse, que Claude choisit, au moment où il se dit, et parle sans la quitter.
 · Ce qui ne se défait pas attend « je confirme », de vive voix ou d'un clic : une suppression demandée à la voix, et
   toute écriture dans Constructo AI (voir plus bas). Un simple « oui » ne suffit pas. Elle ne lit jamais ses propres
