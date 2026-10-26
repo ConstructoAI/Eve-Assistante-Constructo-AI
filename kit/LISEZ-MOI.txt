@@ -30,12 +30,13 @@ L'INSTALLATION
 2. Double-clique Installer.bat.
 3. Réponds à l'entrevue : « Quel spécialiste veux-tu ? », puis une dizaine de questions sur son métier, ses clients,
    son savoir, ses limites, sa façon de te parler. Tape « assez » quand tu veux arrêter.
-4. Quelques réglages : ton prénom, son nom, son dossier, son cerveau (Sonnet 5.5, rapide ; ou Opus 5.5, plus fort :
-   il se change ensuite dans ses réglages, rubrique « Cerveau », ou de vive voix, « passe à Opus »), la touche pour
-   parler et le mot d'éveil ; avec une carte NVIDIA, son oreille sur la carte, bien plus rapide que le processeur ; sa
-   liberté (totale, ou ses fichiers et le Web seulement) ; Constructo AI ; si elle te demande « je confirme » avant ce
-   qui ne se défait pas ; son allure (le centre de commande, son réseau neuronal ou la Voie lactée, ou le thème clair
-   de Constructo AI : elle se change ensuite dans ses réglages) ; un raccourci sur le bureau.
+4. Quelques réglages : ton prénom, son nom, son dossier, son cerveau (Sonnet 5.5, rapide ; ou Opus 5.5, plus fort : il
+   se change ensuite dans ses réglages, rubrique « Cerveau », ou de vive voix, « passe à Opus »), la touche pour parler
+   et le mot d'éveil ; avec une carte NVIDIA, son oreille sur la carte, bien plus rapide que le processeur ; sa liberté
+   (totale, ou ses fichiers et le Web seulement) ; Constructo AI ; si elle te demande « je confirme » avant ce qui ne se
+   défait pas ; son allure (le thème clair de Constructo AI, proposé d'office, où Eve te parle avec son visage ; ou le
+   centre de commande, son réseau neuronal ou la Voie lactée : elle se change ensuite dans ses réglages) ; un raccourci
+   sur le bureau.
 5. Le profil s'écrit, de 5 à 20 minutes (Claude cherche sur le Web pendant ce temps), puis Eve démarre — et, si tu l'as
    reliée à Constructo AI, elle ouvre sa page de connexion dans ton navigateur (voir plus bas).
 
@@ -66,23 +67,24 @@ LUI PARLER
   Excel) ; une capture d'écran se colle (Ctrl+V) comme une pièce jointe ; sous chaque réponse, sa durée et son coût.
   Une phrase mal entendue ne part pas : Eve le dit, et la met dans la saisie, à corriger.
 · Une conversation par jour : un redémarrage dans la journée reprend celle du jour ; chaque matin, une neuve.
-· Dans le thème clair de Constructo AI, son portrait peut prendre la place de l'orbe : Réglages › Thème › Portrait
-  d'Eve, « Choisir une image… » — une photo, ou une image détourée (un PNG au fond transparent), dont la tête sort du
-  cercle. Ses poses, de la même taille et posées à côté d'elle sous son nom (eve.png, puis eve-yeux-1.png… les yeux qui
-  se ferment, eve-regard-1.png… des regards, eve-sourcils-1.png… les sourcils levés, eve-bouche-1.png… la bouche et la
-  mâchoire de plus en plus ouvertes, eve-rond-1.png… arrondie pour o et ou, eve-large-1.png… étirée pour i et é,
-  eve-ferme-1.png… les lèvres jointes pour m, b, p, f et v, eve-calme.png son sourire calme pour t'écouter et te parler,
-  les lèvres closes ; et une par émotion : eve-emotion-joie.png, -amusee, -empathie, -triste, -surprise, -reflexion,
-  -serieuse, chacune avec ses bouches pour parler, eve-emotion-joie-bouche-1…, et ses lèvres closes,
-  eve-emotion-joie-ferme.png, ses formes pour que ses syllabes la gardent, eve-emotion-joie-rond-1…, -large-1…, -dents,
-  -ferme-rond, et ses yeux et ses sourcils pour vivre sous elle, eve-emotion-triste-regard-1…, -yeux-1…, -sourcils-1… ;
-  et le masque de ses cheveux, eve-cheveux.png), viennent avec elle et l'animent : elle cligne, te regarde — ses yeux
-  vivent même sous une émotion —, cherche des yeux quand elle réfléchit, respire — sa poitrine et ses épaules se
-  soulèvent ; sa tête accompagne ses phrases (un hochement à la fin d'un groupe de mots, la tête penchée au bout d'une
-  question, un « non » de la tête), tourne un peu avec son regard et se penche vers toi quand tu lui parles, et ses
-  cheveux la suivent avec un temps de retard ; sa bouche suit sa voix et les mots qu'elle dit, d'un sourire plus calme
-  que celui de sa photo (en sourdine, elle ne bouge pas) ; son visage prend l'émotion de chaque passage de sa réponse,
-  que Claude choisit, au moment où il se dit, et parle sans la quitter.
+· Eve vient avec son visage : son portrait et ses poses (programme\portrait du kit, que l'installateur pose chez chaque
+  spécialiste), qui prennent la place de l'orbe dans le thème clair de Constructo AI. Réglages › Thème › Portrait d'Eve
+  en met un autre, « Changer d'image… » — une photo, ou une image détourée (un PNG au fond transparent), dont la tête
+  sort du cercle —, ou rend l'orbe, « Retirer ». Les poses d'une image, de la même taille et posées à côté d'elle sous
+  son nom (eve.png, puis eve-yeux-1.png… les yeux qui se ferment, eve-regard-1.png… des regards, eve-sourcils-1.png… les
+  sourcils levés, eve-bouche-1.png… la bouche et la mâchoire de plus en plus ouvertes, eve-rond-1.png… arrondie pour o
+  et ou, eve-large-1.png… étirée pour i et é, eve-ferme-1.png… les lèvres jointes pour m, b, p, f et v, eve-calme.png
+  son sourire calme pour t'écouter et te parler, les lèvres closes ; et une par émotion : eve-emotion-joie.png, -amusee,
+  -empathie, -triste, -surprise, -reflexion, -serieuse, chacune avec ses bouches pour parler,
+  eve-emotion-joie-bouche-1…, et ses lèvres closes, eve-emotion-joie-ferme.png, ses formes pour que ses syllabes la
+  gardent, eve-emotion-joie-rond-1…, -large-1…, -dents, -ferme-rond, et ses yeux et ses sourcils pour vivre sous elle,
+  eve-emotion-triste-regard-1…, -yeux-1…, -sourcils-1… ; et le masque de ses cheveux, eve-cheveux.png), viennent avec
+  elle et l'animent : elle cligne, te regarde — ses yeux vivent même sous une émotion —, cherche des yeux quand elle
+  réfléchit, respire — sa poitrine et ses épaules se soulèvent ; sa tête accompagne ses phrases (un hochement à la fin
+  d'un groupe de mots, la tête penchée au bout d'une question, un « non » de la tête), tourne un peu avec son regard et
+  se penche vers toi quand tu lui parles, et ses cheveux la suivent avec un temps de retard ; sa bouche suit sa voix et
+  les mots qu'elle dit, d'un sourire plus calme que celui de sa photo (en sourdine, elle ne bouge pas) ; son visage
+  prend l'émotion de chaque passage de sa réponse, que Claude choisit, au moment où il se dit, et parle sans la quitter.
 · Ce qui ne se défait pas attend « je confirme », de vive voix ou d'un clic : une suppression demandée à la voix, et
   toute écriture dans Constructo AI (voir plus bas). Un simple « oui » ne suffit pas. Elle ne lit jamais ses propres
   jetons ni tes fichiers de clés (.env).

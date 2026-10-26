@@ -6,12 +6,14 @@ devient ce spécialiste. On le relance pour en ajouter un autre.
     installer.py --essai reponses.json  un essai sans clavier : les réponses viennent du fichier, rien ne se lance
 
 Ce qu'il pose sur le poste, pour tous les spécialistes :
-    %LOCALAPPDATA%\\Eve\\programme\\            le programme, recopié du kit (une Eve qui tourne garde l'ancien)
+    %LOCALAPPDATA%\\Eve\\programme\\            le programme, recopié du kit (une Eve qui tourne garde l'ancien), et le
+                                              portrait d'Eve (portrait\\), d'où chaque spécialiste reçoit le sien
     %LOCALAPPDATA%\\Eve\\commun\\               la voix et l'oreille, téléchargées une fois (environ 410 Mo)
     %LOCALAPPDATA%\\Eve\\specialistes.json      la liste des spécialistes posés
     %LOCALAPPDATA%\\Eve\\Installer.bat          de quoi en ajouter un autre sans le kit
 et pour chacun :
-    %LOCALAPPDATA%\\Eve\\specialistes\\<id>\\    ses réglages, son journal, sa mémoire, son historique
+    %LOCALAPPDATA%\\Eve\\specialistes\\<id>\\    ses réglages, son portrait et ses poses, son journal, sa mémoire, son
+                                              historique
     <son dossier de travail>\\                  PROFIL.md, CLAUDE.md, EVE_CONSIGNE.md, entrevue.json, scripts\\, Eve.bat
 
 Il faut Claude Code sur le poste, connecté au compte Claude de la personne : c'est le cerveau d'Eve, et l'entrevue
@@ -64,14 +66,16 @@ TOUCHES = [
 ]
 # Les allures de la fenêtre (le réglage « theme », THEMES dans src\reglages.rs) : le choix revient à la personne, et se
 # change ensuite dans les réglages de la fenêtre. La première est celle d'office du programme : rien ne s'écrit pour
-# elle. Le numéro d'une réponse garde son sens : une allure nouvelle s'ajoute au bout.
+# elle. Le numéro d'une réponse garde son sens : une allure nouvelle s'ajoute au bout. L'installateur propose d'office
+# le thème clair (THEME_PROPOSE), où Eve montre son visage : son portrait, qui parle et s'émeut.
 THEMES = [
     ("Le centre de commande : le réseau neuronal, ses panneaux et sa musique", "le centre de commande", None),
-    ("Le thème clair Constructo AI : le tableau de bord de l'ERP, sans musique", "le thème clair Constructo AI",
-     "constructo"),
+    ("Le thème clair Constructo AI : le portrait d'Eve, qui parle et s'émeut, et le tableau de bord de l'ERP, sans "
+     "musique", "le thème clair Constructo AI, avec le portrait d'Eve", "constructo"),
     ("Le centre de commande en Voie lactée : la galaxie et ses étoiles, ses panneaux et sa musique",
      "le centre de commande en Voie lactée", "galaxie"),
 ]
+THEME_PROPOSE = 1
 PORT_DEPART = 47821
 QUESTIONS_MAX = 24
 # En dessous, le profil est trop mince : une seconde passe le complète (le plombier de référence en fait 47 000).
@@ -410,7 +414,7 @@ def questions_communes(reponses, nom_suggere):
     accords = oui_non(reponses, "accords", "Avant de supprimer, ou d'écrire dans Constructo AI (créer, modifier, payer, "
                       "envoyer…), Eve te demande-t-elle « je confirme » ?", True)
     theme = THEMES[choisir(reponses, "theme", "Son allure (elle se change ensuite dans ses réglages) :",
-                           [t[0] for t in THEMES], 0)]
+                           [t[0] for t in THEMES], THEME_PROPOSE)]
     raccourci = oui_non(reponses, "raccourci", "Un raccourci sur le bureau ?", True)
     return {
         "prenom": prenom, "nom": nom, "dossier": dossier, "modele": cerveau[1],
@@ -546,9 +550,29 @@ def poser_programme():
             shutil.copy2(source, cible)
     for d in ("python", "outils"):
         shutil.copytree(os.path.join(KIT, d), os.path.join(PROGRAMME, d), dirs_exist_ok=True)
+    # Le portrait est remplacé en entier : une pose que le nouveau kit n'a plus ne doit pas suivre chez le prochain.
+    portrait = os.path.join(PROGRAMME, "portrait")
+    if os.path.isdir(os.path.join(KIT, "portrait")):
+        shutil.rmtree(portrait, ignore_errors=True)
+        shutil.copytree(os.path.join(KIT, "portrait"), portrait)
     installeur = os.path.join(os.path.dirname(KIT), "Installer.bat")
     if os.path.isfile(installeur):
         shutil.copy2(installeur, os.path.join(EVE, "Installer.bat"))
+
+
+def poser_portrait(local):
+    """Le portrait d'Eve et ses poses (programme\\portrait) dans le dossier local d'un spécialiste, où le programme le
+    lit : son visage dans le thème clair. Un portrait déjà là (une image que la personne a choisie) reste. Rend le
+    nombre d'images posées."""
+    source = os.path.join(PROGRAMME, "portrait")
+    if not os.path.isfile(os.path.join(source, "portrait.png")):
+        return 0
+    if any(os.path.isfile(os.path.join(local, f"portrait.{ext}")) for ext in ("png", "jpg", "jpeg", "webp", "gif")):
+        return 0
+    noms = [n for n in os.listdir(source) if n.startswith("portrait") and n.endswith(".png")]
+    for n in noms:
+        shutil.copy2(os.path.join(source, n), os.path.join(local, n))
+    return len(noms)
 
 
 def lancer_telechargement(carte):
@@ -773,6 +797,7 @@ def installer(reponses):
 
     local = os.path.join(SPECIALISTES, choix["id"])
     os.makedirs(local, exist_ok=True)
+    poser_portrait(local)
     # L'oreille de la carte : même si son téléchargement a échoué, la jonction dit qu'elle est voulue, et Eve.bat la
     # reprend au lancement ; sans elle, Eve écoute par le processeur.
     for d in ("modeles", "voix", "piper") + (("whisper-gpu",) if choix["carte"] else ()):

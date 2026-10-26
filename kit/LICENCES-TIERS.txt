@@ -49,6 +49,11 @@ Licence Apache 2.0 : https://www.apache.org/licenses/LICENSE-2.0
 · Python 3.11.9 (programme\python, la distribution « embarquable » de python.org) — il fait tourner l'installateur et
   le téléchargeur. Python Software Foundation License Version 2. © 2001-2024 Python Software Foundation.
   https://docs.python.org/3/license.html
+· Le portrait d'Eve (programme\portrait : sa photo, ses poses et le masque de ses cheveux) : © 2026 Sylvain Leduc —
+  Constructo AI, sous la même licence qu'Eve (Apache 2.0). Une image créée avec Gemini (Google) ; détourée par
+  BiRefNet (Licence MIT, https://github.com/ZhengPeng7/BiRefNet) ; ses poses faites par LivePortrait (Licence MIT,
+  © 2024 Kuaishou Visual Generation and Interaction Center, https://github.com/KwaiVGI/LivePortrait) ; le masque des
+  cheveux par MediaPipe (Licence Apache 2.0, © Google, https://github.com/google-ai-edge/mediapipe).
 
 
 3. Téléchargés à l'installation, de leurs sources officielles

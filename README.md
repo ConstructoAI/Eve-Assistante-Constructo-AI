@@ -7,7 +7,9 @@ https://github.com/ConstructoAI/Eve-Assistante-Constructo-AI : les mêmes que ce
 
 C'est tout le programme d'Eve, en Rust : src\ (le code), page\ (sa page dans Edge, et le logo de Constructo AI, qui
 reste une marque), kit\ (ce qui part chez la personne : l'installateur, ses gabarits, ses textes). Eve peut le modifier
-elle-même : demandez-le-lui, elle suit ce mode d'emploi.
+elle-même : demandez-le-lui, elle suit ce mode d'emploi. Son portrait (sa photo et ses poses, environ 200 Mo d'images)
+n'est pas ici : il vient avec le zip du kit, dans programme\portrait (le zip de chaque version, sur GitHub, sous
+« Releases »).
 
 Il faut Windows 10 ou 11 (64 bits) et Claude Code, relié à un abonnement Claude actif (forfait Max 5x ou 20x) : Eve y
 prend son intelligence.
@@ -28,5 +30,6 @@ Installer la nouvelle version : eve.exe --mettre-a-jour target\release\eve.exe, 
 la fin de sa réponse, la conversation reprise ; si la nouvelle ne démarre pas en 90 secondes, l'ancienne revient
 d'elle-même. eve.exe --revenir revient à la version précédente.
 
-Refaire le kit : outils\preparer_python.ps1 (une fois), puis emballer.ps1 -Construire
-(dist\Eve-Assistante-Constructo-AI-vN.zip : N, la révision, est la version de Cargo.toml, sa seule source).
+Refaire le kit : outils\preparer_python.ps1 (une fois), le portrait dans kit\portrait (le dossier programme\portrait
+d'un zip du kit), puis emballer.ps1 -Construire (dist\Eve-Assistante-Constructo-AI-vN.zip : N, la révision, est la
+version de Cargo.toml, sa seule source).
