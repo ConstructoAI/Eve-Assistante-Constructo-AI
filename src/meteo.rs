@@ -42,6 +42,20 @@ const DELAI: Duration = Duration::from_secs(20);
 const ENTRE_DEUX_REQUETES: Duration = Duration::from_secs(60);
 /// Les codes où il neige : la neige des saisons tombe (cdc:752).
 const NEIGE: [u32; 6] = [71, 73, 75, 77, 85, 86];
+
+/// Un bulletin imposé : la vitrine de `eve --essai-theme` (un temps inventé, de saison, qui suit sa journée). Tant
+/// qu'il l'est, toute météo le rend tel quel, sans fil ni requête. Eve ne l'impose jamais.
+static IMPOSE: Mutex<Option<Bulletin>> = Mutex::new(None);
+
+/// Impose ce bulletin à toutes les météos, celles qui tournent comme celles qui viendront (la vitrine de l'essai du
+/// thème).
+pub fn imposer(b: Bulletin) {
+    *IMPOSE.lock().unwrap_or_else(PoisonError::into_inner) = Some(b);
+}
+
+fn impose() -> Option<Bulletin> {
+    IMPOSE.lock().unwrap_or_else(PoisonError::into_inner).clone()
+}
 /// La tempête possible (cdc:673-674) : 5 cm de neige, ou des rafales de 70 km/h, prévus pour le jour.
 const NEIGE_DE_TEMPETE: f64 = 5.0;
 const RAFALES_DE_TEMPETE: f64 = 70.0;
@@ -95,6 +109,20 @@ pub struct Bulletin {
     pub rafales_kmh: f64,
     /// La tempête possible, selon le mois du poste au moment de la lecture.
     pub tempete: Option<Tempete>,
+    /// Les jours de la prévision (aujourd'hui, demain, après-demain), pour la carte de la météo du tableau de bord.
+    pub jours: Vec<Jour>,
+}
+
+/// Un jour de la prévision : sa date (« 2026-10-27 »), ses températures la plus haute et la plus basse (°C, telles
+/// que lues), le code WMO du temps qu'il fera, la plus forte chance de précipitations (en %) ; ce que la réponse n'a
+/// pas manque.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Jour {
+    pub date: String,
+    pub max: Option<f64>,
+    pub min: Option<f64>,
+    pub code: Option<u32>,
+    pub precipitations: Option<f64>,
 }
 
 /// Une tempête possible (cdc:671-678) : la neige et les rafales prévues pour le jour, telles que lues — le panneau les
@@ -114,11 +142,13 @@ pub fn tempete_de(mois: u32, neige_cm: f64, rafales_kmh: f64) -> Option<Tempete>
 }
 
 /// La requête de la page (cdc:570), pour ce lieu : ses paramètres, les coordonnées au centième comme elle, le fuseau
-/// encodé (« America%2FToronto »). Rien d'autre : ni la ville, ni un nom.
+/// encodé (« America%2FToronto ») ; et, pour la carte de la météo du tableau de bord, trois jours de prévision (leurs
+/// températures, leur temps, leur chance de précipitations). Rien d'autre : ni la ville, ni un nom.
 pub fn requete(lieu: &Lieu) -> String {
     format!(
         "{SERVICE}?latitude={:.2}&longitude={:.2}&current=temperature_2m,weather_code\
-         &daily=snowfall_sum,wind_gusts_10m_max&forecast_days=1&timezone={}",
+         &daily=snowfall_sum,wind_gusts_10m_max,temperature_2m_max,temperature_2m_min,weather_code,\
+         precipitation_probability_max&forecast_days=3&timezone={}",
         lieu.latitude,
         lieu.longitude,
         encoder(&lieu.fuseau)
@@ -155,7 +185,29 @@ pub fn lire(json: &[u8], lieu: &Lieu, mois: u32) -> Result<Bulletin, String> {
         neige_cm,
         rafales_kmh,
         tempete: tempete_de(mois, neige_cm, rafales_kmh),
+        jours: jours_de(v.get("daily")),
     })
+}
+
+/// Les jours de la prévision d'une réponse (`daily` : une colonne par grandeur, une rangée par jour de `time`) ; une
+/// valeur nulle ou absente manque.
+fn jours_de(quotidien: Option<&Value>) -> Vec<Jour> {
+    let colonne = |cle: &str| quotidien.and_then(|d| d.get(cle)).and_then(Value::as_array);
+    let Some(dates) = colonne("time") else { return Vec::new() };
+    dates
+        .iter()
+        .enumerate()
+        .filter_map(|(i, date)| {
+            let valeur = |cle: &str| colonne(cle).and_then(|a| a.get(i)).and_then(Value::as_f64);
+            Some(Jour {
+                date: date.as_str()?.to_string(),
+                max: valeur("temperature_2m_max"),
+                min: valeur("temperature_2m_min"),
+                code: colonne("weather_code").and_then(|a| a.get(i)).and_then(entier),
+                precipitations: valeur("precipitation_probability_max"),
+            })
+        })
+        .collect()
 }
 
 /// La météo d'un lieu, que son fil tient à jour : une lecture tout de suite, puis toutes les 15 min. Lâchée, son fil
@@ -180,12 +232,14 @@ struct Partage {
 }
 
 impl Meteo {
-    /// Lance la lecture de ce lieu, dans son fil.
+    /// Lance la lecture de ce lieu, dans son fil (aucun sous un bulletin imposé : [`imposer`]).
     pub fn lancer(lieu: Lieu) -> Meteo {
         let partage: Arc<Mutex<Partage>> = Arc::default();
         let (arret, attente) = mpsc::channel();
         let (l, p) = (lieu.clone(), Arc::clone(&partage));
-        if let Err(e) = thread::Builder::new().name("meteo".into()).spawn(move || suivre(&l, &p, &attente)) {
+        if impose().is_none()
+            && let Err(e) = thread::Builder::new().name("meteo".into()).spawn(move || suivre(&l, &p, &attente))
+        {
             journal::ecrire(&format!("Météo : le fil ne démarre pas : {e}"));
         }
         Meteo { lieu, partage, _arret: arret }
@@ -196,8 +250,12 @@ impl Meteo {
         &self.lieu
     }
 
-    /// Le dernier bulletin, s'il a moins d'une heure ; rien avant la première lecture, ni après une heure de panne.
+    /// Le dernier bulletin, s'il a moins d'une heure ; rien avant la première lecture, ni après une heure de panne. Un
+    /// bulletin imposé passe avant tout.
     pub fn bulletin(&self) -> Option<Bulletin> {
+        if let Some(b) = impose() {
+            return Some(b);
+        }
         let p = self.partage.lock().unwrap_or_else(PoisonError::into_inner);
         let (b, lu) = p.dernier.as_ref()?;
         frais(*lu, SystemTime::now()).then(|| b.clone())
@@ -376,14 +434,14 @@ fn ligne(ville: &str, temperature: f64, code: u32) -> String {
 
 /// `Math.round` de JavaScript : la demie monte (-2,5 donne -2, où `f64::round` donnerait -3), et un entier n'a pas de
 /// zéro négatif (-0,2 s'écrit « 0 », jamais « -0 »).
-fn arrondi(x: f64) -> i64 {
+pub fn arrondi(x: f64) -> i64 {
     let bas = x.floor();
     (if x - bas >= 0.5 { bas + 1.0 } else { bas }) as i64
 }
 
 /// Le libellé d'un code WMO : la table de la page, telle quelle (cdc:567-568). Elle n'a pas 56 ni 57 (la bruine
 /// verglaçante).
-fn libelle(code: u32) -> Option<&'static str> {
+pub fn libelle(code: u32) -> Option<&'static str> {
     Some(match code {
         0 => "Ciel dégagé",
         1 => "Plutôt dégagé",
@@ -475,6 +533,26 @@ mod essais {
         assert_eq!(b.tempete, Some(Tempete { neige_cm: 18.2, rafales_kmh: 61.9 }));
         // En octobre, la même neige n'est pas une tempête : sa saison va de novembre à avril.
         assert_eq!(lire(REPONSE.as_bytes(), &montreal(), 10).unwrap().tempete, None);
+        // Un jour de prévision, sans ses températures : elles manquent.
+        let jour = Jour { date: "2027-01-15".into(), max: None, min: None, code: None, precipitations: None };
+        assert_eq!(b.jours, [jour]);
+    }
+
+    #[test]
+    fn trois_jours_de_prevision() {
+        let mut v: Value = serde_json::from_str(REPONSE).unwrap();
+        v["daily"] = json!({
+            "time": ["2027-01-15", "2027-01-16", "2027-01-17"],
+            "snowfall_sum": [18.2, 0.0, 0.0], "wind_gusts_10m_max": [61.9, 30.0, 25.0],
+            "temperature_2m_max": [-4.2, -9.0, 1.5], "temperature_2m_min": [-12.0, -18.4, -6.0],
+            "weather_code": [75, 0, 3], "precipitation_probability_max": [90, null, 10]
+        });
+        let b = lire(&serde_json::to_vec(&v).unwrap(), &montreal(), 1).unwrap();
+        assert_eq!(b.jours.len(), 3);
+        let demain = &b.jours[1];
+        assert_eq!((demain.date.as_str(), demain.max, demain.min), ("2027-01-16", Some(-9.0), Some(-18.4)));
+        assert_eq!((demain.code, demain.precipitations), (Some(0), None), "une valeur nulle manque");
+        assert_eq!(b.tempete, Some(Tempete { neige_cm: 18.2, rafales_kmh: 61.9 }), "la tempête reste celle du jour");
     }
 
     #[test]
@@ -570,7 +648,8 @@ mod essais {
     fn la_requete_ne_porte_que_le_lieu() {
         let attendue = concat!(
             "https://api.open-meteo.com/v1/forecast?latitude=45.50&longitude=-73.57",
-            "&current=temperature_2m,weather_code&daily=snowfall_sum,wind_gusts_10m_max&forecast_days=1",
+            "&current=temperature_2m,weather_code&daily=snowfall_sum,wind_gusts_10m_max,temperature_2m_max,",
+            "temperature_2m_min,weather_code,precipitation_probability_max&forecast_days=3",
             "&timezone=America%2FToronto"
         );
         assert_eq!(requete(&montreal()), attendue);

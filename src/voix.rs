@@ -41,7 +41,6 @@ use crate::reglages::{Reglages, VOIX_PAR_DEFAUT, dossier_local};
 use lecture::{Lecteur, Synthetiseur};
 pub use prosodie::{Marque, Repere};
 
-mod inspiration;
 mod prosodie;
 mod raccord;
 mod supertonic;
@@ -69,10 +68,6 @@ const AGE_RESTE: Duration = Duration::from_secs(60);
 /// donne un caractère au débit 1 (0,062 s au débit 0,85).
 const FACTEUR_DE_PIPER: f64 = 0.3;
 const VOIX_PAR_CARACTERE: f64 = 0.053;
-/// L'inspiration avant de parler (le réglage `souffle`) : son numéro au lecteur (aucun morceau ne l'a), et le silence
-/// qui doit la précéder — entre deux phrases d'une même réponse, ou deux paroles qui se suivent, on n'inspire pas.
-const NUMERO_DE_L_INSPIRATION: u64 = u64::MAX;
-const SILENCE_AVANT_INSPIRATION: Duration = Duration::from_millis(1_500);
 /// Ce que la première phrase d'une réponse peut attendre Piper (rien ne se dit encore) : plus longue, elle se coupe à
 /// une virgule ([`File::couper_pour_la_synthese`]) — sa première partie se dit pendant que Piper fait la suite. Une
 /// phrase qui en suit une autre doit être prête à la fin de la pause d'avant, à cette marge près.
@@ -518,15 +513,9 @@ fn lancer(reglages: &Reglages, rapport: Sender<Evt>, trace: Option<Sender<Trace>
     let coupure = Arc::new(Coupure::default());
     let c = coupure.clone();
     let (voulue, debit, douceur) = (reglages.voix.clone(), reglages.debit, Douceur::de(reglages.douceur));
-    // L'inspiration avant de parler, si le réglage la veut : faite une fois, adoucie comme la voix.
-    let souffle = reglages.souffle.then(|| {
-        let mut w = inspiration::inspiration(22_050);
-        adoucir(&mut w, douceur);
-        w
-    });
     let prononciations = reglages.prononciations.clone();
     thread::spawn(move || {
-        let mut fil = Fil::ouvrir(&voulue, debit, douceur, souffle, c, rapport, trace);
+        let mut fil = Fil::ouvrir(&voulue, debit, douceur, c, rapport, trace);
         fil.prononciations = prononciations;
         fil.mener(&rx)
     });
@@ -1553,8 +1542,6 @@ struct Fil {
     par_caractere: f64,
     /// Depuis quand Piper prépare la première phrase qu'on attend de lui (rien : il attend).
     synthese_depuis: Option<Instant>,
-    /// L'inspiration qu'on entend avant qu'elle parle (le réglage `souffle`), son WAV ; rien : éteinte.
-    inspiration: Option<Vec<u8>>,
     piper: Option<Piper>,
     /// Les pannes de Piper à la suite (un WAV bien lu remet le compte à zéro) : à la deuxième, le repli.
     pannes: u32,
@@ -1581,7 +1568,6 @@ impl Fil {
         voulue: &str,
         debit: f64,
         douceur: Douceur,
-        inspiration: Option<Vec<u8>>,
         coupure: Arc<Coupure>,
         rapport: Sender<Evt>,
         trace: Option<Sender<Trace>>,
@@ -1610,7 +1596,6 @@ impl Fil {
             facteur: FACTEUR_DE_PIPER,
             par_caractere: VOIX_PAR_CARACTERE / debit.clamp(0.5, 2.0),
             synthese_depuis: None,
-            inspiration,
             piper: None,
             pannes: 0,
             a_lire: VecDeque::new(),
@@ -1673,31 +1658,10 @@ impl Fil {
                 // syllabes, reçoivent les mêmes mots.
                 let dit = diction::tel_qu_il_se_dit(&diction::avec_les_prononciations(&texte, &self.prononciations));
                 self.file.ajouter(id, &dit, coupee, saut);
-                if !coupee {
-                    self.inspirer();
-                }
             }
             Ordre::Choisir(id) => self.choisir(id),
             Ordre::Prononciations(p) => self.prononciations = p,
             Ordre::Taire => {}
-        }
-    }
-
-    /// Avant de parler après un silence — une phrase de quelques mots au moins —, elle inspire, si le réglage le veut :
-    /// le souffle se joue tout de suite (le portrait inspire au même moment : le chef vient de dire « parole »), et la
-    /// première phrase part juste après lui — ou dès qu'elle est prête, si Piper la fait attendre.
-    fn inspirer(&mut self) {
-        let Some(wav) = &self.inspiration else { return };
-        let silence = self.tait.is_none_or(|t| t.elapsed() >= SILENCE_AVANT_INSPIRATION);
-        let Some(m) = self.file.morceaux.iter().find(|m| !matches!(m.etat, Etat::Muet)) else { return };
-        if self.lecture.is_some() || !silence || m.texte.chars().count() < 20 {
-            return;
-        }
-        let (pause, duree) = (m.pause, duree_wav(wav).unwrap_or_default());
-        if let Ok(attente) = self.lecteur.jouer(NUMERO_DE_L_INSPIRATION, wav.clone()) {
-            // La pause d'avant la première phrase se compte depuis la fin du souffle : elle n'y dure qu'un instant.
-            let fin = Instant::now() + attente + duree + inspiration::APRES;
-            self.tait = Some(fin.checked_sub(pause).unwrap_or(fin));
         }
     }
 

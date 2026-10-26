@@ -1,0 +1,1709 @@
+//! Le tableau de bord du thème « Constructo AI » ([`super::theme`]) sous sa bannière, sur le modèle demandé (ses
+//! cartes, pas ses couleurs) : à gauche le choix « Tout · Entreprise · Famille » (le réglage
+//! `vue_du_tableau`, que garde `reglages.json`), à droite l'heure de la dernière lecture de l'entreprise (« Mis à jour
+//! à 15 h 40 ») et le bouton qui la relit ; une rangée de tuiles de chiffres (six au plus) ; puis des cartes en
+//! listes, en maçonnerie sur trois colonnes ([`theme::maconnerie`]), les plus importantes d'abord ([`rang`]). « Tout »
+//! mêle l'entreprise et la maison ; « Entreprise » et « Famille » ne gardent que l'une. Une carte sans données ne se
+//! montre pas.
+//!
+//! Chaque carte a la même grammaire ([`theme::Liste`]) : une tête (la pastille de son icône, son titre, une pilule de
+//! compte teintée selon l'urgence), des rangées séparées d'un filet (un mot de tête en couleur — rouge pour ce qui est
+//! en retard ou presse —, le texte, un montant à droite, une ligne de détail grise), un pied gris. La maison les donne
+//! (`activite\*.js`, [`crate::centre::Centre::listes`]) ; l'entreprise aussi : la dernière lecture de son ERP,
+//! Constructo AI, que tient Eve dans son dossier local (`entreprise.json`, relue par le fil du centre quand elle
+//! change : [`crate::centre::Centre::entreprise`]), chaque champ facultatif — ses alertes, l'agenda de l'ERP, les
+//! factures en retard, les projets en cours, les devis en attente, la balance âgée, le pipeline, la banque.
+//!
+//! Les états de l'entreprise : Constructo AI pas permis à cette Eve (ni le choix ni l'entreprise : la famille seule,
+//! comme avant), pas reliée (une carte invite à se relier, le geste `constructo_connecter`), la page de connexion
+//! ouverte, la première lecture (une roue : le serveur endormi se réveille en une trentaine de secondes), une relecture
+//! (les chiffres d'avant restent, rien ne clignote), une lecture qui n'a pas abouti (son bandeau et « Réessayer », le
+//! geste `entreprise_lire`), plus reliée avec des chiffres d'avant (pâlis, et « Se reconnecter »).
+//!
+//! Les montants à la québécoise (« 12 000 $ » ; « 1,25 M$ » dans une tuile). Les barres suivent les règles des
+//! tableaux de bord : fines, les bouts arrondis, deux points de blanc entre les parts d'une barre empilée, chaque
+//! valeur aussi écrite en clair (une bulle au survol ne fait que la redire). La balance âgée dit le retard par une
+//! rampe chaude d'une seule teinte (de l'orange au rouge foncé : plus c'est vieux, plus c'est foncé), vérifiée par le
+//! validateur de palettes en ordinal (la luminosité monotone, des marches de 0,06 au moins, le bout clair à 2,26:1 sur
+//! le blanc).
+
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use eframe::egui::{
+    self, Align, Align2, Color32, FontFamily, FontId, Layout, Pos2, Rect, RichText, Sense, Shape, Stroke, StrokeKind,
+    UiBuilder, pos2, vec2,
+};
+use serde_json::Value;
+
+use super::theme::{self, BoutonErp, Chiffre, ECART, Liste, Rangee, erp, pictos};
+use super::{Fenetre, ICONES, SEMI, TENUE};
+use crate::meteo::{self, Bulletin};
+use crate::reglages::VUES_DU_TABLEAU;
+use crate::{ambiance, centre};
+
+/// Les rangs des cartes du tableau de bord, une seule échelle pour l'entreprise et la maison : la plus petite d'abord,
+/// en haut de la maçonnerie. Ce qui presse, puis la journée et le temps qu'il fera, puis l'argent qui attend, puis le
+/// reste.
+pub(crate) mod rang {
+    /// Ce qui est en alerte à la maison (la tempête, la cueillette, un courriel de l'école).
+    pub const ALERTES_DE_LA_MAISON: u8 = 0;
+    /// Les alertes de l'entreprise, quand l'une est haute ; et l'invitation à relier Constructo AI.
+    pub const ALERTES_HAUTES: u8 = 1;
+    pub const DECISION: u8 = 2;
+    pub const JOURNEE: u8 = 3;
+    pub const METEO: u8 = 4;
+    pub const AGENDA_DE_L_ENTREPRISE: u8 = 5;
+    pub const FACTURES_EN_RETARD: u8 = 6;
+    pub const CHANTIERS: u8 = 7;
+    pub const ECHEANCES: u8 = 8;
+    /// Les soumissions aux clients (ou, sans elles, les devis en attente).
+    pub const SOUMISSIONS: u8 = 9;
+    pub const COMMANDES: u8 = 10;
+    pub const HEURES: u8 = 11;
+    pub const COURRIELS: u8 = 12;
+    pub const EQUIPE: u8 = 13;
+    pub const FACTURES_RECUES: u8 = 14;
+    /// Les alertes de l'entreprise, aucune haute (ou aucune).
+    pub const ALERTES: u8 = 15;
+    pub const BALANCE: u8 = 16;
+    pub const PIPELINE: u8 = 17;
+    pub const BANQUE: u8 = 18;
+    pub const EPICERIE: u8 = 19;
+    pub const QUESTIONS: u8 = 20;
+    pub const ENCAISSE: u8 = 21;
+    pub const COMPTE: u8 = 22;
+    pub const CHIFFRES: u8 = 23;
+}
+
+// ---- La vue -----------------------------------------------------------------------------------------------------
+
+/// Ce que montre le tableau de bord, dans l'ordre de [`VUES_DU_TABLEAU`] : l'entreprise et la famille, ou l'une des
+/// deux.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Vue {
+    Tout,
+    Entreprise,
+    Famille,
+}
+
+/// Les vues et leurs icônes, dans l'ordre de [`VUES_DU_TABLEAU`] (qui a leurs noms).
+const VUES: [(Vue, char); 3] =
+    [(Vue::Tout, pictos::TOUT), (Vue::Entreprise, pictos::ENTREPRISE), (Vue::Famille, pictos::FAMILLE)];
+
+/// Où la fenêtre garde la vue choisie d'un clic, le temps que le chef la publie.
+const VUE_TENUE: &str = "vue-du-tableau-choisie-d-un-clic";
+
+impl Vue {
+    /// La vue de ce nom (celui du réglage) ; un nom inconnu : tout.
+    fn de(nom: &str) -> Vue {
+        VUES_DU_TABLEAU.iter().position(|v| v.0 == nom).map_or(Vue::Tout, |k| VUES[k].0)
+    }
+
+    fn rang(self) -> usize {
+        VUES.iter().position(|v| v.0 == self).unwrap_or(0)
+    }
+}
+
+/// Les chiffres que montrent les tuiles de chaque vue, dans l'ordre : les six premiers qui ont une valeur. Leurs clés :
+/// celles de [`chiffres_de_l_entreprise`] et de [`crate::centre::Centre::chiffres`].
+const TUILES_DE_TOUT: [&str; 13] = [
+    "calendrier", "projets", "recevoir", "retard", "devis", "courriels", "heures", "echeances", "pipeline", "rappels",
+    "encaisse", "epicerie", "questions",
+];
+const TUILES_DE_L_ENTREPRISE: [&str; 11] = [
+    "projets", "recevoir", "retard", "devis", "heures", "pipeline", "encaisse", "a_commander", "livraisons", "banque",
+    "employes",
+];
+const TUILES_DE_LA_FAMILLE: [&str; 6] = ["calendrier", "courriels", "rappels", "echeances", "epicerie", "questions"];
+
+/// Les tuiles d'une rangée, au plus.
+const SIX: usize = 6;
+
+// ---- La liaison à Constructo AI, et la fraîcheur des chiffres -----------------------------------------------------
+
+/// Où en est la liaison d'Eve à Constructo AI, d'après ce qu'en publie le chef (`constructo` : `permis`, `etat`) et ce
+/// que dit la lecture (`permis` faux : pas permis).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Liaison {
+    /// Constructo AI n'est pas permis à cette Eve : le tableau n'a pas d'entreprise.
+    Absente,
+    /// Pas reliée (ou plus) : la carte qui invite à se relier.
+    NonReliee,
+    /// La page de connexion est ouverte, ou Eve se relie.
+    EnCours,
+    Reliee,
+}
+
+impl Liaison {
+    fn de(constructo: &Value, lecture: Option<&Result<Arc<Value>, String>>) -> Liaison {
+        let refusee = lecture.and_then(|l| l.as_ref().ok()).is_some_and(|v| v["permis"].as_bool() == Some(false));
+        if refusee || !constructo["permis"].as_bool().unwrap_or(false) {
+            return Liaison::Absente;
+        }
+        match constructo["etat"].as_str() {
+            Some("connectee") => Liaison::Reliee,
+            Some("en_cours") => Liaison::EnCours,
+            _ => Liaison::NonReliee,
+        }
+    }
+}
+
+/// L'heure de l'image, pour dire l'âge d'une lecture : le jour local (son numéro depuis 1970), l'heure locale en
+/// secondes civiles (comptées comme une heure universelle), et l'heure universelle ; leur écart est le fuseau du poste.
+#[derive(Clone, Copy, Debug)]
+struct Maintenant {
+    jour: i64,
+    local: i64,
+    unix: i64,
+}
+
+impl Maintenant {
+    fn du_poste() -> Maintenant {
+        let local = secondes_civiles(&crate::journal::date_et_heure()).unwrap_or(0);
+        let unix = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        Maintenant { jour: local.div_euclid(86_400), local, unix }
+    }
+
+    /// Le jour de l'image, « 2026-10-26 ».
+    fn aujourdhui(&self) -> String {
+        centre::date_du_numero(self.jour)
+    }
+
+    /// L'âge d'une lecture faite à `lu_a` (« 2026-10-26T13:45:00-04:00 », « …Z », ou l'heure du poste sans fuseau), en
+    /// secondes (jamais négatif : une horloge en avance dit « à l'instant »), et son heure locale en secondes civiles ;
+    /// `None` pour une heure qui ne se lit pas.
+    fn age(&self, lu_a: &str) -> Option<(i64, i64)> {
+        let (civiles, fuseau) = instant_ecrit(lu_a)?;
+        let (age, local) = match fuseau {
+            Some(decalage) => {
+                let unix = civiles - decalage;
+                (self.unix - unix, unix + (self.local - self.unix))
+            }
+            None => (self.local - civiles, civiles),
+        };
+        Some((age.max(0), local))
+    }
+}
+
+/// « 2026-10-26 15:10:02 », « 2026-10-26T15:10 » → les secondes depuis le 1er janvier 1970 de cette heure, comptée
+/// comme une heure universelle ; `None` si ce n'en est pas une.
+fn secondes_civiles(texte: &str) -> Option<i64> {
+    let (date, heure) = (texte.get(..10)?, texte.get(11..)?);
+    let jour = centre::numero_du_jour(date)?;
+    let mut p = heure.split(':');
+    let h: i64 = p.next()?.get(..2)?.parse().ok()?;
+    let m: i64 = p.next()?.get(..2)?.parse().ok()?;
+    let s: i64 = match p.next() {
+        Some(s) => s.get(..2)?.parse().ok()?,
+        None => 0,
+    };
+    ((0..24).contains(&h) && (0..60).contains(&m) && (0..61).contains(&s))
+        .then_some(jour * 86_400 + h * 3600 + m * 60 + s)
+}
+
+/// Une heure écrite comme le fait la lecture de l'ERP (ISO 8601 : « 2026-10-26T13:45:00-04:00 », « …Z ») ou sans
+/// fuseau : ses secondes civiles ([`secondes_civiles`]) et son fuseau en secondes (`None` : l'heure du poste).
+fn instant_ecrit(texte: &str) -> Option<(i64, Option<i64>)> {
+    let t = texte.trim();
+    let o = t.as_bytes();
+    let n = o.len();
+    let (corps, fuseau) = if let Some(c) = t.strip_suffix(['Z', 'z']) {
+        (c, Some(0))
+    } else if n >= 22 && matches!(o[n - 6], b'+' | b'-') && o[n - 3] == b':' {
+        let signe = if o[n - 6] == b'-' { -1 } else { 1 };
+        let h: i64 = t.get(n - 5..n - 3)?.parse().ok()?;
+        let m: i64 = t.get(n - 2..)?.parse().ok()?;
+        (t.get(..n - 6)?, Some(signe * (h * 3600 + m * 60)))
+    } else {
+        (t, None)
+    };
+    Some((secondes_civiles(corps)?, fuseau))
+}
+
+/// Quand une lecture a été faite, à dire après « Mis à jour » : « à 15 h 40 » aujourd'hui, « hier à 18 h 05 », « le 24
+/// oct. à 9 h » ; `local` : son heure locale en secondes civiles.
+fn quand_dit(local: i64, m: &Maintenant) -> String {
+    let jour = local.div_euclid(86_400);
+    let s = local.rem_euclid(86_400);
+    let heure = centre::heure_parlee(&format!("{:02}:{:02}", s / 3600, s / 60 % 60));
+    if jour == m.jour {
+        format!("à {heure}")
+    } else if jour == m.jour - 1 {
+        format!("hier à {heure}")
+    } else {
+        format!("le {} à {heure}", centre::date_courte(&centre::date_du_numero(jour)))
+    }
+}
+
+/// Quand la lecture `v` a été faite (son `lu_a`), à dire, et son âge en secondes ; `None` sans heure lisible.
+fn lue_quand(v: &Value, m: &Maintenant) -> Option<(i64, String)> {
+    let (age, local) = m.age(v["lu_a"].as_str()?)?;
+    Some((age, quand_dit(local, m)))
+}
+
+/// Ce que dit la fraîcheur des chiffres, à droite du choix de la vue : son point (rien quand tout est à jour ; une roue
+/// quand Eve lit), son texte.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Point {
+    Aucun,
+    Ambre,
+    Rouge,
+    Gris,
+    Roue,
+}
+
+#[derive(Debug, PartialEq)]
+struct Fraicheur {
+    point: Point,
+    texte: String,
+}
+
+/// Des chiffres de plus de 30 minutes se disent d'un moment, un point ambre devant : Eve les relit toutes les dix
+/// minutes environ.
+const PERIMES: i64 = 30 * 60;
+
+/// La fraîcheur des chiffres de l'entreprise : la liaison d'abord, puis ce que dit la lecture (son `etat`, son
+/// `lu_a`) — « Mis à jour à 15 h 40 », comme le modèle.
+fn fraicheur(liaison: Liaison, lecture: Option<&Result<Arc<Value>, String>>, m: &Maintenant) -> Fraicheur {
+    let f = |point, texte: &str| Fraicheur { point, texte: texte.to_string() };
+    match liaison {
+        Liaison::Absente => return f(Point::Aucun, ""),
+        Liaison::EnCours => return f(Point::Roue, "Connexion à Constructo AI…"),
+        Liaison::NonReliee => return f(Point::Gris, "Constructo AI n'est pas relié"),
+        Liaison::Reliee => {}
+    }
+    let v = match lecture {
+        None => return f(Point::Roue, "Première lecture de Constructo AI…"),
+        Some(Err(_)) => return f(Point::Rouge, "Lecture illisible"),
+        Some(Ok(v)) => v,
+    };
+    let quand = lue_quand(v, m);
+    match v["etat"].as_str().unwrap_or("a_jour") {
+        "en_cours" | "non_connecte" if !a_des_chiffres(v) => f(Point::Roue, "Première lecture de Constructo AI…"),
+        "en_cours" => f(Point::Roue, "Mise à jour…"),
+        "erreur" => match quand {
+            Some((_, q)) => f(Point::Rouge, &format!("Lecture manquée · mis à jour {q}")),
+            None => f(Point::Rouge, "Lecture manquée"),
+        },
+        _ => match quand {
+            Some((age, q)) if age < PERIMES => f(Point::Aucun, &format!("Mis à jour {q}")),
+            Some((_, q)) => f(Point::Ambre, &format!("Mis à jour {q}")),
+            None => f(Point::Aucun, "À jour"),
+        },
+    }
+}
+
+// ---- L'entreprise en chiffres et en listes ------------------------------------------------------------------------
+
+/// La lecture a des chiffres à montrer : ses indicateurs, ses heures, sa balance âgée, ou l'une de ses listes.
+fn a_des_chiffres(v: &Value) -> bool {
+    let liste = |cle: &str| v[cle].as_array().is_some_and(|l| !l.is_empty());
+    let objet = |cle: &str| v[cle].as_object().is_some_and(|o| !o.is_empty());
+    ["kpis", "balance_agee", "heures"].into_iter().any(objet)
+        || [
+            "alertes", "projets", "factures_en_retard", "pipeline", "agenda", "devis", "banque", "soumissions",
+            "factures_recues", "commandes",
+        ]
+        .into_iter()
+        .any(liste)
+}
+
+/// Un nombre de la lecture : un nombre JSON, ou un texte qui en est un (« 1234,50 »).
+fn nombre(v: &Value, cle: &str) -> Option<f64> {
+    let x = v.get(cle)?;
+    x.as_f64().or_else(|| x.as_str()?.trim().replace(',', ".").parse().ok()).filter(|n: &f64| n.is_finite())
+}
+
+fn texte_de<'a>(v: &'a Value, cle: &str) -> &'a str {
+    v.get(cle).and_then(Value::as_str).map_or("", str::trim)
+}
+
+/// Un montant à la québécoise, arrondi au dollar : « 12 000 $ » (une espace fine entre les milliers, une espace
+/// insécable avant le dollar).
+pub(crate) fn dollars(v: f64) -> String {
+    format!("{}\u{a0}$", centre::milliers(v))
+}
+
+/// Un montant de tuile, court : « 1,25 M$ » dès le million (deux décimales au plus, sans zéro de trop), sinon
+/// [`dollars`].
+fn dollars_court(v: f64) -> String {
+    if v.abs() < 999_995.0 {
+        return dollars(v);
+    }
+    let millions = format!("{:.2}", v / 1_000_000.0);
+    let millions = millions.trim_end_matches('0').trim_end_matches('.').replace('.', ",");
+    format!("{millions}\u{a0}M$")
+}
+
+/// Un compte, au singulier sous deux : « 1 facture », « 4 factures » (une espace insécable : le nombre ne se sépare
+/// pas de ce qu'il compte au bout d'une ligne).
+fn compte(n: f64, un: &str, plusieurs: &str) -> String {
+    format!("{}\u{a0}{}", centre::milliers(n), if n.round() >= 2.0 { plusieurs } else { un })
+}
+
+/// Des heures dites : « 3,5 h », « 45 h », « 36,25 h », « 1 204,5 h » (une espace fine entre les milliers).
+fn heures_dites(h: f64) -> String {
+    let centiemes = (h * 100.0).round() as i64;
+    let entier = centre::milliers((centiemes / 100) as f64);
+    let reste = format!("{:02}", (centiemes % 100).abs());
+    match reste.trim_end_matches('0') {
+        "" => format!("{entier}\u{a0}h"),
+        fraction => format!("{entier},{fraction}\u{a0}h"),
+    }
+}
+
+/// Les chiffres de l'entreprise pour les tuiles (ses indicateurs, `kpis`, et ses heures), chacun sous sa clé :
+/// « projets » (en cours), « recevoir », « retard » (en alerte s'il y en a), « devis » (en attente), « heures » (de la
+/// semaine), « pipeline », « encaisse » (en 30 jours), « a_commander », « livraisons » (prévues), « banque » (le
+/// solde), « employes » (actifs). Seulement ceux que la lecture donne.
+fn chiffres_de_l_entreprise(v: &Value) -> Vec<(&'static str, Chiffre)> {
+    let kpis = &v["kpis"];
+    let n = |cle: &str| nombre(kpis, cle);
+    let chiffre = |valeur: String, etiquette: &str, icone: char, teinte: erp::Teinte, alerte: bool| Chiffre {
+        valeur,
+        etiquette: etiquette.to_string(),
+        icone,
+        teinte,
+        alerte,
+    };
+    let selon = |v: f64, un: &'static str, plusieurs: &'static str| if v.round() >= 2.0 { plusieurs } else { un };
+    let mut c = Vec::new();
+    if let Some(p) = n("projets_en_cours") {
+        let etiquette = selon(p, "chantier en cours", "chantiers en cours");
+        c.push(("projets", chiffre(centre::milliers(p), etiquette, pictos::PROJETS, erp::BLEU, false)));
+    }
+    if let Some(a) = n("a_recevoir") {
+        c.push(("recevoir", chiffre(dollars_court(a), "à recevoir", pictos::RECEVOIR, erp::SARCELLE, false)));
+    }
+    if let Some(r) = n("en_retard") {
+        let etiquette = match n("factures_en_retard") {
+            Some(f) if r > 0.0 => format!("en retard · {}", compte(f, "facture", "factures")),
+            _ => "en retard".to_string(),
+        };
+        c.push(("retard", chiffre(dollars_court(r), &etiquette, pictos::RETARD, erp::ORANGE, r > 0.0)));
+    }
+    if let Some(d) = n("devis_en_attente") {
+        c.push(("devis", chiffre(centre::milliers(d), "devis en attente", pictos::DEVIS, erp::INDIGO, false)));
+    }
+    if let Some(h) = nombre(&v["heures"], "cette_semaine") {
+        let etiquette = "heures cette semaine";
+        c.push(("heures", chiffre(heures_dites(h), etiquette, pictos::HEURES, erp::SARCELLE, false)));
+    }
+    if let Some(p) = n("pipeline") {
+        let etiquette = match n("opportunites_ouvertes") {
+            Some(o) => format!("au pipeline · {}", compte(o, "opportunité", "opportunités")),
+            None => "au pipeline des ventes".to_string(),
+        };
+        c.push(("pipeline", chiffre(dollars_court(p), &etiquette, pictos::PIPELINE, erp::VIOLET, false)));
+    }
+    if let Some(e) = n("encaissements_30_jours") {
+        let etiquette = "encaissés ces 30 jours";
+        c.push(("encaisse", chiffre(dollars_court(e), etiquette, pictos::ENCAISSE, erp::VERT, false)));
+    }
+    if let Some(b) = n("bons_a_commander") {
+        let etiquette = selon(b, "bon à commander", "bons à commander");
+        c.push(("a_commander", chiffre(centre::milliers(b), etiquette, pictos::COMMANDES, erp::AMBRE, false)));
+    }
+    if let Some(l) = n("livraisons_prevues") {
+        let etiquette = selon(l, "livraison prévue", "livraisons prévues");
+        c.push(("livraisons", chiffre(centre::milliers(l), etiquette, pictos::COMMANDES, erp::VERT, false)));
+    }
+    if let Some(b) = n("solde_banque") {
+        c.push(("banque", chiffre(dollars_court(b), "en banque", pictos::ENCAISSE, erp::SARCELLE, false)));
+    }
+    if let Some(e) = n("employes_actifs") {
+        let etiquette = selon(e, "employé actif", "employés actifs");
+        c.push(("employes", chiffre(centre::milliers(e), etiquette, pictos::PERSONNE, erp::GRIS, false)));
+    }
+    c
+}
+
+/// Les rangées que montre une carte de l'entreprise ; au-delà, « … et 3 autres ».
+const RANGEES: usize = 6;
+
+/// La gravité d'une alerte, pour les ranger (la plus grave d'abord) : haute, moyenne, info.
+fn rang_de_gravite(g: &str) -> u8 {
+    match g {
+        "haute" => 0,
+        "moyenne" => 1,
+        _ => 2,
+    }
+}
+
+/// Le mot de tête d'une rangée, dans la couleur vive d'une teinte, assombrie au besoin pour se lire sur le blanc.
+fn tete(teinte: erp::Teinte) -> Color32 {
+    theme::lisible(teinte.vif[1])
+}
+
+/// La couleur d'un retard de `jours`, pour le mot de tête d'une facture : l'ambre sous un mois, l'orange sous deux,
+/// puis le rouge.
+fn couleur_du_retard(jours: f64) -> Color32 {
+    match jours {
+        j if j <= 30.0 => tete(erp::AMBRE),
+        j if j <= 60.0 => tete(erp::ORANGE),
+        _ => erp::DANGER_ENCRE,
+    }
+}
+
+/// Le pied d'une liste coupée : « … et 3 autres ».
+fn reste(n: usize, un: &str, plusieurs: &str) -> String {
+    if n == 0 { String::new() } else { format!("… et {n} {}", if n > 1 { plusieurs } else { un }) }
+}
+
+/// Les tranches de la balance âgée (leur clé dans la lecture, leur nom) et leur couleur : ce qui est à venir en bleu,
+/// puis le retard dans la rampe chaude (orange-400, rouge-500, rouge-700, rouge-900 de Tailwind), du plus récent au
+/// plus vieux.
+const TRANCHES: [(&str, &str, Color32); 5] = [
+    ("a_venir", "À venir", erp::PRIMAIRE),
+    ("0_30", "1 à 30 jours", Color32::from_rgb(0xFB, 0x92, 0x3C)),
+    ("31_60", "31 à 60 jours", Color32::from_rgb(0xEF, 0x44, 0x44)),
+    ("61_90", "61 à 90 jours", Color32::from_rgb(0xB9, 0x1C, 0x1C)),
+    ("plus_de_90", "Plus de 90 jours", Color32::from_rgb(0x7F, 0x1D, 0x1D)),
+];
+
+/// Les cartes de l'entreprise en listes, chacune avec son rang ([`rang`]) : ses alertes, l'agenda de l'ERP, les
+/// factures en retard, les projets en cours, les devis en attente, la balance âgée, le pipeline, la banque — seulement
+/// celles que la lecture nourrit.
+fn listes_de_l_entreprise(v: &Value, m: &Maintenant) -> Vec<(u8, Liste)> {
+    let liste = |cle: &str| v[cle].as_array().filter(|l| !l.is_empty());
+    let kpis = &v["kpis"];
+    let mut listes = Vec::new();
+    if let Some(a) = v["alertes"].as_array() {
+        listes.push(liste_des_alertes(a));
+    }
+    if let Some(a) = liste("agenda") {
+        listes.push((rang::AGENDA_DE_L_ENTREPRISE, liste_de_l_agenda(a, m)));
+    }
+    if let Some(f) = liste("factures_en_retard") {
+        listes.push((rang::FACTURES_EN_RETARD, liste_des_factures(f, nombre(kpis, "en_retard"))));
+    }
+    if let Some(p) = liste("projets") {
+        listes.push((rang::CHANTIERS, liste_des_chantiers(p, nombre(kpis, "projets_en_cours"))));
+    }
+    // Les soumissions (brouillons, validées, envoyées, en attente) comprennent les devis en attente : une carte pour
+    // les deux.
+    if let Some(s) = liste("soumissions") {
+        listes.push((rang::SOUMISSIONS, liste_des_soumissions(s)));
+    } else if let Some(d) = liste("devis") {
+        listes.push((rang::SOUMISSIONS, liste_des_devis(d, nombre(kpis, "devis_en_attente"))));
+    }
+    if let Some(c) = liste("commandes") {
+        listes.push((rang::COMMANDES, liste_des_commandes(c, kpis)));
+    }
+    if v["heures"].as_object().is_some_and(|h| !h.is_empty()) {
+        listes.push((rang::HEURES, liste_des_heures(&v["heures"])));
+        if let Some(l) = liste_de_l_equipe(&v["heures"]) {
+            listes.push((rang::EQUIPE, l));
+        }
+    }
+    if let Some(f) = liste("factures_recues") {
+        listes.push((rang::FACTURES_RECUES, liste_des_factures_recues(f)));
+    }
+    if v["balance_agee"].as_object().is_some_and(|b| !b.is_empty()) {
+        let encaisse = nombre(kpis, "encaissements_30_jours");
+        listes.push((rang::BALANCE, liste_de_la_balance(&v["balance_agee"], encaisse)));
+    }
+    if let Some(p) = liste("pipeline") {
+        listes.push((rang::PIPELINE, liste_du_pipeline(p, nombre(kpis, "pipeline"))));
+    }
+    if let Some(b) = liste("banque") {
+        listes.push((rang::BANQUE, liste_de_la_banque(b)));
+    }
+    listes
+}
+
+/// Les alertes de l'ERP, la plus grave d'abord : chacune son mot de tête (sa sorte — « Factures », « Stock »,
+/// « Conformité », « Banque », « Heures » —, sinon sa gravité) dans la couleur de sa gravité (le rouge d'une alerte
+/// haute, l'ambre d'une moyenne, le bleu d'une information), et son texte ; leur nombre dans la pilule, de la teinte
+/// de la plus grave. Aucune : « Aucune », en vert. En haut de la page quand l'une est haute.
+fn liste_des_alertes(alertes: &[Value]) -> (u8, Liste) {
+    let mut a: Vec<(u8, &str, &str)> = alertes
+        .iter()
+        .map(|x| (rang_de_gravite(texte_de(x, "gravite")), texte_de(x, "sorte"), texte_de(x, "texte")))
+        .filter(|x| !x.2.is_empty())
+        .collect();
+    a.sort_by_key(|x| x.0);
+    let teinte = match a.first() {
+        Some((0, _, _)) => erp::ROUGE,
+        Some(_) => erp::AMBRE,
+        None => erp::VERT,
+    };
+    let mut l = Liste::nouvelle("Alertes", pictos::ALERTES, teinte);
+    if a.is_empty() {
+        l = l.pilule("Aucune", erp::VERT);
+        l.rangees.push(Rangee::nouvelle("", erp::TEXTE, "Rien d'urgent dans Constructo AI."));
+        return (rang::ALERTES, l);
+    }
+    l = l.pilule(a.len().to_string(), teinte);
+    for (gravite, sorte, texte) in a.iter().take(RANGEES) {
+        let mot = match (*sorte, gravite) {
+            ("factures", _) => "Factures",
+            ("stock", _) => "Stock",
+            ("conformite", _) => "Conformité",
+            ("banque", _) => "Banque",
+            ("heures", _) => "Heures",
+            (_, 0) => "Urgent",
+            (_, 1) => "À surveiller",
+            _ => "Info",
+        };
+        let couleur = match gravite {
+            0 => erp::DANGER_ENCRE,
+            1 => tete(erp::AMBRE),
+            _ => erp::PRIMAIRE,
+        };
+        // Un texte qui commence par son mot de tête (« Heures manquantes le … ») ne le redit pas : le mot de tête,
+        // en couleur, commence la phrase.
+        let suite = texte
+            .get(mot.len()..)
+            .filter(|s| s.starts_with(' ') && texte[..mot.len()].to_lowercase() == mot.to_lowercase());
+        match suite {
+            Some(s) => l.rangees.push(Rangee::nouvelle(&texte[..mot.len()], couleur, s.trim_start())),
+            None => l.rangees.push(Rangee::nouvelle(mot, couleur, texte)),
+        }
+    }
+    l.pied = reste(a.len().saturating_sub(RANGEES), "autre", "autres");
+    let rang = if teinte == erp::ROUGE { rang::ALERTES_HAUTES } else { rang::ALERTES };
+    (rang, l)
+}
+
+/// L'agenda de l'entreprise (les notes partagées du calendrier de l'ERP, d'aujourd'hui aux jours qui viennent) : la
+/// date en mot de tête (« Aujourd'hui », « Demain », « jeu. 29 oct. »), la note ; leur nombre dans la pilule. Ce qui
+/// est passé ne se montre pas.
+fn liste_de_l_agenda(agenda: &[Value], m: &Maintenant) -> Liste {
+    let aujourdhui = m.aujourdhui();
+    let notes: Vec<(String, &str)> = agenda
+        .iter()
+        .filter_map(|a| {
+            let date = texte_de(a, "quand").get(..10)?.to_string();
+            (centre::jours_entre(&aujourdhui, &date)? >= 0).then_some((date, texte_de(a, "texte")))
+        })
+        .filter(|(_, t)| !t.is_empty())
+        .collect();
+    let titre = "Agenda de l'entreprise";
+    let mut l = Liste::nouvelle(titre, pictos::AGENDA, erp::INDIGO).pilule(notes.len().to_string(), erp::INDIGO);
+    for (date, texte) in notes.iter().take(RANGEES) {
+        let (mot, couleur) = match centre::jours_entre(&aujourdhui, date) {
+            Some(0) => ("Aujourd'hui".to_string(), erp::PRIMAIRE),
+            Some(1) => ("Demain".to_string(), tete(erp::INDIGO)),
+            _ => (centre::jour_court(date), tete(erp::INDIGO)),
+        };
+        l.rangees.push(Rangee::nouvelle(&mot, couleur, texte));
+    }
+    if notes.is_empty() {
+        l.rangees.push(Rangee::nouvelle("", erp::TEXTE, "Rien au calendrier de l'entreprise."));
+    }
+    l.pied = reste(notes.len().saturating_sub(RANGEES), "autre note", "autres notes");
+    l
+}
+
+/// Les factures en retard, la plus vieille d'abord : le client en mot de tête, de la couleur de son retard (l'ambre
+/// sous un mois, l'orange sous deux, puis le rouge), le numéro, le solde à droite ; ses jours de retard et son échéance
+/// en détail ; tout le retard dans la pilule, en rouge.
+fn liste_des_factures(factures: &[Value], total: Option<f64>) -> Liste {
+    let total = total.unwrap_or_else(|| factures.iter().filter_map(|f| nombre(f, "solde")).sum());
+    let mut l = Liste::nouvelle("Factures en retard", pictos::RETARD, erp::ROUGE).pilule(dollars(total), erp::ROUGE);
+    for f in factures.iter().take(RANGEES) {
+        let jours = nombre(f, "jours").unwrap_or(0.0);
+        let client = Some(texte_de(f, "client")).filter(|c| !c.is_empty()).unwrap_or("Client");
+        let numero = texte_de(f, "numero");
+        let numero = if numero.is_empty() { String::new() } else { format!("n° {numero}") };
+        let echeance = texte_de(f, "echeance");
+        let echue =
+            if echeance.is_empty() { String::new() } else { format!("échue le {}", centre::date_courte(echeance)) };
+        let retard = compte(jours, "jour de retard", "jours de retard");
+        let mut r = Rangee::nouvelle(client, couleur_du_retard(jours), &numero).detail(&[retard, echue]);
+        if let Some(s) = nombre(f, "solde") {
+            r = r.a_droite(dollars(s));
+        }
+        l.rangees.push(r);
+    }
+    l.pied = reste(factures.len().saturating_sub(RANGEES), "autre facture", "autres factures");
+    l
+}
+
+/// Les chantiers en cours (les projets « En cours » de l'ERP), du plus récent au plus ancien : leur numéro en mot de
+/// tête quand il est court (sinon en détail), leur nom et leur adresse, leur valeur à droite ; leur client, leur ville
+/// et leur date de fin en détail ; leur nombre dans la pilule.
+fn liste_des_chantiers(projets: &[Value], combien: Option<f64>) -> Liste {
+    let combien = combien.map_or(projets.len(), |c| c.round().max(0.0) as usize);
+    let mut l =
+        Liste::nouvelle("Chantiers en cours", pictos::PROJETS, erp::BLEU).pilule(combien.to_string(), erp::BLEU);
+    for p in projets.iter().take(RANGEES) {
+        let numero = texte_de(p, "numero");
+        let court = numero.chars().count() <= 10;
+        let nom = Some(texte_de(p, "nom")).filter(|n| !n.is_empty()).unwrap_or(numero);
+        // L'adresse du chantier, quand son nom ne la dit pas déjà : « Agrandissement (12 rue des Exemples) ».
+        let adresse = texte_de(p, "adresse");
+        let nom =
+            if adresse.is_empty() || nom.contains(adresse) { nom.to_string() } else { format!("{nom} ({adresse})") };
+        let (debut, fin) = (texte_de(p, "debut"), texte_de(p, "fin"));
+        let dates = match (debut.is_empty(), fin.is_empty()) {
+            (_, false) => format!("jusqu'au {}", centre::date_courte(fin)),
+            (false, true) => format!("depuis le {}", centre::date_courte(debut)),
+            _ => String::new(),
+        };
+        let long = if !court && numero != nom { numero } else { "" };
+        let mot = if court { numero } else { "" };
+        let detail = [texte_de(p, "client"), texte_de(p, "ville"), &dates, long];
+        let mut r = Rangee::nouvelle(mot, tete(erp::BLEU), &nom).detail(&detail);
+        if let Some(v) = nombre(p, "valeur") {
+            r = r.a_droite(dollars(v));
+        }
+        l.rangees.push(r);
+    }
+    l.pied = reste(combien.saturating_sub(projets.len().min(RANGEES)), "autre chantier", "autres chantiers");
+    l
+}
+
+/// Un statut de devis de l'ERP (« Brouillon », « Valide », « Envoye », « En attente »…), dit : « brouillon »,
+/// « validée », « envoyée », « en attente » — au féminin, une soumission.
+fn statut_de_soumission(statut: &str) -> String {
+    match statut.trim().to_lowercase().as_str() {
+        "valide" | "validé" | "validée" => "validée".to_string(),
+        "envoye" | "envoyé" | "envoyée" => "envoyée".to_string(),
+        "accepte" | "accepté" | "acceptée" => "acceptée".to_string(),
+        autre => autre.to_string(),
+    }
+}
+
+/// Les soumissions aux clients (brouillons, validées, envoyées, en attente), la dernière modifiée d'abord : leur numéro
+/// en mot de tête, leur nom, leur valeur à droite ; le client, leur statut et le jour de leur dernière modification
+/// en détail ; leur nombre dans la pilule.
+fn liste_des_soumissions(soumissions: &[Value]) -> Liste {
+    let titre = "Soumissions client";
+    let combien = soumissions.len().to_string();
+    let mut l = Liste::nouvelle(titre, pictos::DEVIS, erp::INDIGO).pilule(combien, erp::INDIGO);
+    for s in soumissions.iter().take(RANGEES) {
+        let modifie = texte_de(s, "modifie");
+        let modifie =
+            if modifie.is_empty() { String::new() } else { format!("modifiée le {}", centre::jour_court(modifie)) };
+        let detail = [texte_de(s, "client").to_string(), statut_de_soumission(texte_de(s, "statut")), modifie];
+        let mut r = Rangee::nouvelle(texte_de(s, "numero"), tete(erp::INDIGO), texte_de(s, "nom")).detail(&detail);
+        if let Some(v) = nombre(s, "valeur") {
+            r = r.a_droite(dollars(v));
+        }
+        l.rangees.push(r);
+    }
+    l.pied = reste(soumissions.len().saturating_sub(RANGEES), "autre soumission", "autres soumissions");
+    l
+}
+
+/// Les commandes et les livraisons : ce qui est à commander (en ambre), ce qui est commandé (en bleu), les livraisons
+/// prévues (en vert) — chacune son mot de tête, son texte (ou son numéro), son montant à droite ; son numéro, son
+/// fournisseur, son chantier et sa date en détail. Dans la pilule, ce qui est à commander (en ambre), sinon combien
+/// il y en a.
+fn liste_des_commandes(commandes: &[Value], kpis: &Value) -> Liste {
+    let ordre = |c: &&Value| match texte_de(c, "sorte") {
+        "a_commander" => 0,
+        "commande" => 1,
+        _ => 2,
+    };
+    let mut triees: Vec<&Value> = commandes.iter().collect();
+    triees.sort_by_key(ordre);
+    let a_commander = nombre(kpis, "bons_a_commander")
+        .unwrap_or_else(|| commandes.iter().filter(|c| texte_de(c, "sorte") == "a_commander").count() as f64);
+    let (pilule, teinte) = if a_commander > 0.0 {
+        (format!("{} à commander", centre::milliers(a_commander)), erp::AMBRE)
+    } else {
+        (commandes.len().to_string(), erp::ORANGE)
+    };
+    let mut l = Liste::nouvelle("Commandes et livraisons", pictos::COMMANDES, erp::ORANGE).pilule(pilule, teinte);
+    for c in triees.iter().take(RANGEES) {
+        let date = texte_de(c, "date");
+        let (mot, couleur, quand) = match texte_de(c, "sorte") {
+            "a_commander" => ("À commander", tete(erp::AMBRE), "pour le"),
+            "commande" => ("Commandé", tete(erp::BLEU), "livraison prévue le"),
+            _ => ("Livraison", tete(erp::VERT), "le"),
+        };
+        let heure = texte_de(c, "heure");
+        let quand = match (date.is_empty(), heure.is_empty()) {
+            (true, _) => String::new(),
+            (false, true) => format!("{quand} {}", centre::jour_court(date)),
+            (false, false) => format!("{quand} {} à {}", centre::jour_court(date), centre::heure_parlee(heure)),
+        };
+        let (texte, numero) = match texte_de(c, "texte") {
+            "" => (texte_de(c, "numero"), ""),
+            t => (t, texte_de(c, "numero")),
+        };
+        let detail = [numero, texte_de(c, "fournisseur"), texte_de(c, "projet"), &quand];
+        let mut r = Rangee::nouvelle(mot, couleur, texte).detail(&detail);
+        if let Some(m) = nombre(c, "montant") {
+            r = r.a_droite(dollars(m));
+        }
+        l.rangees.push(r);
+    }
+    l.pied = reste(commandes.len().saturating_sub(RANGEES), "autre", "autres");
+    l
+}
+
+/// Les heures de la semaine (les pointages de l'ERP) : la semaine en cours et ce qui y est travaillé, la semaine
+/// passée, ce qui est saisi pour des jours à venir (à vérifier), les heures manquantes (en rouge : le jour et qui),
+/// puis les heures de la semaine par chantier ; combien d'employés ont pointé dans la pilule.
+fn liste_des_heures(h: &Value) -> Liste {
+    let mut l = Liste::nouvelle("Heures de la semaine", pictos::HEURES, erp::SARCELLE);
+    if let Some(n) = nombre(h, "employes_actifs") {
+        l = l.pilule(compte(n, "employé actif", "employés actifs"), erp::SARCELLE);
+    }
+    let semaine = texte_de(h, "semaine");
+    let mot = if semaine.is_empty() {
+        "Cette semaine".to_string()
+    } else {
+        format!("Semaine du {}", centre::date_courte(semaine))
+    };
+    if let Some(c) = nombre(h, "cette_semaine") {
+        let saisie = texte_de(h, "derniere_saisie");
+        let derniere = match (saisie.get(..10), saisie.get(11..16)) {
+            (Some(d), Some(t)) => format!("dernière saisie : {} à {}", centre::jour_court(d), centre::heure_parlee(t)),
+            (Some(d), None) => format!("dernière saisie : {}", centre::jour_court(d)),
+            _ => String::new(),
+        };
+        let texte = format!("{} travaillées jusqu'à aujourd'hui", heures_dites(c));
+        l.rangees.push(Rangee::nouvelle(&mot, tete(erp::SARCELLE), &texte).detail(&[derniere]));
+    }
+    if let Some(p) = nombre(h, "semaine_passee") {
+        l.rangees.push(Rangee::nouvelle(
+            "Semaine passée",
+            tete(erp::SARCELLE),
+            &format!("{} travaillées", heures_dites(p)),
+        ));
+    }
+    if let Some(a) = nombre(h, "a_venir").filter(|a| *a > 0.0) {
+        let texte = format!("{} saisies pour des jours à venir", heures_dites(a));
+        l.rangees.push(Rangee::nouvelle("À vérifier", tete(erp::AMBRE), &texte));
+    }
+    let manquantes = &h["manquantes"];
+    let qui: Vec<&str> =
+        manquantes["employes"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::trim).collect();
+    if !qui.is_empty() {
+        let jour = texte_de(manquantes, "jour");
+        let le = if jour.is_empty() { String::new() } else { format!("le {} ", centre::jour_court(jour)) };
+        let texte = format!("{le}pour : {}", qui.join(", "));
+        l.rangees.push(Rangee::nouvelle("Heures manquantes", erp::DANGER_ENCRE, &texte));
+    }
+    // Les heures de la semaine par chantier : chacun sa barre (d'une seule couleur : la longueur les compare).
+    let par_projet: Vec<&Value> = h["par_projet"].as_array().into_iter().flatten().collect();
+    let plus = par_projet.iter().filter_map(|p| nombre(p, "heures")).fold(0.0, f64::max);
+    for p in par_projet.iter().take(RANGEES) {
+        let numero = texte_de(p, "numero");
+        let mot = if numero.chars().count() <= 10 { numero } else { "" };
+        let nom = texte_de(p, "nom");
+        let mut r = Rangee::nouvelle(mot, tete(erp::BLEU), nom);
+        if let Some(n) = nombre(p, "heures") {
+            r = r.a_droite(heures_dites(n));
+            let part = if plus > 0.0 { (n / plus) as f32 } else { 0.0 };
+            let bulle = format!("{nom} : {} cette semaine", heures_dites(n));
+            r.mesure = Some(theme::Mesure::Longueur { part, couleur: erp::SARCELLE.vif[1], bulle });
+        }
+        l.rangees.push(r);
+    }
+    if !par_projet.is_empty() {
+        l.pied = match par_projet.len().saturating_sub(RANGEES) {
+            0 => "Les heures de cette semaine, par chantier".to_string(),
+            n => format!(
+                "Les heures de cette semaine, par chantier (et {})",
+                compte(n as f64, "autre chantier", "autres chantiers")
+            ),
+        };
+    }
+    l
+}
+
+/// Les heures de l'équipe (les gars de chantier), un employé par rangée : son nom en mot de tête — rouge s'il lui
+/// manque des heures —, ses heures de cette semaine et de la semaine passée ; ses jours de cette semaine (« lun. 9 ·
+/// mar. 9,5 »), ce qu'il a saisi pour des jours à venir et s'il est au travail en détail ; combien ils sont dans la
+/// pilule (tous ceux qui ont pointé : la lecture n'en donne que vingt). Rien sans employés.
+fn liste_de_l_equipe(h: &Value) -> Option<Liste> {
+    let employes = h["employes"].as_array().filter(|e| !e.is_empty())?;
+    let manquants: Vec<&str> =
+        h["manquantes"]["employes"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::trim).collect();
+    let semaine = texte_de(h, "semaine");
+    let titre = "Heures de l'équipe";
+    let actifs = nombre(h, "employes_actifs").map_or(0, |n| n.round().max(0.0) as usize).max(employes.len());
+    let combien = compte(actifs as f64, "employé", "employés");
+    let mut l = Liste::nouvelle(titre, pictos::PERSONNE, erp::BLEU).pilule(combien, erp::BLEU);
+    for e in employes.iter().take(RANGEES) {
+        let nom = texte_de(e, "nom");
+        let couleur = if manquants.contains(&nom) { erp::DANGER_ENCRE } else { tete(erp::BLEU) };
+        let heures = |cle: &str| nombre(e, cle).map_or("0\u{a0}h".to_string(), heures_dites);
+        let texte =
+            format!("{} cette semaine · {} la semaine passée", heures("cette_semaine"), heures("semaine_passee"));
+        let jours: Vec<String> = e["jours"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|j| semaine.is_empty() || texte_de(j, "jour") >= semaine)
+            .filter_map(|j| {
+                let jour = texte_de(j, "jour");
+                let n = nombre(j, "heures")?;
+                let court = centre::jour_court(jour);
+                Some(format!(
+                    "{} {}",
+                    court.split(' ').next().unwrap_or(""),
+                    heures_dites(n).trim_end_matches("\u{a0}h")
+                ))
+            })
+            .collect();
+        let a_venir = nombre(e, "a_venir")
+            .filter(|a| *a > 0.0)
+            .map_or(String::new(), |a| format!("{} à venir, à vérifier", heures_dites(a)));
+        let au_travail = if e["au_travail"].as_bool() == Some(true) { "au travail" } else { "" };
+        l.rangees.push(Rangee::nouvelle(nom, couleur, &texte).detail(&[
+            jours.join(" · "),
+            a_venir,
+            au_travail.to_string(),
+        ]));
+    }
+    l.pied = reste(actifs.saturating_sub(employes.len().min(RANGEES)), "autre employé", "autres employés");
+    Some(l)
+}
+
+/// Les factures reçues des fournisseurs, la plus récente d'abord : le fournisseur en mot de tête (rouge si elle est en
+/// retard), le numéro, ce qui en reste à payer à droite (sinon le montant) ; le chantier, le jour de la facture et où
+/// elle en est en détail (« à payer » tant qu'un solde reste) ; leur nombre dans la pilule.
+fn liste_des_factures_recues(factures: &[Value]) -> Liste {
+    let combien = factures.len().to_string();
+    let mut l =
+        Liste::nouvelle("Factures reçues", pictos::FACTURES_RECUES, erp::SARCELLE).pilule(combien, erp::SARCELLE);
+    for f in factures.iter().take(RANGEES) {
+        let numero = texte_de(f, "numero");
+        let numero = if numero.is_empty() { String::new() } else { format!("n° {numero}") };
+        let date = texte_de(f, "date");
+        let date = if date.is_empty() { String::new() } else { format!("du {}", centre::jour_court(date)) };
+        let solde = nombre(f, "solde").filter(|s| *s > 0.0);
+        let code = texte_de(f, "statut").to_uppercase();
+        let statut = match code.as_str() {
+            "PAYEE" | "PAYÉE" => "payée",
+            "PARTIELLEMENT_PAYEE" => "payée en partie",
+            "EN_RETARD" => "en retard",
+            "BROUILLON" => "brouillon",
+            "ANNULEE" | "ANNULÉE" => "annulée",
+            _ if solde.is_some() => "à payer",
+            _ => "",
+        };
+        let detail = [texte_de(f, "projet"), &date, statut];
+        let fournisseur = Some(texte_de(f, "fournisseur")).filter(|x| !x.is_empty()).unwrap_or("Fournisseur");
+        let couleur = if code == "EN_RETARD" { erp::DANGER_ENCRE } else { tete(erp::SARCELLE) };
+        let mut r = Rangee::nouvelle(fournisseur, couleur, &numero).detail(&detail);
+        if let Some(s) = solde.or_else(|| nombre(f, "montant")) {
+            r = r.a_droite(dollars(s));
+        }
+        l.rangees.push(r);
+    }
+    l.pied = reste(factures.len().saturating_sub(RANGEES), "autre facture", "autres factures");
+    l
+}
+
+/// Les devis qui attendent une réponse, du plus récent au plus ancien : leur numéro en mot de tête, leur nom, leur
+/// valeur à droite ; le client, ce qu'ils attendent et depuis quand en détail ; leur nombre dans la pilule.
+fn liste_des_devis(devis: &[Value], combien: Option<f64>) -> Liste {
+    let combien = combien.map_or(devis.len(), |c| c.round().max(0.0) as usize);
+    let mut l =
+        Liste::nouvelle("Devis en attente", pictos::DEVIS, erp::INDIGO).pilule(combien.to_string(), erp::INDIGO);
+    for d in devis.iter().take(RANGEES) {
+        let statut = match texte_de(d, "statut").to_lowercase().as_str() {
+            "envoye" | "envoyé" => "envoyé".to_string(),
+            autre => autre.to_string(),
+        };
+        let depuis = texte_de(d, "depuis");
+        let depuis =
+            if depuis.is_empty() { String::new() } else { format!("depuis le {}", centre::date_courte(depuis)) };
+        let detail = [texte_de(d, "client"), &statut, &depuis];
+        let mut r = Rangee::nouvelle(texte_de(d, "numero"), tete(erp::INDIGO), texte_de(d, "nom")).detail(&detail);
+        if let Some(v) = nombre(d, "valeur") {
+            r = r.a_droite(dollars(v));
+        }
+        l.rangees.push(r);
+    }
+    l.pied = reste(combien.saturating_sub(devis.len().min(RANGEES)), "autre devis", "autres devis");
+    l
+}
+
+/// La balance âgée : la barre de ses tranches (le bleu de ce qui est à venir, puis la rampe du retard ; une bulle au
+/// survol de chaque part), puis chaque tranche non vide — son carré de couleur, son nom, son montant à droite ; tout le
+/// dû dans la pilule ; au pied, ce qui est entré en trente jours.
+fn liste_de_la_balance(b: &Value, encaisse: Option<f64>) -> Liste {
+    let montants: Vec<f64> = TRANCHES.iter().map(|(cle, _, _)| nombre(b, cle).unwrap_or(0.0).max(0.0)).collect();
+    let somme: f64 = montants.iter().sum();
+    let total = nombre(b, "total").unwrap_or(somme);
+    let mut l = Liste::nouvelle("Balance âgée", pictos::BALANCE, erp::SARCELLE).pilule(dollars(total), erp::SARCELLE);
+    for ((_, nom, couleur), montant) in TRANCHES.iter().zip(&montants) {
+        let part = if somme > 0.0 { (montant / somme * 100.0).round() } else { 0.0 };
+        l.barre.push((*montant, *couleur, format!("{nom} : {} ({part}\u{a0}%)", dollars(*montant))));
+        if *montant > 0.0 {
+            let mut r = Rangee::nouvelle("", erp::TEXTE, nom).a_droite(dollars(*montant));
+            r.carre = Some(*couleur);
+            l.rangees.push(r);
+        }
+    }
+    if l.rangees.is_empty() {
+        l.rangees.push(Rangee::nouvelle("", erp::TEXTE, "Rien à recevoir."));
+    }
+    if let Some(e) = encaisse {
+        l.pied = format!("{} encaissés ces 30 derniers jours", dollars(e));
+    }
+    l
+}
+
+/// Le pipeline des ventes, ses étapes ouvertes par valeur : le nom de l'étape et son nombre d'opportunités, sa valeur à
+/// droite, et une barre de sa valeur (d'une seule couleur : la longueur la dit) ; tout le pipeline dans la pilule.
+fn liste_du_pipeline(etapes: &[Value], total: Option<f64>) -> Liste {
+    let valeurs: Vec<(&str, Option<f64>, f64)> = etapes
+        .iter()
+        .map(|e| (texte_de(e, "etape"), nombre(e, "nombre"), nombre(e, "valeur").unwrap_or(0.0).max(0.0)))
+        .filter(|(nom, _, _)| !nom.is_empty())
+        .collect();
+    let plus_grande = valeurs.iter().map(|x| x.2).fold(0.0, f64::max);
+    let total = total.unwrap_or_else(|| valeurs.iter().map(|x| x.2).sum());
+    let titre = "Pipeline des ventes";
+    let mut l = Liste::nouvelle(titre, pictos::PIPELINE, erp::VIOLET).pilule(dollars_court(total), erp::VIOLET);
+    for (nom, combien, valeur) in valeurs.iter().take(RANGEES) {
+        let mut r = Rangee::nouvelle("", erp::TEXTE, nom).a_droite(dollars(*valeur));
+        if let Some(n) = combien {
+            let suite = format!(" · {}", compte(*n, "opportunité", "opportunités"));
+            r.bouts.push(theme::Bout { couleur: Some(erp::TEXTE_2), ..theme::Bout::texte(suite) });
+        }
+        let part = if plus_grande > 0.0 { (*valeur / plus_grande) as f32 } else { 0.0 };
+        let bulle = format!("{nom} : {}", dollars(*valeur));
+        r.mesure = Some(theme::Mesure::Longueur { part, couleur: erp::VIOLET.vif[1], bulle });
+        l.rangees.push(r);
+    }
+    l.pied = reste(valeurs.len().saturating_sub(RANGEES), "autre étape", "autres étapes");
+    l
+}
+
+/// La banque : chaque compte en mot de tête, son solde (au dernier relevé importé) à droite ; le solde publié de l'ERP
+/// et les opérations à classer en détail ; dans la pilule, ce qui est à classer (en ambre), sinon combien de comptes.
+fn liste_de_la_banque(comptes: &[Value]) -> Liste {
+    let a_classer: f64 = comptes.iter().filter_map(|c| nombre(c, "a_classer")).sum();
+    let (pilule, teinte) = if a_classer > 0.0 {
+        (format!("{} à classer", centre::milliers(a_classer)), erp::AMBRE)
+    } else {
+        (compte(comptes.len() as f64, "compte", "comptes"), erp::SARCELLE)
+    };
+    let mut l = Liste::nouvelle("Banque", pictos::ENCAISSE, erp::SARCELLE).pilule(pilule, teinte);
+    for c in comptes.iter().take(RANGEES) {
+        let publie = nombre(c, "solde_publie").map_or(String::new(), |s| format!("publié : {}", dollars(s)));
+        let classer = nombre(c, "a_classer")
+            .filter(|n| *n > 0.0)
+            .map_or(String::new(), |n| compte(n, "opération à classer", "opérations à classer"));
+        let releve = if nombre(c, "solde").is_none() { "aucun relevé importé".to_string() } else { String::new() };
+        let mut r = Rangee::nouvelle(texte_de(c, "nom"), tete(erp::SARCELLE), "").detail(&[publie, classer, releve]);
+        if let Some(s) = nombre(c, "solde") {
+            r = r.a_droite(dollars(s));
+        }
+        l.rangees.push(r);
+    }
+    l.pied = reste(comptes.len().saturating_sub(RANGEES), "autre compte", "autres comptes");
+    l
+}
+
+/// La météo de la maison et des chantiers, sur trois jours (le bulletin de la fenêtre, d'open-meteo) : chaque jour en
+/// mot de tête (« Aujourd'hui », « Demain », « Mercredi »), ses températures (« 12° / -4° »), le temps qu'il fera et
+/// la chance de précipitations en détail ; la température de l'heure dans la pilule ; la ville dans le titre. Rien sans
+/// prévision.
+fn liste_de_la_meteo(b: &Bulletin, ville: &str, m: &Maintenant) -> Option<Liste> {
+    if b.jours.is_empty() {
+        return None;
+    }
+    let titre = if ville.trim().is_empty() { "Météo".to_string() } else { format!("Météo à {}", ville.trim()) };
+    let icone = match b.code {
+        0 | 1 => pictos::SOLEIL,
+        2 => pictos::SOLEIL_VOILE,
+        _ => pictos::NUAGE,
+    };
+    let maintenant = format!("{}\u{a0}°C", meteo::arrondi(b.temperature));
+    let mut l = Liste::nouvelle(titre, icone, erp::BLEU).pilule(maintenant, erp::BLEU);
+    let aujourdhui = m.aujourdhui();
+    let degres = |t: Option<f64>| t.map_or("—".to_string(), |t| format!("{}°", meteo::arrondi(t)));
+    for j in b.jours.iter().take(3) {
+        let mot = match centre::jours_entre(&aujourdhui, &j.date) {
+            Some(0) => "Aujourd'hui".to_string(),
+            Some(1) => "Demain".to_string(),
+            _ => ambiance::date_longue(&j.date).split(' ').next().map(theme::casse_de_phrase).unwrap_or_default(),
+        };
+        let temps = j.code.and_then(meteo::libelle).unwrap_or_default().to_string();
+        let pluie =
+            j.precipitations.filter(|p| *p > 0.0).map_or(String::new(), |p| format!("précipitations {p:.0}\u{a0}%"));
+        let r = Rangee::nouvelle(&mot, tete(erp::BLEU), &format!("{} / {}", degres(j.max), degres(j.min)));
+        l.rangees.push(r.detail(&[temps, pluie]));
+    }
+    Some(l)
+}
+
+// ---- La page ------------------------------------------------------------------------------------------------------
+
+/// Une carte de la maçonnerie : une liste, ou une carte d'un état de l'entreprise (l'invitation à se relier, la
+/// première lecture, une lecture qui n'a pas abouti, sans chiffres d'avant).
+enum Carte {
+    Liste(Liste),
+    Invitation,
+    PremiereLecture,
+    Erreur(String),
+}
+
+impl Fenetre {
+    /// La vue du tableau de bord : celle que publie le chef, ou celle qu'on vient de choisir d'un clic, tenue le temps
+    /// qu'il la publie (pas de retour en arrière d'une image).
+    fn vue_du_tableau(&self, ctx: &egui::Context) -> Vue {
+        let maintenant = ctx.input(|i| i.time);
+        match ctx.data(|d| d.get_temp::<(usize, f64)>(egui::Id::unique(VUE_TENUE))) {
+            Some((k, quand)) if maintenant - quand < TENUE => VUES[k.min(VUES.len() - 1)].0,
+            _ => Vue::de(self.champ("vue_du_tableau")),
+        }
+    }
+
+    /// Le tableau de bord sous sa bannière : la rangée du choix et de la fraîcheur ; le bandeau d'une lecture manquée
+    /// ou d'une liaison perdue ; les tuiles des chiffres ; les cartes en maçonnerie.
+    pub(super) fn page_du_tableau(&mut self, ui: &mut egui::Ui, aujourdhui: &str, heure: &str) {
+        let lecture = self.centre.entreprise();
+        let liaison = Liaison::de(&self.etat["constructo"], lecture.as_ref());
+        let lecture = if liaison == Liaison::Absente { None } else { lecture };
+        let m = Maintenant::du_poste();
+        let vue = if liaison == Liaison::Absente { Vue::Famille } else { self.vue_du_tableau(ui.ctx()) };
+        let (entreprise, famille) = (vue != Vue::Famille, vue != Vue::Entreprise);
+        if liaison != Liaison::Absente {
+            let f = entreprise.then(|| fraicheur(liaison, lecture.as_ref(), &m));
+            self.rangee_du_choix(ui, vue, f.as_ref(), liaison);
+            ui.add_space(14.0);
+        }
+        let lue = lecture.as_ref().and_then(|l| l.as_ref().ok()).filter(|v| a_des_chiffres(v)).cloned();
+        // Le bandeau : une lecture manquée (les chiffres d'avant restent), ou une liaison perdue (ils pâlissent).
+        let mut pales = false;
+        if entreprise && let Some(v) = &lue {
+            let quand =
+                lue_quand(v, &m).map_or(String::new(), |(_, q)| format!(" Ces chiffres datent {}.", de_quand(&q)));
+            if liaison != Liaison::Reliee {
+                pales = true;
+                let texte = format!("Constructo AI n'est plus relié.{quand}");
+                if bandeau(ui, false, &texte, ("Se reconnecter", pictos::LIEN)) {
+                    self.geste("constructo_connecter", Value::Null);
+                }
+                ui.add_space(ECART);
+            } else if texte_de(v, "etat") == "erreur" {
+                let raison = texte_de(v, "erreur");
+                let texte = if raison.is_empty() {
+                    format!("La dernière lecture de Constructo AI n'a pas abouti.{quand}")
+                } else {
+                    format!("{}{quand}", phrase(raison))
+                };
+                if bandeau(ui, true, &texte, ("Réessayer", pictos::RELIRE)) {
+                    self.geste("entreprise_lire", Value::Null);
+                }
+                ui.add_space(ECART);
+            }
+        }
+        // Les tuiles : les chiffres de la vue, dans son ordre, six au plus.
+        let mut chiffres = if famille { self.centre.chiffres(aujourdhui, heure) } else { Vec::new() };
+        if entreprise && let Some(v) = &lue {
+            chiffres.extend(chiffres_de_l_entreprise(v));
+        }
+        let ordre: &[&str] = match vue {
+            Vue::Tout => &TUILES_DE_TOUT,
+            Vue::Entreprise => &TUILES_DE_L_ENTREPRISE,
+            Vue::Famille => &TUILES_DE_LA_FAMILLE,
+        };
+        let tuiles: Vec<Chiffre> = ordre
+            .iter()
+            .filter_map(|cle| chiffres.iter().find(|(c, _)| c == cle).map(|(_, x)| x.clone()))
+            .take(SIX)
+            .collect();
+        if !tuiles.is_empty() {
+            ui.scope(|ui| {
+                if pales && vue == Vue::Entreprise {
+                    ui.multiply_opacity(0.55);
+                }
+                theme::tuiles(ui, &tuiles);
+            });
+            ui.add_space(ECART);
+        }
+        // Les cartes : celles de la maison et de l'entreprise, rangées ensemble ; un état de l'entreprise sans chiffres
+        // y prend sa place, en tête.
+        let mut cartes: Vec<(u8, bool, Carte)> = Vec::new();
+        if famille {
+            cartes.extend(self.centre.listes(aujourdhui, heure).into_iter().map(|(r, l)| (r, false, Carte::Liste(l))));
+        }
+        // La météo vaut pour la maison comme pour les chantiers : dans toutes les vues.
+        if let Some(b) = &self.bulletin {
+            let ville = self.meteo.as_ref().map(|x| x.lieu().ville.clone()).unwrap_or_default();
+            if let Some(l) = liste_de_la_meteo(b, &ville, &m) {
+                cartes.push((rang::METEO, false, Carte::Liste(l)));
+            }
+        }
+        if entreprise {
+            match (&lue, liaison) {
+                (Some(v), _) => {
+                    let listes = listes_de_l_entreprise(v, &m).into_iter();
+                    cartes.extend(listes.map(|(r, l)| (r, pales, Carte::Liste(l))));
+                }
+                (None, Liaison::NonReliee | Liaison::EnCours) => {
+                    cartes.push((rang::ALERTES_HAUTES, false, Carte::Invitation));
+                }
+                (None, _) => {
+                    let erreur = match &lecture {
+                        Some(Err(raison)) => Some(format!("Sa dernière lecture (entreprise.json) {raison}.")),
+                        Some(Ok(v)) if texte_de(v, "etat") == "erreur" => match texte_de(v, "erreur") {
+                            "" => Some("La lecture n'a pas abouti.".to_string()),
+                            raison => Some(phrase(raison)),
+                        },
+                        _ => None,
+                    };
+                    cartes.push((rang::ALERTES_HAUTES, false, erreur.map_or(Carte::PremiereLecture, Carte::Erreur)));
+                }
+            }
+        }
+        cartes.sort_by_key(|(r, _, _)| *r);
+        let colonnes = theme::colonnes_pour(ui.available_width());
+        theme::maconnerie(ui, colonnes, cartes.len(), |ui, k| {
+            let (_, pale, carte) = &cartes[k];
+            if *pale {
+                ui.multiply_opacity(0.55);
+            }
+            match carte {
+                Carte::Liste(l) => {
+                    theme::carte_liste(ui, l);
+                }
+                Carte::Invitation => self.invitation(ui, liaison),
+                Carte::PremiereLecture => premiere_lecture(ui),
+                Carte::Erreur(raison) => self.carte_d_erreur(ui, raison),
+            }
+        });
+    }
+
+    /// La rangée au-dessus de tout (le filtre des tableaux de bord : un seul, au-dessus de ce qu'il touche) : le choix
+    /// de la vue en segments ; à droite, quand l'entreprise se montre, l'heure de sa dernière lecture et le bouton qui
+    /// la relit (reliée seulement ; une roue pendant qu'Eve lit).
+    fn rangee_du_choix(&mut self, ui: &mut egui::Ui, vue: Vue, f: Option<&Fraicheur>, liaison: Liaison) {
+        let largeur = ui.available_width();
+        let (rangee, _) = ui.allocate_exact_size(vec2(largeur, 38.0), Sense::hover());
+        let mut gauche = ui.new_child(UiBuilder::new().max_rect(rangee).layout(Layout::left_to_right(Align::Center)));
+        if let Some(choisie) = segments_du_tableau(&mut gauche, vue)
+            && choisie != vue
+        {
+            let maintenant = ui.input(|i| i.time);
+            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique(VUE_TENUE), (choisie.rang(), maintenant)));
+            self.geste("vue_du_tableau", Value::String(VUES_DU_TABLEAU[choisie.rang()].0.into()));
+        }
+        let Some(f) = f else { return };
+        let reste = (rangee.right() - gauche.min_rect().right() - 16.0).max(0.0);
+        let mut droite = ui.new_child(UiBuilder::new().max_rect(rangee).layout(Layout::right_to_left(Align::Center)));
+        let lit = f.point == Point::Roue && liaison == Liaison::Reliee;
+        let rep = bouton_relire(&mut droite, liaison == Liaison::Reliee, lit);
+        if rep.clicked() && liaison == Liaison::Reliee && !lit {
+            self.geste("entreprise_lire", Value::Null);
+        }
+        droite.add_space(10.0);
+        mise_a_jour_dite(&mut droite, f, reste - 50.0);
+    }
+
+    /// L'invitation à relier Eve à Constructo AI : ce que le tableau montrera, et le bouton qui ouvre la page de
+    /// connexion (le geste `constructo_connecter`) ; la page déjà ouverte, une roue, la ligne du chef, et de quoi la
+    /// rouvrir.
+    fn invitation(&mut self, ui: &mut egui::Ui, liaison: Liaison) {
+        let detail = self.etat["constructo"]["detail"].as_str().unwrap_or("").to_string();
+        let mut clic = false;
+        theme::carte(ui, Some(erp::BLEU.pastel), 0.0, |ui| {
+            theme::tete_de_carte(ui, "Relie Eve à Constructo AI", pictos::LIEN, erp::BLEU, false, None);
+            let promesse = "Tes projets, ce qui est à recevoir et en retard, tes devis, tes ventes et ta banque : Eve \
+                            les lit dans ton ERP, sans jamais y écrire, et les tient à jour ici.";
+            ui.add(egui::Label::new(RichText::new(promesse).size(14.0).color(erp::TEXTE)).wrap().selectable(false));
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                for (icone, mot, teinte) in [
+                    (pictos::PROJETS, "Projets", erp::BLEU),
+                    (pictos::RETARD, "Factures", erp::ROUGE),
+                    (pictos::DEVIS, "Devis", erp::INDIGO),
+                    (pictos::PIPELINE, "Ventes", erp::VIOLET),
+                    (pictos::ENCAISSE, "Banque", erp::SARCELLE),
+                ] {
+                    puce(ui, icone, mot, teinte);
+                }
+            });
+            ui.add_space(8.0);
+            if liaison == Liaison::EnCours {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    let (r, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
+                    roue(ui, r.center(), 7.0, erp::PRIMAIRE);
+                    let texte = if detail.is_empty() { "Connexion en cours…" } else { detail.as_str() };
+                    ui.add(egui::Label::new(RichText::new(texte).size(13.0).color(erp::TEXTE_2)).wrap());
+                });
+                ui.add_space(6.0);
+                clic = theme::bouton_erp(ui, Some(pictos::LIEN), "Rouvrir la page", BoutonErp::Secondaire).clicked();
+            } else {
+                clic = theme::bouton_erp(ui, Some(pictos::LIEN), "Se connecter à Constructo AI", BoutonErp::Primaire)
+                    .on_hover_text("La page de connexion de Constructo AI s'ouvre dans ton navigateur")
+                    .clicked();
+            }
+        });
+        if clic {
+            self.geste("constructo_connecter", Value::Null);
+        }
+    }
+
+    /// Une lecture qui n'a pas abouti, sans chiffres d'avant : pourquoi, et « Réessayer » (le geste `entreprise_lire`).
+    fn carte_d_erreur(&mut self, ui: &mut egui::Ui, raison: &str) {
+        let mut clic = false;
+        theme::carte(ui, Some(erp::ROUGE.pastel), 0.0, |ui| {
+            theme::tete_de_carte(ui, "Constructo AI ne répond pas", pictos::ALERTES, erp::ROUGE, true, None);
+            ui.add(egui::Label::new(RichText::new(raison).size(14.0).color(erp::TEXTE)).wrap().selectable(false));
+            let aide = "Eve réessaiera d'elle-même ; tu peux aussi relancer la lecture.";
+            ui.add(egui::Label::new(RichText::new(aide).size(12.5).color(erp::TEXTE_2)).wrap().selectable(false));
+            ui.add_space(6.0);
+            clic = theme::bouton_erp(ui, Some(pictos::RELIRE), "Réessayer", BoutonErp::Secondaire).clicked();
+        });
+        if clic {
+            self.geste("entreprise_lire", Value::Null);
+        }
+    }
+}
+
+/// La première lecture de l'entreprise, pas encore là : une roue, et ce qu'Eve fait (le serveur de Constructo AI,
+/// endormi, se réveille en une trentaine de secondes).
+fn premiere_lecture(ui: &mut egui::Ui) {
+    theme::carte(ui, Some(erp::BLEU.pastel), 0.0, |ui| {
+        theme::tete_de_carte(ui, "Entreprise", pictos::ENTREPRISE, erp::BLEU, false, None);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            let (r, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
+            roue(ui, r.center(), 7.0, erp::PRIMAIRE);
+            ui.label(RichText::new("Eve lit Constructo AI…").size(14.0).color(erp::TEXTE));
+        });
+        let aide = "S'il dormait, le serveur se réveille : une trentaine de secondes.";
+        ui.add(egui::Label::new(RichText::new(aide).size(12.5).color(erp::TEXTE_2)).wrap().selectable(false));
+    });
+}
+
+/// De quand datent des chiffres : « à 15 h 40 » → « de 15 h 40 », « hier à 18 h » → « d'hier à 18 h », « le 24 oct. à
+/// 9 h » → « du 24 oct. à 9 h ».
+fn de_quand(q: &str) -> String {
+    if let Some(reste) = q.strip_prefix("le ") {
+        format!("du {reste}")
+    } else if let Some(reste) = q.strip_prefix("à ") {
+        format!("de {reste}")
+    } else {
+        format!("d'{q}")
+    }
+}
+
+/// Une raison en phrase : la première lettre en capitale, un point au bout s'il n'a pas sa ponctuation.
+fn phrase(t: &str) -> String {
+    let t = t.trim();
+    let mut c = t.chars();
+    let p = c.next().map_or_else(String::new, |p| p.to_uppercase().collect::<String>() + c.as_str());
+    if p.is_empty() || p.ends_with(['.', '!', '?', '…']) { p } else { format!("{p}.") }
+}
+
+/// Le choix de la vue, en segments sur une piste blanche en pilule : chacun son icône et son nom ; celui qui est choisi
+/// en pilule marine (le dégradé de la bannière), son texte blanc ; un survol, un lavis gris. Rend la vue cliquée.
+fn segments_du_tableau(ui: &mut egui::Ui, choisie: Vue) -> Option<Vue> {
+    let police = FontId::new(13.5, FontFamily::Name(SEMI.into()));
+    let icones = FontId::new(13.0, FontFamily::Name(ICONES.into()));
+    let p = ui.painter().clone();
+    let aucune = Color32::PLACEHOLDER;
+    let mises: Vec<_> = VUES
+        .iter()
+        .zip(VUES_DU_TABLEAU)
+        .map(|((_, icone), (_, mot))| {
+            let g_icone = p.layout_no_wrap(icone.to_string(), icones.clone(), aucune);
+            let g_mot = p.layout_no_wrap(mot.to_string(), police.clone(), aucune);
+            let l = 16.0 + g_icone.size().x + 8.0 + g_mot.size().x + 18.0;
+            (g_icone, g_mot, l)
+        })
+        .collect();
+    let (marge, ecart) = (4.0, 2.0);
+    let total = mises.iter().map(|m| m.2).sum::<f32>() + 2.0 * marge + ecart * (mises.len() - 1) as f32;
+    let (piste, _) = ui.allocate_exact_size(vec2(total, 38.0), Sense::hover());
+    p.add(theme::ombre_marine(piste, 19, 2, 8, 16));
+    p.rect(piste, 19.0, Color32::from_white_alpha(225), Stroke::new(1.0, erp::FILET_DE_CARTE), StrokeKind::Inside);
+    let mut x = piste.left() + marge;
+    let mut clic = None;
+    for (k, (g_icone, g_mot, l)) in mises.into_iter().enumerate() {
+        let r = Rect::from_min_size(pos2(x, piste.top() + marge), vec2(l, piste.height() - 2.0 * marge));
+        x += l + ecart;
+        let vue = VUES[k].0;
+        let rep = ui.interact(r, egui::Id::unique(("vue-du-tableau", k)), Sense::click());
+        let choisi = vue == choisie;
+        if choisi {
+            p.add(theme::ombre_marine(r, 15, 2, 6, 40));
+            let arrets = [erp::MARINE_HAUT, erp::AZUR];
+            p.add(theme::rectangle_degrade(r, r.height() / 2.0, |q| theme::degrade_css(r, 100.0, &arrets, q)));
+        } else if rep.hovered() {
+            p.rect_filled(r, r.height() / 2.0, erp::SURVOL);
+        }
+        let encre = match (choisi, rep.hovered()) {
+            (true, _) => Color32::WHITE,
+            (false, true) => erp::TEXTE,
+            _ => erp::TEXTE_2,
+        };
+        let l_icone = g_icone.size().x;
+        p.galley(pos2(r.left() + 16.0, r.center().y - g_icone.size().y / 2.0), g_icone, encre);
+        p.galley(pos2(r.left() + 16.0 + l_icone + 8.0, r.center().y - g_mot.size().y / 2.0), g_mot, encre);
+        let aide = match vue {
+            Vue::Tout => "L'entreprise et la famille ensemble",
+            Vue::Entreprise => "L'entreprise : Constructo AI",
+            Vue::Famille => "La famille et la maison",
+        };
+        if rep.on_hover_text(aide).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            clic = Some(vue);
+        }
+    }
+    clic
+}
+
+/// L'heure de la dernière lecture de l'entreprise, en gris comme le modèle (« Mis à jour à 15 h 40 ») : un point devant
+/// quand ce n'est pas tout à fait à jour (ambre : d'un moment ; rouge : une lecture manquée ; gris : pas reliée), une
+/// roue pendant qu'Eve lit ; coupée d'une ellipse à `largeur`.
+fn mise_a_jour_dite(ui: &mut egui::Ui, f: &Fraicheur, largeur: f32) {
+    let devant = if f.point == Point::Aucun { 0.0 } else { 18.0 };
+    let encre = if f.point == Point::Rouge { erp::DANGER_ENCRE } else { erp::TEXTE_2 };
+    let mut job = egui::text::LayoutJob::simple_singleline(f.texte.clone(), FontId::proportional(13.0), encre);
+    job.wrap = egui::text::TextWrapping::truncate_at_width((largeur - devant).max(40.0));
+    let g = ui.painter().layout_job(job);
+    let (r, rep) = ui.allocate_exact_size(vec2(g.size().x + devant, 32.0), Sense::hover());
+    let centre = pos2(r.left() + 6.0, r.center().y);
+    match f.point {
+        Point::Aucun => {}
+        Point::Roue => roue(ui, centre, 5.5, erp::PRIMAIRE),
+        point => {
+            let c = match point {
+                Point::Ambre => erp::AVERTISSEMENT,
+                Point::Rouge => TRANCHES[2].2,
+                _ => erp::TEXTE_3,
+            };
+            ui.painter().circle_filled(centre, 4.0, c);
+        }
+    }
+    ui.painter().galley(pos2(r.left() + devant, r.center().y - g.size().y / 2.0), g, encre);
+    rep.on_hover_text("Les chiffres de l'entreprise : Eve les relit dans Constructo AI toutes les dix minutes environ");
+}
+
+/// Le bouton qui relit Constructo AI : un rond blanc, la flèche qui tourne (ou une roue pendant qu'Eve lit) ; éteint
+/// sans liaison.
+fn bouton_relire(ui: &mut egui::Ui, permis: bool, lit: bool) -> egui::Response {
+    let sens = if permis && !lit { Sense::click() } else { Sense::hover() };
+    let (r, rep) = ui.allocate_exact_size(vec2(32.0, 32.0), sens);
+    let survol = rep.hovered() && permis && !lit;
+    let fond = if survol { erp::SURVOL } else { Color32::from_white_alpha(225) };
+    ui.painter().circle(r.center(), 16.0, fond, Stroke::new(1.0, erp::FILET_DE_CARTE));
+    if lit {
+        roue(ui, r.center(), 6.5, erp::PRIMAIRE);
+    } else {
+        let encre = match (permis, survol) {
+            (false, _) => erp::TEXTE_3.gamma_multiply(0.6),
+            (true, true) => erp::TEXTE,
+            (true, false) => erp::TEXTE_2,
+        };
+        let police = FontId::new(14.0, FontFamily::Name(ICONES.into()));
+        ui.painter().text(r.center(), Align2::CENTER_CENTER, pictos::RELIRE, police, encre);
+    }
+    let aide = match (permis, lit) {
+        (false, _) => "Relie d'abord Eve à Constructo AI",
+        (true, true) => "Eve lit Constructo AI…",
+        (true, false) => "Relire Constructo AI maintenant",
+    };
+    let rep = rep.on_hover_text(aide);
+    if permis && !lit { rep.on_hover_cursor(egui::CursorIcon::PointingHand) } else { rep }
+}
+
+/// La roue d'une attente : un arc de trois quarts qui tourne (immobile quand Windows ne veut pas d'animations).
+fn roue(ui: &egui::Ui, centre: Pos2, rayon: f32, couleur: Color32) {
+    let vivant = theme::animations(ui.ctx());
+    let debut = if vivant { (ui.input(|i| i.time) * 5.0) as f32 } else { 0.0 };
+    let points: Vec<Pos2> = (0..=28)
+        .map(|k| {
+            let a = debut + k as f32 / 28.0 * 4.7;
+            centre + vec2(a.cos(), a.sin()) * rayon
+        })
+        .collect();
+    ui.painter().circle_stroke(centre, rayon, Stroke::new(2.0, couleur.gamma_multiply(0.18)));
+    ui.painter().add(Shape::line(points, Stroke::new(2.0, couleur)));
+    if vivant {
+        ui.ctx().request_repaint();
+    }
+}
+
+/// Une puce de l'invitation : l'icône et le mot dans un badge pastel de leur teinte.
+fn puce(ui: &mut egui::Ui, icone: char, mot: &str, teinte: erp::Teinte) {
+    let p = ui.painter().clone();
+    let g_icone = p.layout_no_wrap(icone.to_string(), FontId::new(12.0, FontFamily::Name(ICONES.into())), teinte.encre);
+    let g_mot = p.layout_no_wrap(mot.to_string(), FontId::new(12.5, FontFamily::Name(SEMI.into())), teinte.encre);
+    let taille = vec2(12.0 + g_icone.size().x + 6.0 + g_mot.size().x + 12.0, 26.0);
+    let (r, _) = ui.allocate_exact_size(taille, Sense::hover());
+    p.rect_filled(r, 13.0, teinte.pastel.gamma_multiply(0.2));
+    let l_icone = g_icone.size().x;
+    p.galley(pos2(r.left() + 12.0, r.center().y - g_icone.size().y / 2.0), g_icone, teinte.encre);
+    p.galley(pos2(r.left() + 12.0 + l_icone + 6.0, r.center().y - g_mot.size().y / 2.0), g_mot, teinte.encre);
+}
+
+/// Un bandeau au-dessus des chiffres, comme les alertes de l'ERP (`.erp-alert-*`) : ambre pour une lecture qui n'a pas
+/// abouti (`avertissement`), bleu pâle pour une liaison perdue ; son icône, son texte, et son bouton contre le bord
+/// droit (dessous, dans une place étroite). Rend vrai si le bouton est cliqué.
+fn bandeau(ui: &mut egui::Ui, avertissement: bool, texte: &str, (mot, icone): (&str, char)) -> bool {
+    let (fond, bord, encre, picto) = if avertissement {
+        (erp::AVERTISSEMENT_FOND, erp::AVERTISSEMENT_BORD, erp::AVERTISSEMENT_ENCRE, pictos::ALERTES)
+    } else {
+        (Color32::from_rgb(0xEF, 0xF6, 0xFF), Color32::from_rgb(0xBF, 0xDB, 0xFE), erp::MARINE, pictos::INFO)
+    };
+    let largeur = ui.available_width();
+    let p = ui.painter().clone();
+    let bouton = theme::taille_du_bouton_erp(&p, Some(icone), mot, BoutonErp::Secondaire);
+    let (marge_x, marge_y, l_icone) = (14.0, 10.0, 26.0);
+    let a_cote = largeur >= 460.0;
+    let l_texte = largeur - 2.0 * marge_x - l_icone - if a_cote { bouton.x + 14.0 } else { 0.0 };
+    let g = p.layout(texte.to_string(), FontId::proportional(13.5), erp::TEXTE, l_texte.max(80.0));
+    let h_contenu = if a_cote { g.size().y.max(bouton.y) } else { g.size().y + 10.0 + bouton.y };
+    let (r, _) = ui.allocate_exact_size(vec2(largeur, h_contenu + 2.0 * marge_y), Sense::hover());
+    p.rect(r, 10.0, fond, Stroke::new(1.0, bord), StrokeKind::Inside);
+    let haut = r.top() + marge_y;
+    let y_texte = if a_cote { haut + (h_contenu - g.size().y) / 2.0 } else { haut };
+    let ligne = g.rows.first().map_or(g.size().y, |l| l.rect().height());
+    let police = FontId::new(15.0, FontFamily::Name(ICONES.into()));
+    p.text(pos2(r.left() + marge_x + 8.0, y_texte + ligne / 2.0), Align2::CENTER_CENTER, picto, police, encre);
+    let h_texte = g.size().y;
+    p.galley(pos2(r.left() + marge_x + l_icone, y_texte), g, erp::TEXTE);
+    let place = if a_cote {
+        Rect::from_min_size(pos2(r.right() - marge_x - bouton.x, haut + (h_contenu - bouton.y) / 2.0), bouton)
+    } else {
+        Rect::from_min_size(pos2(r.left() + marge_x + l_icone, haut + h_texte + 10.0), bouton)
+    };
+    let mut enfant = ui.new_child(UiBuilder::new().max_rect(place).layout(Layout::left_to_right(Align::Center)));
+    theme::bouton_erp(&mut enfant, Some(icone), mot, BoutonErp::Secondaire).clicked()
+}
+
+#[cfg(test)]
+mod essais {
+    use super::*;
+
+    #[test]
+    fn les_vues_suivent_le_reglage() {
+        assert_eq!(VUES.len(), VUES_DU_TABLEAU.len());
+        assert_eq!(Vue::de("entreprise"), Vue::Entreprise);
+        assert_eq!(Vue::de("famille"), Vue::Famille);
+        assert_eq!(Vue::de("tout"), Vue::Tout);
+        assert_eq!(Vue::de("n'importe quoi"), Vue::Tout, "un nom inconnu : tout");
+        for (k, (nom, _)) in VUES_DU_TABLEAU.iter().enumerate() {
+            assert_eq!(Vue::de(nom).rang(), k);
+        }
+    }
+
+    #[test]
+    fn les_montants_a_la_quebecoise() {
+        assert_eq!(dollars(12_000.0), "12\u{202f}000\u{a0}$");
+        assert_eq!(dollars(1_234.5), "1\u{202f}235\u{a0}$", "arrondi au dollar");
+        assert_eq!(dollars(0.0), "0\u{a0}$");
+        assert_eq!(dollars_court(450_000.0), "450\u{202f}000\u{a0}$");
+        assert_eq!(dollars_court(1_250_000.0), "1,25\u{a0}M$");
+        assert_eq!(dollars_court(12_500_000.0), "12,5\u{a0}M$");
+        assert_eq!(dollars_court(3_000_000.0), "3\u{a0}M$");
+        assert_eq!(dollars_court(999_999.0), "1\u{a0}M$", "presque un million : un million");
+        assert_eq!(compte(1.0, "facture", "factures"), "1\u{a0}facture");
+        assert_eq!(compte(4.0, "facture", "factures"), "4\u{a0}factures");
+    }
+
+    /// Le poste à l'heure de l'Est (−4 h) : 15 h 10 locale, 19 h 10 universelle, le 26 octobre 2026.
+    fn maintenant() -> Maintenant {
+        let jour = centre::numero_du_jour("2026-10-26").unwrap();
+        Maintenant { jour, local: jour * 86_400 + 15 * 3600 + 600, unix: jour * 86_400 + 19 * 3600 + 600 }
+    }
+
+    #[test]
+    fn l_heure_d_une_lecture_et_son_age() {
+        let m = maintenant();
+        assert_eq!(m.age("2026-10-26T15:06:00-04:00").map(|a| a.0), Some(240));
+        assert_eq!(m.age("2026-10-26T19:06:00Z").map(|a| a.0), Some(240), "en heure universelle");
+        assert_eq!(m.age("2026-10-26 15:06:00").map(|a| a.0), Some(240), "sans fuseau : l'heure du poste");
+        assert_eq!(m.age("2026-10-26T15:06:00.250-04:00").map(|a| a.0), Some(240), "les fractions de seconde");
+        assert_eq!(m.age("2026-10-26T15:20:00-04:00").map(|a| a.0), Some(0), "une horloge en avance : à l'instant");
+        assert_eq!(m.age("hier"), None);
+        let dit = |lu_a: &str| m.age(lu_a).map(|(_, local)| quand_dit(local, &m)).unwrap();
+        assert_eq!(dit("2026-10-26T15:06:00-04:00"), "à 15 h 06");
+        assert_eq!(dit("2026-10-26T13:00:00-04:00"), "à 13 h");
+        assert_eq!(dit("2026-10-25T18:05:00-04:00"), "hier à 18 h 05");
+        assert_eq!(dit("2026-10-24T09:00:00-04:00"), "le 24 oct. à 9 h");
+        assert_eq!(de_quand("à 15 h 06"), "de 15 h 06");
+        assert_eq!(de_quand("hier à 18 h"), "d'hier à 18 h");
+        assert_eq!(de_quand("le 24 oct. à 9 h"), "du 24 oct. à 9 h");
+    }
+
+    #[test]
+    fn la_fraicheur_dit_la_liaison_puis_la_lecture() {
+        let m = maintenant();
+        let avec = |etat: &str, lu_a: &str| {
+            let v = serde_json::json!({ "etat": etat, "lu_a": lu_a, "kpis": { "projets_en_cours": 3 } });
+            Some(Ok(Arc::new(v)))
+        };
+        let dite = |l: Liaison, x: &Option<Result<Arc<Value>, String>>| fraicheur(l, x.as_ref(), &m);
+        assert_eq!(dite(Liaison::NonReliee, &None).point, Point::Gris);
+        assert_eq!(dite(Liaison::EnCours, &None).point, Point::Roue);
+        assert_eq!(dite(Liaison::Reliee, &None).texte, "Première lecture de Constructo AI…");
+        let a_jour = dite(Liaison::Reliee, &avec("a_jour", "2026-10-26T15:06:00-04:00"));
+        assert_eq!(a_jour, Fraicheur { point: Point::Aucun, texte: "Mis à jour à 15 h 06".into() });
+        let vieille = dite(Liaison::Reliee, &avec("a_jour", "2026-10-25T18:05:00-04:00"));
+        assert_eq!(vieille, Fraicheur { point: Point::Ambre, texte: "Mis à jour hier à 18 h 05".into() });
+        assert_eq!(dite(Liaison::Reliee, &avec("en_cours", "2026-10-26T13:00:00-04:00")).point, Point::Roue);
+        let manquee = dite(Liaison::Reliee, &avec("erreur", "2026-10-26T13:00:00-04:00"));
+        assert_eq!(manquee, Fraicheur { point: Point::Rouge, texte: "Lecture manquée · mis à jour à 13 h".into() });
+        assert_eq!(dite(Liaison::Reliee, &Some(Err("ne se lit pas".into()))).point, Point::Rouge);
+        let premiere = Some(Ok(Arc::new(serde_json::json!({ "etat": "en_cours" }))));
+        assert_eq!(dite(Liaison::Reliee, &premiere).texte, "Première lecture de Constructo AI…");
+    }
+
+    #[test]
+    fn la_liaison_vient_du_chef_et_de_la_lecture() {
+        assert_eq!(Liaison::de(&Value::Null, None), Liaison::Absente, "un chef qui n'en dit rien : pas d'entreprise");
+        let c = |permis: bool, etat: &str| serde_json::json!({ "permis": permis, "etat": etat });
+        assert_eq!(Liaison::de(&c(false, "connectee"), None), Liaison::Absente);
+        assert_eq!(Liaison::de(&c(true, "connectee"), None), Liaison::Reliee);
+        assert_eq!(Liaison::de(&c(true, "en_cours"), None), Liaison::EnCours);
+        assert_eq!(Liaison::de(&c(true, "deconnectee"), None), Liaison::NonReliee);
+        let refus = Ok(Arc::new(serde_json::json!({ "etat": "non_connecte", "permis": false })));
+        assert_eq!(
+            Liaison::de(&c(true, "deconnectee"), Some(&refus)),
+            Liaison::Absente,
+            "pas permise : ne pas inviter"
+        );
+    }
+
+    #[test]
+    fn les_chiffres_de_l_entreprise() {
+        assert!(chiffres_de_l_entreprise(&Value::Null).is_empty());
+        let k = serde_json::json!({
+            "projets_en_cours": 3, "a_recevoir": 45_000.0, "en_retard": 12_000.0, "factures_en_retard": 4,
+            "devis_en_attente": 5, "pipeline": 1_250_000.0, "opportunites_ouvertes": 7
+        });
+        let c = chiffres_de_l_entreprise(&serde_json::json!({ "kpis": k }));
+        let de = |cle: &str| c.iter().find(|(x, _)| *x == cle).map(|(_, ch)| ch.clone()).unwrap();
+        assert_eq!((de("projets").valeur.as_str(), de("projets").etiquette.as_str()), ("3", "chantiers en cours"));
+        assert_eq!(de("recevoir").valeur, "45\u{202f}000\u{a0}$");
+        assert_eq!(de("retard").etiquette, "en retard · 4\u{a0}factures");
+        assert!(de("retard").alerte, "du retard : la pastille rouge");
+        assert_eq!(de("pipeline").valeur, "1,25\u{a0}M$");
+        assert_eq!(de("pipeline").etiquette, "au pipeline · 7\u{a0}opportunités");
+        assert!(!c.iter().any(|(x, _)| *x == "banque"), "un indicateur absent n'a pas de tuile");
+    }
+
+    #[test]
+    fn les_cartes_de_l_entreprise() {
+        let m = maintenant();
+        let v = serde_json::json!({
+            "kpis": { "en_retard": 7_000.0, "projets_en_cours": 9 },
+            "alertes": [
+                { "texte": "Un devis expire", "gravite": "info" },
+                { "texte": "Heures manquantes le vendredi 23 octobre : Jo Démo", "gravite": "moyenne",
+                  "sorte": "heures" },
+                { "texte": "2 factures en retard : 7 000 $", "gravite": "haute", "sorte": "factures" }
+            ],
+            "factures_en_retard": [
+                { "numero": "F-1", "client": "Client Exemple inc.", "solde": 5_000.0, "jours": 75,
+                  "echeance": "2026-08-12" },
+                { "numero": "F-2", "client": "Gestion Démo ltée", "solde": 2_000.0, "jours": 12 }
+            ],
+            "projets": [
+                { "numero": "PROJ-2026-00012", "nom": "Résidence, 12 rue des Exemples", "valeur": 425_000.0 }
+            ],
+            "agenda": [ { "quand": "2026-10-20", "texte": "Passée" }, { "quand": "2026-10-27", "texte": "Visite" } ],
+            "balance_agee": { "a_venir": 3_000.0, "0_30": 2_000.0, "61_90": 5_000.0, "total": 10_000.0 },
+            "devis": []
+        });
+        let listes = listes_de_l_entreprise(&v, &m);
+        let carte = |titre: &str| listes.iter().find(|(_, l)| l.titre == titre).cloned().unwrap();
+        let (rang_des_alertes, alertes) = carte("Alertes");
+        assert_eq!(rang_des_alertes, rang::ALERTES_HAUTES, "une alerte haute : en haut de la page");
+        assert_eq!(
+            alertes.rangees[0].bouts[0],
+            theme::Bout::tete("Factures", erp::DANGER_ENCRE),
+            "la plus grave d'abord"
+        );
+        let heures: Vec<&str> = alertes.rangees[1].bouts.iter().map(|b| b.texte.as_str()).collect();
+        assert_eq!(heures, ["Heures", " manquantes le vendredi 23 octobre : Jo Démo"], "le mot de tête pas redit");
+        assert_eq!(alertes.rangees[2].bouts[0].texte, "Info");
+        let (_, factures) = carte("Factures en retard");
+        assert_eq!(factures.pilule, Some((dollars(7_000.0), erp::ROUGE)));
+        assert_eq!(factures.rangees[0].droite, dollars(5_000.0));
+        assert_eq!(factures.rangees[0].detail, "75\u{a0}jours de retard · échue le 12 août");
+        assert_eq!(factures.rangees[0].bouts[0].couleur, Some(erp::DANGER_ENCRE), "plus de deux mois : rouge");
+        let (_, projets) = carte("Chantiers en cours");
+        assert_eq!(projets.pilule.as_ref().map(|p| p.0.as_str()), Some("9"));
+        assert_eq!(projets.rangees[0].detail, "PROJ-2026-00012", "un numéro long passe au détail");
+        assert_eq!(projets.pied, "… et 8 autres chantiers");
+        let (_, agenda) = carte("Agenda de l'entreprise");
+        assert_eq!(agenda.rangees.len(), 1, "ce qui est passé ne se montre pas");
+        assert_eq!(agenda.rangees[0].bouts[0].texte, "Demain");
+        let (_, balance) = carte("Balance âgée");
+        assert_eq!(balance.rangees.len(), 3, "les tranches vides se taisent");
+        assert_eq!(balance.barre.len(), 5, "la barre garde ses cinq parts");
+        assert!(listes.iter().all(|(_, l)| l.titre != "Devis en attente"), "une liste vide : pas de carte");
+    }
+
+    #[test]
+    fn les_cartes_du_modele() {
+        let m = maintenant();
+        let v = serde_json::json!({
+            "kpis": { "bons_a_commander": 1 },
+            "projets": [ { "numero": "014", "nom": "Agrandissement", "adresse": "12 rue des Exemples" } ],
+            "soumissions": [ { "numero": "DEV-2026-035", "nom": "Cuisine", "client": "Client Exemple inc.",
+                               "statut": "Brouillon", "valeur": 26_000.0, "modifie": "2026-10-26" } ],
+            "devis": [ { "numero": "DEV-2026-031", "nom": "Toiture" } ],
+            "commandes": [
+                { "sorte": "livraison", "numero": "LIV-8", "date": "2026-10-29", "heure": "08:30",
+                  "texte": "Matériaux" },
+                { "sorte": "a_commander", "numero": "BA-40", "date": "2026-10-28", "montant": 1_250.0,
+                  "texte": "Revêtement du balcon" }
+            ],
+            "heures": {
+                "semaine": "2026-10-26", "cette_semaine": 3.5, "semaine_passee": 85.5, "a_venir": 8.0,
+                "employes_actifs": 3, "derniere_saisie": "2026-10-26T07:00",
+                "manquantes": { "jour": "2026-10-23", "employes": ["Jo Démo"] },
+                "employes": [
+                    { "nom": "Alex Modèle", "cette_semaine": 3.5, "semaine_passee": 45.0, "au_travail": true,
+                      "jours": [ { "jour": "2026-10-23", "heures": 9.0 }, { "jour": "2026-10-26", "heures": 3.5 } ] },
+                    { "nom": "Jo Démo", "cette_semaine": 0.0, "semaine_passee": 40.5 }
+                ],
+                "par_projet": [ { "nom": "Agrandissement", "numero": "014", "heures": 3.5 } ]
+            },
+            "factures_recues": [
+                { "numero": "FACT-210", "fournisseur": "Béton Exemple ltée", "projet": "Agrandissement",
+                  "date": "2026-10-23", "montant": 3_449.25, "solde": 0.0, "statut": "PAYEE" },
+                { "numero": "FACT-212", "fournisseur": "Quincaillerie Démo", "montant": 412.5, "solde": 412.5,
+                  "statut": "ENVOYEE" }
+            ]
+        });
+        assert!(a_des_chiffres(&serde_json::json!({ "heures": { "cette_semaine": 3.5 } })), "des heures seules");
+        assert!(!a_des_chiffres(&serde_json::json!({ "etat": "en_cours", "kpis": {}, "commandes": [] })));
+        let listes = listes_de_l_entreprise(&v, &m);
+        let carte = |titre: &str| listes.iter().find(|(_, l)| l.titre == titre).map(|(_, l)| l.clone()).unwrap();
+        let chantiers = carte("Chantiers en cours");
+        assert_eq!(
+            chantiers.rangees[0].bouts[1].texte, " Agrandissement (12 rue des Exemples)",
+            "l'adresse suit le nom"
+        );
+        let soumissions = carte("Soumissions client");
+        assert_eq!(soumissions.rangees[0].detail, "Client Exemple inc. · brouillon · modifiée le lun. 26 oct.");
+        assert!(listes.iter().all(|(_, l)| l.titre != "Devis en attente"), "les soumissions comprennent les devis");
+        let commandes = carte("Commandes et livraisons");
+        assert_eq!(commandes.pilule, Some(("1 à commander".to_string(), erp::AMBRE)));
+        assert_eq!(commandes.rangees[0].bouts[0].texte, "À commander", "ce qui est à commander d'abord");
+        assert_eq!(commandes.rangees[1].detail, "LIV-8 · le jeu. 29 oct. à 8 h 30");
+        let heures = carte("Heures de la semaine");
+        assert_eq!(heures.pilule.as_ref().map(|p| p.0.as_str()), Some("3\u{a0}employés actifs"));
+        let mots: Vec<&str> = heures.rangees.iter().map(|r| r.bouts[0].texte.as_str()).collect();
+        assert_eq!(mots, ["Semaine du 26 oct.", "Semaine passée", "À vérifier", "Heures manquantes", "014"]);
+        assert_eq!(heures.rangees[0].detail, "dernière saisie : lun. 26 oct. à 7 h");
+        assert_eq!(heures.rangees[4].droite, "3,5\u{a0}h");
+        let equipe = carte("Heures de l'équipe");
+        assert_eq!(equipe.rangees[0].detail, "lun. 3,5 · au travail", "les jours de cette semaine seulement");
+        assert_eq!(equipe.pilule.as_ref().map(|p| p.0.as_str()), Some("3\u{a0}employés"), "tous ceux qui ont pointé");
+        assert_eq!(equipe.pied, "… et 1 autre employé", "la lecture n'en donne qu'une partie");
+        assert_eq!(equipe.rangees[1].bouts[0].couleur, Some(erp::DANGER_ENCRE), "il lui manque des heures : rouge");
+        let recues = carte("Factures reçues");
+        assert_eq!(recues.rangees[0].droite, dollars(3_449.25), "payée : son montant");
+        assert_eq!(recues.rangees[0].detail, "Agrandissement · du ven. 23 oct. · payée");
+        assert_eq!((recues.rangees[1].droite.clone(), recues.rangees[1].detail.as_str()), (dollars(412.5), "à payer"));
+        assert_eq!(heures_dites(36.25), "36,25\u{a0}h");
+        assert_eq!(heures_dites(45.0), "45\u{a0}h");
+        assert_eq!(heures_dites(1_204.5), "1\u{202f}204,5\u{a0}h", "les milliers");
+        assert_eq!(heures_dites(0.0), "0\u{a0}h");
+    }
+}

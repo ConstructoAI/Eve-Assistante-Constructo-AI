@@ -29,12 +29,13 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eframe::egui::text::{LayoutJob, TextFormat};
-use eframe::egui::{self, Color32, FontFamily, FontId, Margin, Rect, RichText, Sense, Stroke, pos2, vec2};
+use eframe::egui::{self, Color32, FontId, Margin, RichText, Sense, Stroke, vec2};
 use serde_json::Value;
 
 use crate::ambiance;
+use crate::natif::hud;
+use crate::natif::tableau::rang;
 use crate::natif::theme::{self, erp, pictos};
-use crate::natif::{SEMI, hud};
 use crate::reseau::{Destination, MAX_PERSONNES, Personne};
 
 /// Les fichiers relus. Pas `activite.js`, le journal des outils : Eve voit chaque outil elle-même.
@@ -72,8 +73,11 @@ const BLEU: Color32 = Color32::from_rgb(0x5A, 0xA9, 0xFF);
 const VIOLET: Color32 = Color32::from_rgb(0xB7, 0x8C, 0xFF);
 /// Les échéances de la comptabilité, aussi courtes que celles d'`echeances.js` : deux lignes du tableau au plus.
 const COURT: usize = 60;
-/// Le plus gros tableau de comptabilité que lit la fenêtre : le vrai fait quelques dizaines de kilo-octets.
+/// Le plus gros tableau de comptabilité que lit la fenêtre : le vrai fait quelques dizaines de kilo-octets. Une lecture
+/// de l'entreprise n'est pas plus grosse.
 const TABLEAU_MAX: u64 = 4 * 1024 * 1024;
+/// La dernière lecture de l'ERP de Constructo AI, dans le dossier local : Eve l'écrit, le tableau de bord la montre.
+pub const ENTREPRISE: &str = "entreprise.json";
 /// La couleur d'une personne qui ne dit pas la sienne : celle de son rang, les quatre quartiers du modèle (cdc:531)
 /// d'abord.
 const COULEURS: [[u8; 3]; 8] = [
@@ -99,6 +103,9 @@ pub struct Centre {
     journee: Arc<Mutex<Journee>>,
     /// La comptabilité que nomme le réglage, et ce que le fil a lu de son tableau.
     comptabilite: Arc<Mutex<Comptabilite>>,
+    /// La dernière lecture de l'ERP que garde le dossier local ([`ENTREPRISE`]) : ce qu'elle dit, ou pourquoi elle ne
+    /// se lit pas ; `None` sans fichier, ou tant que le fil ne l'a pas lue.
+    entreprise: Arc<Mutex<Option<Result<Arc<Value>, String>>>>,
     /// Réveille le fil : une comptabilité nommée se lit aussitôt. `None` sans fil.
     reveil: Option<mpsc::Sender<()>>,
 }
@@ -219,6 +226,33 @@ struct Decision {
     depassee: bool,
 }
 
+/// Ce qu'est un moment de la journée de la maison (la carte « Ta journée ») : un rendez-vous de l'agenda, un rappel (ou
+/// une minuterie), le souper.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SorteDeMoment {
+    RendezVous,
+    Rappel,
+    Souper,
+}
+
+/// Un moment de la journée de la maison : son jour (0 aujourd'hui, 1 demain, plus : plus tard) et sa date, son heure
+/// (« 16:30 » ; vide : toute la journée, ou ce soir pour le souper), ce qu'il est, son texte, son détail (vide :
+/// aucun) ; dans combien de minutes il commence, pour un rendez-vous d'aujourd'hui qui commence dans l'heure (il
+/// presse).
+#[derive(Clone, Debug, PartialEq)]
+struct Moment {
+    jour: i64,
+    date: String,
+    heure: String,
+    sorte: SorteDeMoment,
+    texte: String,
+    detail: String,
+    bientot: Option<i64>,
+}
+
+/// Les moments que montre la carte de la journée ; au-delà, « + N autres ».
+const MOMENTS: usize = 8;
+
 /// Du texte, de la couleur du texte de la page.
 fn texte(t: impl Into<String>) -> Morceau {
     teinte(t, hud::TEXTE)
@@ -257,27 +291,40 @@ impl Centre {
         Centre::avec_journal(dossier, Some(crate::reglages::dossier_local()), ctx)
     }
 
-    /// Le centre d'un dossier de travail (`dossier`) et d'un journal d'Eve (`journal` : le dossier de son `eve.log`).
+    /// Le centre d'un dossier de travail (`dossier`) et d'un journal d'Eve (`journal` : le dossier de son `eve.log`,
+    /// son dossier local, où sont aussi ses rappels et la dernière lecture de l'entreprise).
     pub fn avec_journal(dossier: Option<PathBuf>, journal: Option<PathBuf>, ctx: egui::Context) -> Centre {
         let mut centre = Centre::default();
         if dossier.is_some() || journal.is_some() {
             let (reveil, attente) = mpsc::channel();
             centre.reveil = Some(reveil);
-            let (valeurs, journee, comptabilite) =
-                (centre.valeurs.clone(), centre.journee.clone(), centre.comptabilite.clone());
+            let (valeurs, journee, comptabilite, entreprise) = (
+                centre.valeurs.clone(),
+                centre.journee.clone(),
+                centre.comptabilite.clone(),
+                centre.entreprise.clone(),
+            );
             thread::spawn(move || {
                 let activite = dossier.as_ref().map(|d| d.join("activite"));
                 let travail = dossier.unwrap_or_default();
-                let lus = Lus { valeurs: &valeurs, journee: &journee, comptabilite: &comptabilite };
+                let lus =
+                    Lus { valeurs: &valeurs, journee: &journee, comptabilite: &comptabilite, entreprise: &entreprise };
                 relire(activite.as_deref(), journal.as_deref(), &travail, lus, &attente, &ctx);
             });
         }
         centre
     }
 
+    /// La dernière lecture de l'ERP que garde le dossier local (`entreprise.json`), telle que le fil l'a lue : ce
+    /// qu'elle dit, ou pourquoi elle ne se lit pas ; `None` sans fichier. Le tableau de bord la montre.
+    pub fn entreprise(&self) -> Option<Result<Arc<Value>, String>> {
+        self.entreprise.lock().ok().and_then(|e| e.clone())
+    }
+
     /// Un centre lu d'un coup, sans fil ni fenêtre : les fichiers d'`activite\` du dossier de travail (`dossier`), la
-    /// comptabilité nommée (son dossier ; vide : aucune) et les rappels du dossier local (`local`), tels qu'ils sont à
-    /// l'instant. Pour le point du jour que dit le chef : les mêmes fichiers et les mêmes règles que le tableau.
+    /// comptabilité nommée (son dossier ; vide : aucune), les rappels et la dernière lecture de l'entreprise
+    /// (`entreprise.json`) du dossier local (`local`), tels qu'ils sont à l'instant. Pour le point du jour que dit le
+    /// chef : les mêmes fichiers et les mêmes règles que le tableau.
     pub fn lu_maintenant(dossier: Option<&Path>, local: &Path, comptabilite: &str) -> Centre {
         let centre = Centre::default();
         if let Some(d) = dossier {
@@ -293,13 +340,17 @@ impl Centre {
             .collect();
         if let Ok(mut v) = centre.valeurs.lock() {
             v.insert("EVE_RAPPELS".into(), Value::Array(a_venir));
+            if let Ok(e) = serde_json::to_value(crate::entreprise::charger(local)) {
+                v.insert("EVE_ENTREPRISE".into(), e);
+            }
         }
         centre
     }
 
     /// Le point du jour, en phrases courtes à dire : les rendez-vous qui restent aujourd'hui, les échéances qui
-    /// pressent (sous leur seuil), la décision du jour, les rappels d'aujourd'hui, les courriels non lus — les données
-    /// et les seuils du tableau. Vide s'il n'y a rien. `heure` : « 16:05 ».
+    /// pressent (sous leur seuil), la décision du jour, les rappels d'aujourd'hui, l'essentiel de l'entreprise (ses
+    /// factures en retard, une alerte : `entreprise::point_du_jour`), les courriels non lus — les données et les seuils
+    /// du tableau. Vide s'il n'y a rien. `heure` : « 16:05 ».
     pub fn point_du_jour(&self, aujourdhui: &str, heure: &str) -> Vec<String> {
         let mut point = Vec::new();
         let agenda = self.valeur("EVE_AGENDA");
@@ -340,6 +391,9 @@ impl Centre {
             .collect();
         if !rappels.is_empty() {
             point.push(format!("Rappels : {}.", en_liste(&rappels)));
+        }
+        if let Some(e) = self.donnee("EVE_ENTREPRISE").and_then(|v| serde_json::from_value(v).ok()) {
+            point.extend(crate::entreprise::point_du_jour(&e));
         }
         let non_lus: u64 = self
             .donnee("EVE_OUTLOOK")
@@ -544,55 +598,122 @@ impl Centre {
         (!texte.is_empty()).then_some(Decision { texte, suite, depassee })
     }
 
-    // ---- Les mêmes panneaux, en cartes : le thème « Constructo AI » ([`theme`]) -------------------------------
+    // ---- La maison au tableau de bord du thème « Constructo AI » : ses cartes en listes, ses chiffres -----------
 
-    /// La décision du jour en carte, la première sous la bannière : sa tête (la pastille ambre, « Décision du jour », son
-    /// délai en badge à droite — rouge, l'échéance dépassée), son texte en demi-gras, plus grand que celui des autres
-    /// cartes ; son haut lavé d'ambre. Rend vrai si elle s'est dessinée (rien s'il n'y en a pas).
-    pub fn decision_carte(&self, ui: &mut egui::Ui, aujourdhui: &str) -> bool {
-        let Some(d) = self.decision(aujourdhui) else { return false };
-        let delai = d.suite.as_deref().map(delai_lisible);
-        let delai = delai.as_deref().map(|s| (s, if d.depassee { erp::ROUGE } else { erp::AMBRE }));
-        theme::carte(ui, Some(erp::AVERTISSEMENT), 0.0, |ui| {
-            theme::tete_de_carte(ui, "Décision du jour", pictos::DECISION, erp::AMBRE, false, delai);
-            let texte = RichText::new(&d.texte).family(FontFamily::Name(SEMI.into())).size(17.0).color(erp::TITRE);
-            ui.add(egui::Label::new(texte).wrap().selectable(false));
-        });
-        true
-    }
-
-    /// Il y a des échéances à montrer : le tableau de bord leur garde une colonne.
-    pub fn a_des_echeances(&self, aujourdhui: &str) -> bool {
-        !self.echeances_datees(aujourdhui).is_empty()
-    }
-
-    /// Les échéances en une carte, comme un agenda : une rangée par échéance — sa date en page de calendrier de la
-    /// teinte de sa sorte (rouge sous son seuil, comme le tableau HTML les passe au rouge), son texte et son jour de la
-    /// semaine, son délai en badge —, un filet entre deux. Rien s'il n'y en a pas.
-    pub fn echeances_carte(&self, ui: &mut egui::Ui, aujourdhui: &str) {
-        let echeances = self.echeances_datees(aujourdhui);
-        if echeances.is_empty() {
-            return;
+    /// Les cartes de la maison au tableau de bord, en listes ([`theme::Liste`]), chacune avec son rang (le tableau les
+    /// mêle à celles de l'entreprise, le plus petit d'abord : [`rang`]) : ce qui est en alerte (la tempête, la
+    /// cueillette, un courriel de l'école), la décision du jour, la journée, les échéances, les courriels, l'épicerie,
+    /// les questions, l'encaisse, le compte à rebours, la journée en chiffres — seulement celles qui ont quelque chose
+    /// à dire. `heure` : « 20:29 ».
+    pub fn listes(&self, aujourdhui: &str, heure: &str) -> Vec<(u8, theme::Liste)> {
+        let mut listes = Vec::new();
+        if let Some(d) = self.decision(aujourdhui) {
+            listes.push((rang::DECISION, liste_de_la_decision(&d)));
         }
-        theme::carte(ui, None, 0.0, |ui| {
-            theme::tete_de_carte(ui, "Échéances", pictos::ECHEANCES, erp::BLEU, false, None);
-            for (k, (date, b)) in echeances.iter().enumerate() {
-                rangee_d_echeance(ui, date, b, k == 0);
-            }
-        });
+        if let Some(moments) = self.journee(aujourdhui, heure) {
+            listes.push((rang::JOURNEE, liste_de_la_journee(&moments)));
+        }
+        let echeances = self.echeances_datees(aujourdhui);
+        if !echeances.is_empty() {
+            listes.push((rang::ECHEANCES, liste_des_echeances(&echeances)));
+        }
+        let unix = maintenant_unix();
+        for (e, b) in self.blocs(aujourdhui, heure, unix) {
+            let r = match e {
+                // L'agenda, les rappels et le souper sont dans la journée.
+                Element::Agenda | Element::Rappels | Element::Souper => continue,
+                _ if b.alerte => rang::ALERTES_DE_LA_MAISON,
+                Element::Tempete | Element::Cueillette => rang::ALERTES_DE_LA_MAISON,
+                Element::Courriels => rang::COURRIELS,
+                Element::Epicerie => rang::EPICERIE,
+                Element::Questions => rang::QUESTIONS,
+                Element::Encaisse => rang::ENCAISSE,
+                Element::Compte => rang::COMPTE,
+                Element::Chiffres => rang::CHIFFRES,
+            };
+            // Les courriels d'un relevé frais et l'épicerie ont leurs cartes à eux ; les autres viennent de leur bloc.
+            let l = match e {
+                Element::Courriels if self.non_lus(unix).is_some() => {
+                    self.donnee("EVE_OUTLOOK").map_or_else(|| liste_de_bloc(e, &b), |o| liste_des_courriels(&o))
+                }
+                Element::Epicerie => {
+                    self.donnee("EVE_EPICERIE").map_or_else(|| liste_de_bloc(e, &b), |x| liste_de_l_epicerie(&x))
+                }
+                _ => liste_de_bloc(e, &b),
+            };
+            listes.push((r, l));
+        }
+        listes
     }
 
-    /// Le panneau d'information en cartes : tous ses éléments à la fois — la place ne manque pas comme sur le réseau,
-    /// le panneau ne tourne donc pas —, les alertes d'abord, puis dans l'ordre de la page ; en `colonnes` colonnes,
-    /// les cartes d'une rangée de même hauteur.
-    pub fn panneau_cartes(&self, ui: &mut egui::Ui, aujourdhui: &str, heure: &str, colonnes: usize) {
-        let mut blocs = self.blocs(aujourdhui, heure, maintenant_unix());
-        blocs.sort_by_key(|(_, b)| !b.alerte);
-        let id = egui::Id::unique("cartes-du-panneau");
-        theme::grille(ui, id, colonnes, blocs.len(), |ui, k, hauteur| {
-            let (e, b) = &blocs[k];
-            carte_d_element(ui, *e, b, hauteur)
-        });
+    /// Les chiffres de la maison pour les tuiles du tableau de bord, chacun sous sa clé (le tableau choisit lesquels
+    /// montrer, et dans quel ordre) : « calendrier » (les rendez-vous qui restent aujourd'hui, d'un agenda frais),
+    /// « courriels » (non lus, d'un relevé frais ; en alerte si l'école écrit), « rappels » (ceux d'aujourd'hui),
+    /// « echeances » (celles qui pressent, sous le seuil de leur sorte ; en alerte s'il y en a), « epicerie » (les
+    /// articles à acheter), « questions » (à confirmer). Seulement ceux qui ont de quoi se dire.
+    pub fn chiffres(&self, aujourdhui: &str, heure: &str) -> Vec<(&'static str, theme::Chiffre)> {
+        let unix = maintenant_unix();
+        let chiffre = |n: usize, un: &str, plusieurs: &str, icone: char, teinte: erp::Teinte, alerte: bool| {
+            let etiquette = if n > 1 { plusieurs } else { un }.to_string();
+            theme::Chiffre { valeur: milliers(n as f64), etiquette, icone, teinte, alerte }
+        };
+        let mut c = Vec::new();
+        let agenda = self.valeur("EVE_AGENDA");
+        if agenda.get("t").and_then(Value::as_f64).is_some_and(|t| unix - t <= FRAIS) {
+            let n = rendez_vous(&agenda, aujourdhui, heure).iter().filter(|(r, _)| champ(r, "d") == aujourdhui).count();
+            let jour = "au calendrier aujourd'hui";
+            c.push(("calendrier", chiffre(n, jour, jour, pictos::AGENDA, erp::VIOLET, false)));
+        }
+        if let Some((n, ecole)) = self.non_lus(unix) {
+            let (un, plusieurs) = ("courriel non lu", "courriels non lus");
+            c.push(("courriels", chiffre(n as usize, un, plusieurs, pictos::COURRIELS, erp::BLEU, ecole)));
+        }
+        let rappels = self.valeur("EVE_RAPPELS");
+        let du_jour =
+            rappels.as_array().into_iter().flatten().filter(|r| champ(r, "a").starts_with(aujourdhui)).count();
+        if du_jour > 0 {
+            let (un, plusieurs) = ("rappel aujourd'hui", "rappels aujourd'hui");
+            c.push(("rappels", chiffre(du_jour, un, plusieurs, pictos::RAPPELS, erp::AMBRE, false)));
+        }
+        let echeances = self.echeances_datees(aujourdhui);
+        if !echeances.is_empty() {
+            let pressent = echeances.iter().filter(|(_, b)| b.alerte).count();
+            let (un, plusieurs) = ("échéance qui presse", "échéances qui pressent");
+            c.push(("echeances", chiffre(pressent, un, plusieurs, pictos::ECHEANCES, erp::BLEU, pressent > 0)));
+        }
+        if let Some(e) = self.donnee("EVE_EPICERIE") {
+            let items = e.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
+            let a_acheter = items
+                .iter()
+                .filter(|a| a.as_str().is_some() || !a.get("ok").and_then(Value::as_bool).unwrap_or(false))
+                .count();
+            let (un, plusieurs) = ("article à acheter", "articles à acheter");
+            c.push(("epicerie", chiffre(a_acheter, un, plusieurs, pictos::EPICERIE, erp::VERT, false)));
+        }
+        let questions = self.valeur("EVE_QUESTIONS").as_array().map_or(0, Vec::len);
+        if questions > 0 {
+            let (un, plusieurs) = ("question à confirmer", "questions à confirmer");
+            c.push(("questions", chiffre(questions, un, plusieurs, pictos::QUESTIONS, erp::INDIGO, false)));
+        }
+        c
+    }
+
+    /// Les courriels non lus d'un relevé d'Outlook frais (moins de dix minutes), en tout, et si l'école en a écrit un ;
+    /// `None` sans relevé frais.
+    fn non_lus(&self, unix: f64) -> Option<(u64, bool)> {
+        let o = self.donnee("EVE_OUTLOOK")?;
+        o.get("t").and_then(Value::as_f64).filter(|t| unix - t <= FRAIS)?;
+        let boites = o.get("boites").and_then(Value::as_array).cloned().unwrap_or_default();
+        let n = boites.iter().filter_map(|b| b["non_lus"].as_u64()).sum();
+        let ecole = boites.iter().any(|b| b["ecole"].as_bool() == Some(true) && b["non_lus"].as_u64().unwrap_or(0) > 0);
+        Some((n, ecole))
+    }
+
+    /// La journée de la maison ([`moments_de_la_journee`]) : `None` si rien ne la nourrit.
+    fn journee(&self, aujourdhui: &str, heure: &str) -> Option<Vec<Moment>> {
+        let (agenda, rappels, souper) =
+            (self.valeur("EVE_AGENDA"), self.valeur("EVE_RAPPELS"), self.donnee("EVE_SOUPER"));
+        moments_de_la_journee(&agenda, &rappels, souper.as_ref(), aujourdhui, heure, maintenant_unix())
     }
 
     /// Les échéances à montrer, dans l'ordre (le plus proche d'abord).
@@ -868,7 +989,7 @@ fn bloc_epicerie(e: &Value) -> Bloc {
 }
 
 /// « 16:30 » → « 16 h 30 », « 09:00 » → « 9 h » : une heure telle qu'on la dit.
-fn heure_parlee(h: &str) -> String {
+pub(crate) fn heure_parlee(h: &str) -> String {
     match h.split_once(':') {
         Some((h, m)) => {
             let h = h.trim_start_matches('0');
@@ -920,6 +1041,82 @@ fn bloc_rappels(r: &Value, aujourdhui: &str) -> Option<Bloc> {
         b = b.petit(format!("+ {}", autres(l.len() - 3)));
     }
     Some(b)
+}
+
+/// La journée de la maison, dans l'ordre du temps : les rendez-vous d'aujourd'hui et de demain (un agenda frais, comme
+/// ceux de sa carte du centre de commande : [`rendez_vous`]), les rappels à venir, le souper de ce soir — ou, sans
+/// menu du jour, de quoi en demander un. `None` si rien ne la nourrit (ni agenda frais, ni rappel, ni fichier du
+/// souper) : sa carte ne se montre pas. Un jour, ce qui dure toute la journée vient d'abord, le souper juste avant
+/// 18 h. `unix` : l'heure, pour l'âge du fichier d'Outlook.
+fn moments_de_la_journee(
+    agenda: &Value,
+    rappels: &Value,
+    souper: Option<&Value>,
+    aujourdhui: &str,
+    heure: &str,
+    unix: f64,
+) -> Option<Vec<Moment>> {
+    let frais = agenda.get("t").and_then(Value::as_f64).is_some_and(|t| unix - t <= FRAIS);
+    let rappels = rappels.as_array().filter(|l| !l.is_empty());
+    if !frais && rappels.is_none() && souper.is_none() {
+        return None;
+    }
+    let mut moments = Vec::new();
+    if frais {
+        for (r, dans) in rendez_vous(agenda, aujourdhui, heure) {
+            let date = champ(r, "d").to_string();
+            moments.push(Moment {
+                jour: jours_entre(aujourdhui, &date).unwrap_or(0),
+                date,
+                heure: champ(r, "h").trim().to_string(),
+                sorte: SorteDeMoment::RendezVous,
+                texte: champ(r, "titre").trim().to_string(),
+                detail: String::new(),
+                bientot: dans.filter(|m| (0..=60).contains(m)),
+            });
+        }
+    }
+    for x in rappels.into_iter().flatten() {
+        let a = champ(x, "a");
+        let Some((date, jour)) = a.get(..10).and_then(|d| Some((d, jours_entre(aujourdhui, d)?))) else { continue };
+        // Une minuterie dit sa durée : « La minuterie de 10 minutes est finie. » → « Minuterie de 10 minutes ».
+        let texte = if x["minuterie"].as_bool() == Some(true) {
+            champ(x, "texte").trim_end_matches(" est finie.").replace("La minuterie", "Minuterie")
+        } else {
+            champ(x, "texte").trim().to_string()
+        };
+        let heure = a.get(11..16).unwrap_or("").to_string();
+        let sorte = SorteDeMoment::Rappel;
+        moments.push(Moment {
+            jour: jour.max(0),
+            date: date.to_string(),
+            heure,
+            sorte,
+            texte,
+            detail: String::new(),
+            bientot: None,
+        });
+    }
+    if let Some(s) = souper {
+        let menu = champ(s, "menu").trim();
+        let (texte, detail) = if champ(s, "date") == aujourdhui && !menu.is_empty() {
+            let sortir = champ(s, "sortir").trim();
+            (format!("Souper : {menu}"), if sortir.is_empty() { String::new() } else { format!("À sortir : {sortir}") })
+        } else {
+            ("Aucun souper prévu".to_string(), "Demande-moi un menu de la semaine".to_string())
+        };
+        let (date, heure) = (aujourdhui.to_string(), String::new());
+        moments.push(Moment { jour: 0, date, heure, sorte: SorteDeMoment::Souper, texte, detail, bientot: None });
+    }
+    moments.sort_by_key(|m| {
+        let heure = match (m.sorte, m.heure.as_str()) {
+            (SorteDeMoment::Souper, _) => "17:59".to_string(),
+            (_, "") => "00:00".to_string(),
+            (_, h) => h.to_string(),
+        };
+        (m.jour, m.date.clone(), heure)
+    });
+    Some(moments)
 }
 
 /// « 1 AUTRE », « 2 AUTRES » (la page écrivait toujours le pluriel).
@@ -1271,17 +1468,20 @@ fn decompter(journal: &str, date: &str, dossier_de_travail: &Path) -> Decompte {
     d
 }
 
-/// Ce que le fil tient à jour pour la fenêtre : les valeurs d'`activite\`, la journée en chiffres, la comptabilité.
+/// Ce que le fil tient à jour pour la fenêtre : les valeurs d'`activite\`, la journée en chiffres, la comptabilité, la
+/// dernière lecture de l'entreprise.
 struct Lus<'a> {
     valeurs: &'a Mutex<HashMap<String, Value>>,
     journee: &'a Mutex<Journee>,
     comptabilite: &'a Mutex<Comptabilite>,
+    entreprise: &'a Mutex<Option<Result<Arc<Value>, String>>>,
 }
 
 /// Relit sans fin `activite\` — un fichier changé (sa date) se relit, ses affectations remplacent les anciennes —, le
-/// tableau de la comptabilité nommée, et, chaque minute, le journal d'Eve : la journée en chiffres du jour que montre
-/// la fenêtre (aussitôt quand ce jour change). La fenêtre se redessine quand quelque chose a changé. `attente`
-/// réveille le fil avant son pas (une comptabilité nommée) ; la fenêtre partie, il s'arrête.
+/// tableau de la comptabilité nommée, la dernière lecture de l'entreprise (dans le dossier local, `journal`), et,
+/// chaque minute, le journal d'Eve : la journée en chiffres du jour que montre la fenêtre (aussitôt quand ce jour
+/// change). La fenêtre se redessine quand quelque chose a changé. `attente` réveille le fil avant son pas (une
+/// comptabilité nommée) ; la fenêtre partie, il s'arrête.
 fn relire(
     activite: Option<&Path>,
     journal: Option<&Path>,
@@ -1290,15 +1490,19 @@ fn relire(
     attente: &mpsc::Receiver<()>,
     ctx: &egui::Context,
 ) {
-    let Lus { valeurs, journee, comptabilite } = lus;
+    let Lus { valeurs, journee, comptabilite, entreprise } = lus;
     // Les rappels du dossier local (`rappels.json`, leur seule source) : ceux à venir, sous `EVE_RAPPELS`.
     let mut rappels = journal.map(crate::rappels::Rappels::ouvrir);
     let mut vus: HashMap<&str, SystemTime> = HashMap::new();
     let mut suivi = Suivi::default();
+    let mut suivi_de_l_entreprise = Suivi::default();
     let mut compte_a: Option<Instant> = None;
     loop {
         let mut change = activite.is_some_and(|d| relire_activite(d, &mut vus, valeurs));
         change |= relire_la_comptabilite(comptabilite, &mut suivi, travail);
+        if let Some(local) = journal {
+            change |= relire_l_entreprise(&local.join(ENTREPRISE), entreprise, &mut suivi_de_l_entreprise);
+        }
         if let Some(r) = &mut rappels {
             r.relire();
             let a_venir: Vec<Value> = r
@@ -1395,6 +1599,49 @@ fn relire_la_comptabilite(comptabilite: &Mutex<Comptabilite>, suivi: &mut Suivi,
     }
     c.tableau = Some(lu);
     true
+}
+
+/// Un passage du fil sur la dernière lecture de l'entreprise (`chemin`, [`ENTREPRISE`] du dossier local) : relue si
+/// elle a changé (sa date ou sa taille), comme le tableau de la comptabilité. Lue, elle se montre aussitôt ; absente,
+/// la fenêtre n'en montre plus rien. Si elle ne se lit pas, elle attend d'être restée la même d'un passage à l'autre
+/// (elle s'écrit peut-être encore : la fenêtre garde ce qu'elle montrait), puis la fenêtre dit pourquoi. Vrai si ce que
+/// montre la fenêtre a changé.
+fn relire_l_entreprise(
+    chemin: &Path,
+    entreprise: &Mutex<Option<Result<Arc<Value>, String>>>,
+    suivi: &mut Suivi,
+) -> bool {
+    let version = crate::reglages::date_de(chemin);
+    if suivi.montree == Some(version) {
+        return false;
+    }
+    let stable = suivi.vue == Some(version);
+    suivi.vue = Some(version);
+    let lue = match version.map(|_| lire_l_entreprise(chemin)) {
+        Some(Err(_)) if !stable => return false,
+        lue => lue.map(|l| l.map(Arc::new)),
+    };
+    suivi.montree = Some(version);
+    let Ok(mut e) = entreprise.lock() else { return false };
+    *e = lue;
+    true
+}
+
+/// La dernière lecture de l'entreprise, en JSON strict (une marque d'ordre des octets en tête passe) ; si elle ne se
+/// lit pas, pourquoi, en quelques mots, comme pour le tableau de la comptabilité.
+pub fn lire_l_entreprise(chemin: &Path) -> Result<Value, String> {
+    let ouvert = |e: std::io::Error| match e.kind() {
+        std::io::ErrorKind::NotFound => "est introuvable".to_string(),
+        _ => "ne s'ouvre pas".to_string(),
+    };
+    if std::fs::metadata(chemin).map_err(ouvert)?.len() > TABLEAU_MAX {
+        return Err("est trop grosse pour un tableau de bord".into());
+    }
+    let texte = String::from_utf8(std::fs::read(chemin).map_err(ouvert)?)
+        .map_err(|_| "n'est pas écrite en UTF-8".to_string())?;
+    let v: Value = serde_json::from_str(texte.trim_start_matches('\u{feff}'))
+        .map_err(|e| format!("ne se lit pas (ligne {}, colonne {})", e.line(), e.column()))?;
+    if v.is_object() { Ok(v) } else { Err("n'est pas un objet JSON".into()) }
 }
 
 /// Relit les fichiers de `activite\` qui ont changé depuis la dernière fois (leur date) : leurs affectations remplacent
@@ -1669,26 +1916,6 @@ pub(crate) fn capitales(texte: &str, taille: f32, couleur: Color32) -> RichText 
     RichText::new(texte).monospace().size(taille).extra_letter_spacing(taille * 0.13).color(couleur)
 }
 
-/// Un élément du panneau en carte d'indicateur de l'ERP (`AnalyticsPage.tsx`, l. 227-253) : son titre et son icône dans
-/// une tuile de sa teinte, ses lignes ; le liseré de sa teinte — rouge en alerte, comme son titre. Rend la hauteur
-/// qu'il lui faut (la grille égalise les rangées).
-fn carte_d_element(ui: &mut egui::Ui, e: Element, b: &Bloc, hauteur: f32) -> f32 {
-    let (teinte, icone) = habit(e);
-    let teinte = if b.alerte { erp::ROUGE } else { teinte };
-    theme::carte(ui, Some(teinte.pastel), hauteur, |ui| {
-        theme::tete_de_carte(ui, &b.titre, icone, teinte, b.alerte, None);
-        for l in &b.lignes {
-            match l {
-                Ligne::Texte(m) => etiquette(ui, ligne_claire(m)),
-                Ligne::Petit(t) => {
-                    etiquette(ui, RichText::new(theme::casse_de_phrase(t)).size(12.5).color(erp::TEXTE_2))
-                }
-                Ligne::Jauge { part, marques } => jauge_claire(ui, *part, marques),
-            }
-        }
-    })
-}
-
 /// La teinte et l'icône d'un élément du panneau, en carte : une couleur par élément, comme les cartes d'indicateurs du
 /// tableau de bord de l'ERP.
 fn habit(e: Element) -> (erp::Teinte, char) {
@@ -1707,93 +1934,192 @@ fn habit(e: Element) -> (erp::Teinte, char) {
     }
 }
 
-/// Une ligne d'un élément en carte : ses morceaux en Segoe UI de 14 points, les forts en demi-gras, chacun de sa
-/// couleur dans le thème clair ([`sur_clair`]) ; un article acheté, barré. Un morceau en capitales du tableau
-/// (« DEMAIN 09:00 », « ÉCOLE / GARDERIE ») passe en casse de phrase, comme les titres ; un sigle court (« TPS »)
-/// reste.
-fn ligne_claire(morceaux: &[Morceau]) -> LayoutJob {
-    let mut job = LayoutJob::default();
-    for m in morceaux {
-        let famille = if m.fort { FontFamily::Name(SEMI.into()) } else { FontFamily::Proportional };
-        let couleur = sur_clair(m.couleur);
-        let format = TextFormat {
-            font_id: FontId::new(14.0, famille),
-            line_height: Some(14.0 * 1.45),
-            color: couleur,
-            strikethrough: if m.barre { Stroke::new(1.0, couleur) } else { Stroke::NONE },
-            ..Default::default()
+/// Un élément du panneau en carte en liste ([`theme::Liste`]) : son titre (« ÉPICERIE · 5 À ACHETER ») se coupe en
+/// titre et en pilule (« Épicerie », « 5 à acheter » : rouge en alerte) ; chacune de ses lignes devient une rangée, ses
+/// morceaux forts en couleur ([`bout_clair`]) ; un petit texte qui suit une ligne devient son détail, le dernier le
+/// pied de la carte ; la jauge de l'encaisse, une rangée de sa jauge.
+fn liste_de_bloc(e: Element, b: &Bloc) -> theme::Liste {
+    let (teinte, icone) = habit(e);
+    let (titre, pilule) = match b.titre.split_once(" · ") {
+        Some((t, p)) => (t, Some(p)),
+        None => (b.titre.as_str(), None),
+    };
+    let mut l = theme::Liste::nouvelle(titre, icone, teinte);
+    l.alerte = b.alerte;
+    if let Some(p) = pilule {
+        l.pilule = Some((p.to_string(), if b.alerte { erp::ROUGE } else { teinte }));
+    }
+    let derniere = b.lignes.len().saturating_sub(1);
+    for (k, ligne) in b.lignes.iter().enumerate() {
+        match ligne {
+            Ligne::Texte(m) => {
+                l.rangees.push(theme::Rangee { bouts: m.iter().map(bout_clair).collect(), ..theme::Rangee::default() });
+            }
+            Ligne::Petit(t) if k == derniere => l.pied = theme::casse_de_phrase(t),
+            Ligne::Petit(t) => match l.rangees.last_mut() {
+                Some(r) if r.detail.is_empty() => r.detail = theme::casse_de_phrase(t),
+                _ => l.rangees.push(theme::Rangee::default().detail(&[theme::casse_de_phrase(t)])),
+            },
+            Ligne::Jauge { part, marques } => {
+                let mesure = theme::Mesure::Part { part: *part, marques: marques.clone() };
+                l.rangees.push(theme::Rangee { mesure: Some(mesure), ..theme::Rangee::default() });
+            }
+        }
+    }
+    l
+}
+
+/// Un morceau du tableau dans une rangée claire : sa couleur dans le thème clair ([`sur_clair`] ; l'encre du texte n'en
+/// demande pas), son demi-gras, son trait ; un morceau en capitales du tableau (« DEMAIN 09:00 », « ÉCOLE / GARDERIE »)
+/// en casse de phrase, comme les titres — un sigle court (« TPS ») reste.
+fn bout_clair(m: &Morceau) -> theme::Bout {
+    let lettres = m.texte.chars().filter(|c| c.is_alphabetic()).count();
+    let capitales = lettres >= 4 && !m.texte.chars().any(char::is_lowercase);
+    let texte = if capitales { theme::casse_de_phrase(&m.texte) } else { m.texte.clone() };
+    let couleur = (m.couleur != hud::TEXTE).then(|| sur_clair(m.couleur));
+    theme::Bout { texte, couleur, fort: m.fort, barre: m.barre }
+}
+
+/// Le mot de tête d'une rangée, dans la couleur vive d'une teinte, assombrie au besoin pour se lire sur le blanc.
+fn tete(teinte: erp::Teinte) -> Color32 {
+    theme::lisible(teinte.vif[1])
+}
+
+/// « 2026-10-30 » → « ven. 30 oct. » : le jour de la semaine en trois lettres, puis la date courte.
+pub(crate) fn jour_court(date: &str) -> String {
+    let semaine: String = ambiance::date_longue(date).chars().take(3).collect::<String>().to_lowercase();
+    if numero_du_jour(date).is_some() { format!("{semaine}. {}", date_courte(date)) } else { date.to_string() }
+}
+
+/// La décision du jour en carte : son délai dans la pilule (rouge, l'échéance dépassée), son texte en demi-gras.
+fn liste_de_la_decision(d: &Decision) -> theme::Liste {
+    let mut l = theme::Liste::nouvelle("Décision du jour", pictos::DECISION, erp::AMBRE);
+    let texte = theme::Bout { texte: d.texte.clone(), couleur: Some(erp::TITRE), fort: true, barre: false };
+    let mut r = theme::Rangee { bouts: vec![texte], ..theme::Rangee::default() };
+    // « AVANT LE 30 OCT. · DANS 7 J » : le délai dans la pilule, la date dessous — la pilule reste courte.
+    if let Some(s) = &d.suite {
+        let (avant, delai) = s.split_once(" · ").map_or((None, s.as_str()), |(a, b)| (Some(a), b));
+        l.pilule = Some((delai_lisible(delai), if d.depassee { erp::ROUGE } else { erp::AMBRE }));
+        r.detail = avant.map(delai_lisible).unwrap_or_default();
+    }
+    l.rangees.push(r);
+    l
+}
+
+/// Les courriels non lus d'un relevé frais, en carte : chaque boîte en mot de tête (rouge si l'école ou la garderie y a
+/// écrit, et le détail le dit), combien elle en a ; tous dans la pilule (rouge, si l'école a écrit).
+fn liste_des_courriels(o: &Value) -> theme::Liste {
+    let boites = o.get("boites").and_then(Value::as_array).cloned().unwrap_or_default();
+    let ecole = |b: &Value| b["ecole"].as_bool() == Some(true);
+    let total: u64 = boites.iter().filter_map(|b| b["non_lus"].as_u64()).sum();
+    let alerte = boites.iter().any(ecole);
+    let mut l = theme::Liste::nouvelle("Courriels non lus", pictos::COURRIELS, erp::BLEU)
+        .pilule(total.to_string(), if alerte { erp::ROUGE } else { erp::BLEU });
+    l.alerte = alerte;
+    for b in &boites {
+        let n = b["non_lus"].as_u64().unwrap_or(0);
+        let combien = match n {
+            0 => "aucun non lu".to_string(),
+            1 => "1 non lu".to_string(),
+            n => format!("{n} non lus"),
         };
-        let lettres = m.texte.chars().filter(|c| c.is_alphabetic()).count();
-        let capitales = lettres >= 4 && !m.texte.chars().any(char::is_lowercase);
-        job.append(&if capitales { theme::casse_de_phrase(&m.texte) } else { m.texte.clone() }, 0.0, format);
+        let couleur = if ecole(b) { erp::DANGER_ENCRE } else { tete(erp::BLEU) };
+        let r = theme::Rangee::nouvelle(champ(b, "nom"), couleur, &combien);
+        let pourquoi: &[&str] = if ecole(b) { &["dont un de l'école ou de la garderie"] } else { &[] };
+        l.rangees.push(r.detail(pourquoi));
     }
-    job
+    l
 }
 
-/// La jauge de l'encaisse, comme une barre de progression de l'ERP (`h-2 rounded-full`, l. 1102-1103 d'`AnalyticsPage.
-/// tsx`) : le temps écoulé en bleu pastel sur un rail gris, une marque rose par remise.
-fn jauge_claire(ui: &mut egui::Ui, part: f32, marques: &[f32]) {
-    ui.add_space(5.0);
-    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 8.0), Sense::hover());
-    let p = ui.painter();
-    p.rect_filled(r, 4.0, erp::FILET);
-    if part > 0.0 {
-        let mut plein = r;
-        plein.set_width((r.width() * part).max(8.0));
-        p.rect_filled(plein, 4.0, erp::BLEU.pastel);
-    }
-    for m in marques {
-        let x = r.left() + r.width() * m;
-        p.rect_filled(
-            Rect::from_min_max(pos2(x - 1.0, r.top() - 3.0), pos2(x + 1.0, r.bottom() + 3.0)),
-            1.0,
-            erp::ROUGE.encre,
-        );
-    }
-    ui.add_space(7.0);
-}
-
-/// Une rangée de la carte des échéances : un filet au-dessus (sauf la première), à partir du texte comme dans les
-/// listes ; sa date (`date`, « 2026-10-30 ») en page de calendrier de la teinte de sa sorte (rouge sous son seuil) ; son
-/// texte et, dessous, son jour de la semaine ; son délai en badge, contre le bord droit.
-fn rangee_d_echeance(ui: &mut egui::Ui, date: &str, b: &Bloc, premiere: bool) {
-    let texte: String = b
-        .lignes
-        .iter()
-        .find_map(|l| match l {
-            Ligne::Texte(m) => Some(m.iter().map(|x| x.texte.as_str()).collect()),
-            _ => None,
+/// L'épicerie en carte, serrée : ce qui reste à acheter sur une rangée, ses articles séparés par « · » ; ce qui est
+/// déjà pris dessous, en gris ; combien en reste dans la pilule.
+fn liste_de_l_epicerie(e: &Value) -> theme::Liste {
+    let articles: Vec<(String, bool)> = e
+        .get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|a| match a.as_str() {
+            Some(s) => (s.trim().to_string(), false),
+            None => (champ(a, "n").trim().to_string(), a.get("ok").and_then(Value::as_bool).unwrap_or(false)),
         })
-        .unwrap_or_default();
-    let teinte = if b.alerte { erp::ROUGE } else { teinte_de_sorte(b.couleur) };
-    let largeur = ui.available_width();
-    let (page, ecart) = (vec2(46.0, 50.0), 14.0);
-    let p = ui.painter();
-    let g_badge = theme::galee_de_badge(p, &delai_lisible(&b.titre), teinte);
-    let badge = g_badge.size() + vec2(18.0, 7.0);
-    let l_texte = (largeur - page.x - ecart - badge.x - 12.0).max(60.0);
-    let g_texte = p.layout(texte, FontId::proportional(14.5), erp::TITRE, l_texte);
-    let semaine = ambiance::date_longue(date).split(' ').next().map(theme::casse_de_phrase).unwrap_or_default();
-    let g_semaine = p.layout_no_wrap(semaine, FontId::proportional(12.5), erp::TEXTE_2);
-    let haut_du_texte = g_texte.size().y + 2.0 + g_semaine.size().y;
-    let (r, _) = ui.allocate_exact_size(vec2(largeur, haut_du_texte.max(page.y) + 20.0), Sense::hover());
-    let p = ui.painter();
-    let x = r.left() + page.x + ecart;
-    if !premiere {
-        p.hline(x..=r.right(), r.top() + 0.5, Stroke::new(1.0, erp::FILET_DE_CARTE));
+        .filter(|(n, _)| !n.is_empty())
+        .collect();
+    let a_acheter: Vec<&str> = articles.iter().filter(|(_, ok)| !ok).map(|(n, _)| n.as_str()).collect();
+    let achetes: Vec<&str> = articles.iter().filter(|(_, ok)| *ok).map(|(n, _)| n.as_str()).collect();
+    let mut l = theme::Liste::nouvelle("Épicerie", pictos::EPICERIE, erp::VERT)
+        .pilule(format!("{} à acheter", a_acheter.len()), erp::VERT);
+    let texte = match (a_acheter.is_empty(), articles.is_empty()) {
+        (_, true) => "Liste vide : dis-moi quoi ajouter".to_string(),
+        (true, false) => "Tout est acheté".to_string(),
+        (false, false) => a_acheter.join(" · "),
+    };
+    let deja = if achetes.is_empty() { String::new() } else { format!("Déjà pris : {}", achetes.join(", ")) };
+    l.rangees.push(theme::Rangee::nouvelle("", erp::TEXTE, &texte).detail(&[deja]));
+    l
+}
+
+/// La journée de la maison en carte, « Ta journée » : un moment par rangée, son heure en mot de tête de la couleur de
+/// sa sorte (le violet d'un rendez-vous, l'ambre d'un rappel, l'orange du souper ; le rouge d'un rendez-vous qui
+/// commence dans l'heure) — « 16 h 30 », « Journée », « Ce soir », « Demain 9 h », « ven. 30 oct. 10 h » —, son texte,
+/// son détail. Dans la pilule, combien aujourd'hui ; ou, en rouge, dans combien de minutes commence ce qui presse (la
+/// carte en alerte, comme celle de l'agenda du centre de commande).
+fn liste_de_la_journee(moments: &[Moment]) -> theme::Liste {
+    let mut l = theme::Liste::nouvelle("Ta journée", pictos::JOURNEE, erp::VIOLET);
+    let du_jour = moments.iter().filter(|m| m.jour == 0 && m.sorte != SorteDeMoment::Souper).count();
+    l.pilule = match moments.iter().find_map(|m| m.bientot) {
+        Some(n) => {
+            l.alerte = true;
+            Some((if n <= 0 { "Maintenant".to_string() } else { format!("Dans {n} min") }, erp::ROUGE))
+        }
+        None => (du_jour > 0).then(|| (format!("{du_jour} aujourd'hui"), erp::VIOLET)),
+    };
+    if moments.is_empty() {
+        l.rangees.push(theme::Rangee::nouvelle("", erp::TEXTE, "Rien au calendrier aujourd'hui ni demain"));
     }
-    // « 2026-10-30 » : le jour sans son zéro, le mois en capitales sans son point.
-    let jour = date.get(8..10).and_then(|j| j.parse::<u32>().ok()).map(|j| j.to_string()).unwrap_or_default();
-    let mois = date.get(5..7).and_then(|m| m.parse::<usize>().ok()).filter(|m| (1..=12).contains(m));
-    let mois = mois.map(|m| COURTS[m - 1].trim_end_matches('.').to_uppercase()).unwrap_or_default();
-    let case = Rect::from_min_size(pos2(r.left(), r.center().y - page.y / 2.0), page);
-    theme::page_de_calendrier(p, case, &jour, &mois, teinte);
-    let y = r.center().y - haut_du_texte / 2.0;
-    let h_texte = g_texte.size().y;
-    p.galley(pos2(x, y), g_texte, erp::TITRE);
-    p.galley(pos2(x, y + h_texte + 2.0), g_semaine, erp::TEXTE_2);
-    let place = Rect::from_min_size(pos2(r.right() - badge.x, r.center().y - badge.y / 2.0), badge);
-    theme::peindre_badge(p, place, g_badge, teinte);
+    for m in moments.iter().take(MOMENTS) {
+        let heure = if m.heure.is_empty() { String::new() } else { heure_parlee(&m.heure) };
+        let quand = match (m.jour, m.sorte) {
+            (0, SorteDeMoment::Souper) => "Ce soir".to_string(),
+            (0, _) if heure.is_empty() => "Journée".to_string(),
+            (0, _) => heure,
+            (1, _) if heure.is_empty() => "Demain".to_string(),
+            (1, _) => format!("Demain {heure}"),
+            (_, _) => format!("{} {heure}", jour_court(&m.date)).trim_end().to_string(),
+        };
+        let couleur = match m.sorte {
+            _ if m.bientot.is_some() => erp::DANGER_ENCRE,
+            SorteDeMoment::RendezVous => tete(erp::VIOLET),
+            SorteDeMoment::Rappel => tete(erp::AMBRE),
+            SorteDeMoment::Souper => tete(erp::ORANGE),
+        };
+        let mut r = theme::Rangee::nouvelle(&quand, couleur, &m.texte);
+        r.detail = m.detail.clone();
+        l.rangees.push(r);
+    }
+    if moments.len() > MOMENTS {
+        l.pied = format!("… et {}", nombre(moments.len() - MOMENTS, "autre", "autres"));
+    }
+    l
+}
+
+/// Les échéances en carte : une par rangée, sa date en mot de tête (« mar. 27 oct. ») de la couleur de sa sorte —
+/// rouge sous son seuil, comme le tableau HTML les passe au rouge —, son texte, son délai en détail ; dans la pilule,
+/// combien pressent (en rouge), sinon combien il y en a.
+fn liste_des_echeances(echeances: &[(String, Bloc)]) -> theme::Liste {
+    let mut l = theme::Liste::nouvelle("Échéances", pictos::ECHEANCES, erp::BLEU);
+    let pressent = echeances.iter().filter(|(_, b)| b.alerte).count();
+    l.pilule = Some(if pressent > 0 {
+        (nombre(pressent, "qui presse", "qui pressent"), erp::ROUGE)
+    } else {
+        (echeances.len().to_string(), erp::BLEU)
+    });
+    for (date, b) in echeances {
+        let couleur = if b.alerte { erp::DANGER_ENCRE } else { tete(teinte_de_sorte(b.couleur)) };
+        let r = theme::Rangee::nouvelle(&jour_court(date), couleur, &premier_texte(b));
+        l.rangees.push(r.detail(&[delai_lisible(&b.titre)]));
+    }
+    l
 }
 
 /// Un délai du tableau, pour un badge : en casse de phrase, et ses jours en toutes lettres — « DANS 5 J » → « Dans 5
@@ -1937,11 +2263,11 @@ pub fn jours_entre(de: &str, a: &str) -> Option<i64> {
 const COURTS: [&str; 12] =
     ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."];
 
-/// « 2026-11-06 » → « 6 nov. ».
-fn date_courte(date: &str) -> String {
+/// « 2026-11-06 » → « 6 nov. » ; le premier du mois, « 1er nov. ».
+pub(crate) fn date_courte(date: &str) -> String {
     let mut p = date.split('-').skip(1);
     match (p.next().and_then(|m| m.parse::<usize>().ok()), p.next().and_then(|j| j.get(..2)?.parse::<u32>().ok())) {
-        (Some(m @ 1..=12), Some(j)) => format!("{j} {}", COURTS[m - 1]),
+        (Some(m @ 1..=12), Some(j)) => format!("{j}{} {}", if j == 1 { "er" } else { "" }, COURTS[m - 1]),
         _ => date.to_string(),
     }
 }
@@ -1955,7 +2281,7 @@ fn mois_court(date: &str) -> String {
 }
 
 /// 3840 → « 3 840 » (une espace fine entre les milliers).
-fn milliers(v: f64) -> String {
+pub fn milliers(v: f64) -> String {
     let n = v.round() as i64;
     let t = n.abs().to_string();
     let mut s = String::new();
@@ -2530,11 +2856,15 @@ mod essais {
         );
         assert_eq!(e[1].couleur, Some(hud::VERT));
         assert_eq!(e[3].couleur, Some(hud::JAUNE));
-        // Les cartes reçoivent aussi leur date, pour la page de calendrier ; le tableau de bord, s'il y en a.
+        // Le tableau de bord en reçoit une carte : chaque date en mot de tête (rouge sous son seuil), le délai en
+        // détail ; combien pressent dans la pilule.
         let datees: Vec<String> = c.echeances_datees("2026-10-24").into_iter().map(|(d, _)| d).collect();
         assert_eq!(datees, ["2026-10-24", "2026-10-25", "2026-10-30", "2026-10-31"]);
-        assert!(c.a_des_echeances("2026-10-24"));
-        assert!(!c.a_des_echeances("2027-06-01"), "plus rien dans les 150 jours");
+        let l = liste_des_echeances(&c.echeances_datees("2026-10-24"));
+        assert_eq!(l.pilule, Some(("3 qui pressent".to_string(), erp::ROUGE)));
+        assert_eq!(l.rangees[0].bouts[0], theme::Bout::tete("sam. 24 oct.", erp::DANGER_ENCRE));
+        assert_eq!(l.rangees[2].detail, "Dans 6 jours");
+        assert!(c.echeances_datees("2027-06-01").is_empty(), "plus rien dans les 150 jours");
     }
 
     #[test]

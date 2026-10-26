@@ -152,6 +152,26 @@ pub(crate) mod pictos {
     pub const SOLEIL: char = '\u{E706}';
     pub const SOLEIL_VOILE: char = '\u{E793}';
     pub const NUAGE: char = '\u{E753}';
+    /// Le tableau de bord ([`super::tableau`]) : ses vues (tout, l'entreprise — la mallette —, la famille — la
+    /// maison) ; la journée de la maison ; les tuiles et les cartes de l'entreprise ; relire, se relier.
+    pub const TOUT: char = '\u{E80A}';
+    pub const ENTREPRISE: char = '\u{E821}';
+    pub const FAMILLE: char = '\u{E80F}';
+    pub const JOURNEE: char = '\u{E823}';
+    pub const PROJETS: char = '\u{E822}';
+    pub const RECEVOIR: char = '\u{E8C7}';
+    pub const DEVIS: char = '\u{E8A5}';
+    pub const PIPELINE: char = '\u{E71C}';
+    pub const ALERTES: char = '\u{E7BA}';
+    pub const INFO: char = '\u{E946}';
+    pub const RETARD: char = '\u{E916}';
+    pub const BALANCE: char = '\u{EB05}';
+    pub const RELIRE: char = '\u{E72C}';
+    pub const LIEN: char = '\u{E71B}';
+    /// Les commandes et les livraisons (le chariot), les heures (l'horloge), les factures reçues (la facture).
+    pub const COMMANDES: char = '\u{E7BF}';
+    pub const HEURES: char = '\u{E121}';
+    pub const FACTURES_RECUES: char = '\u{E9F9}';
 }
 
 // ---- Le fond qui respire --------------------------------------------------------------------------------------------
@@ -307,7 +327,7 @@ fn couper(points: &[Pos2], garder: impl Fn(Pos2) -> f32) -> Vec<Pos2> {
 
 /// Windows veut des animations (Paramètres, Accessibilité, Effets d'animation) ; sinon le fond se fige au milieu de sa
 /// course, comme celui de l'ERP sous `prefers-reduced-motion`. Relu toutes les dix secondes.
-fn animations(ctx: &egui::Context) -> bool {
+pub(super) fn animations(ctx: &egui::Context) -> bool {
     let id = egui::Id::unique("animations-de-windows");
     let maintenant = ctx.input(|i| i.time);
     if let Some((oui, lu)) = ctx.data(|d| d.get_temp::<(bool, f64)>(id))
@@ -481,9 +501,19 @@ pub(crate) fn carte(
     hauteur: f32,
     contenu: impl FnOnce(&mut egui::Ui),
 ) -> f32 {
+    carte_aux_marges(ui, accent, hauteur, Margin { left: 18, right: 18, top: 16, bottom: 17 }, contenu)
+}
+
+/// Une carte aux marges données ([`carte`] : les marges des cartes ; une tuile serrée en a de plus petites).
+fn carte_aux_marges(
+    ui: &mut egui::Ui,
+    accent: Option<Color32>,
+    hauteur: f32,
+    marge: Margin,
+    contenu: impl FnOnce(&mut egui::Ui),
+) -> f32 {
     let fond = ui.painter().add(Shape::Noop);
     let (coin, largeur) = (ui.cursor().min, ui.available_width());
-    let marge = Margin { left: 18, right: 18, top: 16, bottom: 17 };
     let dedans = Rect::from_min_max(
         coin + vec2(f32::from(marge.left), f32::from(marge.top)),
         pos2(coin.x + largeur - f32::from(marge.right), coin.y + 100_000.0),
@@ -500,10 +530,10 @@ pub(crate) fn carte(
 }
 
 /// Le rayon des cartes et de la bannière.
-const RAYON_DE_CARTE: u8 = 14;
+pub(super) const RAYON_DE_CARTE: u8 = 14;
 
 /// Une ombre teintée de marine, plus douce qu'une ombre noire : `dy` points plus bas, floue de `flou`, à `alpha`.
-fn ombre_marine(rect: Rect, rayon: u8, dy: i8, flou: u8, alpha: u8) -> Shape {
+pub(super) fn ombre_marine(rect: Rect, rayon: u8, dy: i8, flou: u8, alpha: u8) -> Shape {
     let couleur = Color32::from_rgba_unmultiplied(15, 35, 80, alpha);
     Shape::Rect(egui::Shadow { offset: [0, dy], blur: flou, spread: 0, color: couleur }.as_shape(rect, rayon))
 }
@@ -545,19 +575,18 @@ pub(crate) fn pastille(p: &egui::Painter, case: Rect, icone: char, teinte: erp::
 
 /// Un texte du tableau en capitales (« ÉPICERIE · 0 À ACHETER », « À SORTIR : poulet ») en casse de phrase
 /// (« Épicerie · 0 à acheter », « À sortir : poulet ») : chaque mot tout en capitales passe en minuscules, un mot qui a
-/// ses minuscules (un nom, une donnée) reste tel quel ; puis la première lettre en capitale.
+/// ses minuscules (un nom, une donnée) reste tel quel, un montant aussi (« 1,25 M$ ») ; puis la première lettre en
+/// capitale.
 pub(crate) fn casse_de_phrase(texte: &str) -> String {
-    let mots: Vec<String> = texte
-        .split(' ')
-        .map(|m| if m.chars().any(char::is_lowercase) { m.to_string() } else { m.to_lowercase() })
-        .collect();
+    let garde = |m: &str| m.chars().any(char::is_lowercase) || m.contains('$');
+    let mots: Vec<String> = texte.split(' ').map(|m| if garde(m) { m.to_string() } else { m.to_lowercase() }).collect();
     let phrase = mots.join(" ");
     let mut c = phrase.chars();
     c.next().map_or_else(String::new, |p| p.to_uppercase().collect::<String>() + c.as_str())
 }
 
 /// L'écart entre deux cartes du tableau de bord, et la largeur sous laquelle une carte ne descend pas dans la grille.
-const ECART: f32 = 20.0;
+pub(crate) const ECART: f32 = 20.0;
 const LARGEUR_DE_CARTE: f32 = 250.0;
 
 /// Le nombre de colonnes de la grille dans une largeur `l` : autant de cartes qu'il en tient, de une à trois.
@@ -605,21 +634,25 @@ pub(crate) fn grille(
     }
 }
 
-/// Le texte d'un badge de l'ERP (`Badge.tsx`), en demi-gras de l'encre de sa teinte, mis en page (sa place : sa
-/// taille, plus 18 points de large et 7 de haut).
-pub(crate) fn galee_de_badge(p: &egui::Painter, texte: &str, teinte: erp::Teinte) -> std::sync::Arc<egui::Galley> {
-    p.layout_no_wrap(texte.to_string(), FontId::new(11.5, FontFamily::Name(SEMI.into())), teinte.encre)
-}
-
-/// Un badge peint dans `rect`, sa pilule et son texte au milieu.
+/// Un badge de l'ERP (`Badge.tsx`) peint dans `rect` : sa pilule pastel et son texte au milieu, en demi-gras de l'encre
+/// de sa teinte (sa place : la taille du texte, plus 18 points de large et 7 de haut).
 pub(crate) fn peindre_badge(p: &egui::Painter, rect: Rect, galee: std::sync::Arc<egui::Galley>, teinte: erp::Teinte) {
     p.rect_filled(rect, 255.0, teinte.pastel.gamma_multiply(0.2));
     p.galley(rect.center() - galee.size() / 2.0, galee, teinte.encre);
 }
 
+/// Un texte du tableau HTML, tout en capitales (« ÉPICERIE »), en casse de phrase ([`casse_de_phrase`]) ; un texte
+/// qui a déjà ses minuscules (« Relie Eve à Constructo AI ») reste tel quel, ses sigles avec lui, comme celui qui n'a
+/// pas deux capitales (« 11 °C »).
+fn en_casse_de_phrase(texte: &str) -> String {
+    let capitales = texte.chars().filter(|c| c.is_uppercase()).count();
+    if capitales < 2 || texte.chars().any(char::is_lowercase) { texte.to_string() } else { casse_de_phrase(texte) }
+}
+
 /// La tête d'une carte : la pastille de son icône ([`pastille`]), puis son titre en demi-gras, en casse de phrase
-/// ([`casse_de_phrase`]), qui passe à la ligne au besoin ; en alerte, la pastille et le titre rouges. `etiquette` : un
-/// badge contre le bord droit (le délai de la décision du jour).
+/// ([`en_casse_de_phrase`]), qui passe à la ligne au besoin ; en alerte, la pastille et le titre rouges. `etiquette` :
+/// un badge contre le bord droit (un compte, un délai), qui laisse au titre plus de la moitié de la place (coupé d'une
+/// ellipse au besoin).
 pub(crate) fn tete_de_carte(
     ui: &mut egui::Ui,
     titre: &str,
@@ -632,10 +665,15 @@ pub(crate) fn tete_de_carte(
     let cote = 36.0;
     let (teinte, encre) = if alerte { (erp::ROUGE, erp::DANGER_ENCRE) } else { (teinte, erp::TITRE) };
     let p = ui.painter();
-    let badge = etiquette.map(|(t, x)| (galee_de_badge(p, &casse_de_phrase(t), x), x));
+    let badge = etiquette.map(|(t, x)| {
+        let police = FontId::new(11.5, FontFamily::Name(SEMI.into()));
+        let mut job = egui::text::LayoutJob::simple_singleline(en_casse_de_phrase(t), police, x.encre);
+        job.wrap = egui::text::TextWrapping::truncate_at_width((largeur * 0.42 - 18.0).max(30.0));
+        (p.layout_job(job), x)
+    });
     let l_badge = badge.as_ref().map_or(0.0, |(g, _)| g.size().x + 18.0 + 12.0);
     let police = FontId::new(15.0, FontFamily::Name(SEMI.into()));
-    let galee = p.layout(casse_de_phrase(titre), police, encre, (largeur - cote - 12.0 - l_badge).max(40.0));
+    let galee = p.layout(en_casse_de_phrase(titre), police, encre, (largeur - cote - 12.0 - l_badge).max(40.0));
     let (rect, _) = ui.allocate_exact_size(vec2(largeur, galee.size().y.max(cote)), Sense::hover());
     let p = ui.painter();
     let case = Rect::from_min_size(pos2(rect.left(), rect.center().y - cote / 2.0), vec2(cote, cote));
@@ -649,42 +687,389 @@ pub(crate) fn tete_de_carte(
     ui.add_space(4.0);
 }
 
-/// Une page de calendrier, celle des agendas : le mois en capitales blanches sur un bandeau de la teinte, le jour en
-/// gras dessous, sur une page blanche au filet froid et à l'ombre douce.
-pub(crate) fn page_de_calendrier(p: &egui::Painter, r: Rect, jour: &str, mois: &str, teinte: erp::Teinte) {
-    let rayon = 10;
-    p.add(ombre_marine(r, rayon, 2, 6, 26));
-    p.rect(r, rayon, Color32::WHITE, Stroke::new(1.0, erp::FILET_DE_CARTE), StrokeKind::Inside);
-    let bandeau = Rect::from_min_size(r.min, vec2(r.width(), 17.0));
-    let coins = CornerRadius { nw: rayon, ne: rayon, sw: 0, se: 0 };
-    p.rect_filled(bandeau, coins, teinte.vif[1]);
-    let petite = FontId::new(9.5, FontFamily::Name(SEMI.into()));
-    p.text(bandeau.center() + vec2(0.0, 0.5), Align2::CENTER_CENTER, mois, petite, Color32::WHITE);
-    let page = Rect::from_min_max(pos2(r.left(), bandeau.bottom()), r.max);
-    let grande = FontId::new(20.0, FontFamily::Name(GRAS.into()));
-    p.text(page.center() - vec2(0.0, 0.5), Align2::CENTER_CENTER, jour, grande, erp::TITRE);
+// ---- Les cartes en listes, leur maçonnerie, les tuiles des chiffres ---------------------------------------------
+
+/// Un morceau d'une rangée d'une carte en liste : son texte ; sa couleur (`None` : l'encre du texte, ou celle des
+/// titres pour un morceau en demi-gras) ; en demi-gras (le mot de tête d'une rangée, un nombre) ; barré (un article
+/// acheté).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Bout {
+    pub(crate) texte: String,
+    pub(crate) couleur: Option<Color32>,
+    pub(crate) fort: bool,
+    pub(crate) barre: bool,
 }
 
-/// Les sortes de boutons de l'ERP : celui qui confirme (vert, celui de l'Eve de Constructo AI), secondaire
-/// (`.erp-btn-secondary`), fantôme (`.erp-btn-ghost`). Le primaire (`.erp-btn-primary`), c'est l'envoi.
+impl Bout {
+    /// Du texte, dans l'encre du texte.
+    pub(crate) fn texte(t: impl Into<String>) -> Bout {
+        Bout { texte: t.into(), couleur: None, fort: false, barre: false }
+    }
+
+    /// Le mot de tête d'une rangée : en demi-gras, de sa couleur (rouge pour ce qui est dépassé ou presse).
+    pub(crate) fn tete(t: impl Into<String>, couleur: Color32) -> Bout {
+        Bout { texte: t.into(), couleur: Some(couleur), fort: true, barre: false }
+    }
+}
+
+/// Ce qu'une rangée montre sous son texte : une jauge (la part du temps écoulé, une marque par échéance), ou une barre
+/// de longueur (une valeur parmi celles de sa carte, d'une seule couleur ; une bulle au survol la redit).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Mesure {
+    Part { part: f32, marques: Vec<f32> },
+    Longueur { part: f32, couleur: Color32, bulle: String },
+}
+
+/// Une rangée d'une carte en liste : un carré de couleur devant (celui d'une légende), ses morceaux (d'ordinaire le mot
+/// de tête en couleur, puis le texte), une valeur contre le bord droit (un montant), une ligne de détail grise (ses
+/// morceaux séparés par « · »), une mesure.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Rangee {
+    pub(crate) carre: Option<Color32>,
+    pub(crate) bouts: Vec<Bout>,
+    pub(crate) droite: String,
+    pub(crate) detail: String,
+    pub(crate) mesure: Option<Mesure>,
+}
+
+impl Rangee {
+    /// Une rangée : un mot de tête (vide : aucun) de sa couleur, puis le texte.
+    pub(crate) fn nouvelle(tete: &str, couleur: Color32, texte: &str) -> Rangee {
+        let mut bouts = Vec::new();
+        if !tete.is_empty() {
+            bouts.push(Bout::tete(tete, couleur));
+        }
+        if !texte.is_empty() {
+            bouts.push(Bout::texte(if bouts.is_empty() { texte.to_string() } else { format!(" {texte}") }));
+        }
+        Rangee { bouts, ..Rangee::default() }
+    }
+
+    /// Le détail gris : ses morceaux non vides, séparés par « · ».
+    pub(crate) fn detail<S: AsRef<str>>(mut self, morceaux: &[S]) -> Rangee {
+        let morceaux: Vec<&str> = morceaux.iter().map(AsRef::as_ref).map(str::trim).filter(|m| !m.is_empty()).collect();
+        self.detail = morceaux.join(" · ");
+        self
+    }
+
+    /// La valeur contre le bord droit.
+    pub(crate) fn a_droite(mut self, valeur: impl Into<String>) -> Rangee {
+        self.droite = valeur.into();
+        self
+    }
+}
+
+/// Une carte en liste, celle des tableaux de bord : sa tête (la pastille de son icône, son titre, une pilule contre le
+/// bord droit — un compte, teinté selon l'urgence), une barre empilée sous elle au besoin (ses parts : leur valeur,
+/// leur couleur, leur bulle), ses rangées séparées d'un filet fin, son pied gris (« … et 3 autres »). En alerte, sa
+/// tête est rouge.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Liste {
+    pub(crate) titre: String,
+    pub(crate) icone: char,
+    pub(crate) teinte: erp::Teinte,
+    pub(crate) alerte: bool,
+    pub(crate) pilule: Option<(String, erp::Teinte)>,
+    pub(crate) barre: Vec<(f64, Color32, String)>,
+    pub(crate) rangees: Vec<Rangee>,
+    pub(crate) pied: String,
+}
+
+impl Liste {
+    pub(crate) fn nouvelle(titre: impl Into<String>, icone: char, teinte: erp::Teinte) -> Liste {
+        let titre = titre.into();
+        Liste {
+            titre,
+            icone,
+            teinte,
+            alerte: false,
+            pilule: None,
+            barre: Vec::new(),
+            rangees: Vec::new(),
+            pied: String::new(),
+        }
+    }
+
+    /// La pilule de la tête, de sa teinte.
+    pub(crate) fn pilule(mut self, texte: impl Into<String>, teinte: erp::Teinte) -> Liste {
+        self.pilule = Some((texte.into(), teinte));
+        self
+    }
+}
+
+/// Une carte en liste ([`Liste`]) dans toute la largeur donnée ; rend la hauteur qu'il lui faut.
+pub(crate) fn carte_liste(ui: &mut egui::Ui, l: &Liste) -> f32 {
+    let lavis = if l.alerte { erp::ROUGE.pastel } else { l.teinte.pastel };
+    carte(ui, Some(lavis), 0.0, |ui| {
+        let pilule = l.pilule.as_ref().map(|(t, x)| (t.as_str(), *x));
+        tete_de_carte(ui, &l.titre, l.icone, l.teinte, l.alerte, pilule);
+        if !l.barre.is_empty() {
+            ui.add_space(2.0);
+            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 10.0), Sense::hover());
+            let parts: Vec<(f64, Color32)> = l.barre.iter().map(|(v, c, _)| (*v, *c)).collect();
+            let places = barre_empilee(ui.painter(), r, &parts);
+            for (k, place) in places.iter().enumerate().filter(|(_, p)| p.is_positive()) {
+                let id = egui::Id::unique(("barre-de-carte", &l.titre, k));
+                ui.interact(*place, id, Sense::hover()).on_hover_text(&l.barre[k].2);
+            }
+            ui.add_space(6.0);
+        }
+        for (k, r) in l.rangees.iter().enumerate() {
+            if k > 0 {
+                let (f, _) = ui.allocate_exact_size(vec2(ui.available_width(), 11.0), Sense::hover());
+                ui.painter().hline(f.x_range(), f.center().y, Stroke::new(1.0, erp::FILET_DE_CARTE));
+            }
+            rangee_de_liste(ui, r, (&l.titre, k));
+        }
+        if !l.pied.is_empty() {
+            ui.add_space(4.0);
+            let pied = RichText::new(&l.pied).size(12.5).color(erp::TEXTE_2);
+            ui.add(egui::Label::new(pied).wrap().selectable(false));
+        }
+    })
+}
+
+/// La taille du texte des rangées, et celle de leur détail.
+const TEXTE_DE_RANGEE: f32 = 14.0;
+const DETAIL_DE_RANGEE: f32 = 12.5;
+
+/// Une rangée d'une carte en liste : son carré de légende, ses morceaux mis en page sur la largeur (moins la valeur à
+/// droite, alignée sur leur première ligne), son détail gris dessous, sa mesure. `cle` : de quoi nommer sa bulle.
+fn rangee_de_liste(ui: &mut egui::Ui, r: &Rangee, cle: (&str, usize)) {
+    let largeur = ui.available_width();
+    let p = ui.painter().clone();
+    let retrait = if r.carre.is_some() { 18.0 } else { 0.0 };
+    let droite = (!r.droite.is_empty()).then(|| {
+        let police = FontId::new(TEXTE_DE_RANGEE, FontFamily::Name(SEMI.into()));
+        p.layout_no_wrap(r.droite.clone(), police, erp::TITRE)
+    });
+    let l_droite = droite.as_ref().map_or(0.0, |g| g.size().x + 12.0);
+    let mut job = egui::text::LayoutJob::default();
+    for b in &r.bouts {
+        let famille = if b.fort { FontFamily::Name(SEMI.into()) } else { FontFamily::Proportional };
+        let couleur = b.couleur.unwrap_or(if b.fort { erp::TITRE } else { erp::TEXTE });
+        let format = egui::text::TextFormat {
+            font_id: FontId::new(TEXTE_DE_RANGEE, famille),
+            line_height: Some(TEXTE_DE_RANGEE * 1.4),
+            color: couleur,
+            strikethrough: if b.barre { Stroke::new(1.0, couleur) } else { Stroke::NONE },
+            ..Default::default()
+        };
+        job.append(&b.texte, 0.0, format);
+    }
+    job.wrap.max_width = (largeur - retrait - l_droite).max(60.0);
+    let texte = (!r.bouts.is_empty()).then(|| p.layout_job(job));
+    let ligne = texte.as_ref().and_then(|g| g.rows.first()).map_or(TEXTE_DE_RANGEE * 1.4, |l| l.rect().height());
+    let h_texte = texte.as_ref().map_or(0.0, |g| g.size().y);
+    let (rect, _) =
+        ui.allocate_exact_size(vec2(largeur, h_texte.max(if droite.is_some() { ligne } else { 0.0 })), Sense::hover());
+    if let Some(c) = r.carre {
+        let carre = Rect::from_center_size(pos2(rect.left() + 5.0, rect.top() + ligne / 2.0), vec2(10.0, 10.0));
+        p.rect_filled(carre, 3.0, c);
+    }
+    if let Some(g) = texte {
+        p.galley(pos2(rect.left() + retrait, rect.top()), g, erp::TEXTE);
+    }
+    if let Some(g) = droite {
+        let (l, h) = (g.size().x, g.size().y);
+        p.galley(pos2(rect.right() - l, rect.top() + (ligne - h) / 2.0), g, erp::TITRE);
+    }
+    if !r.detail.is_empty() {
+        let detail =
+            p.layout(r.detail.clone(), FontId::proportional(DETAIL_DE_RANGEE), erp::TEXTE_2, largeur - retrait);
+        let (place, _) = ui.allocate_exact_size(vec2(largeur, detail.size().y), Sense::hover());
+        p.galley(pos2(place.left() + retrait, place.top()), detail, erp::TEXTE_2);
+    }
+    match &r.mesure {
+        Some(Mesure::Part { part, marques }) => {
+            ui.add_space(5.0);
+            let (b, _) = ui.allocate_exact_size(vec2(largeur, 8.0), Sense::hover());
+            p.rect_filled(b, 4.0, erp::FILET);
+            if *part > 0.0 {
+                let plein = Rect::from_min_size(b.min, vec2((b.width() * part).max(8.0), b.height()));
+                p.rect_filled(plein, 4.0, erp::BLEU.pastel);
+            }
+            for m in marques {
+                let x = b.left() + b.width() * m;
+                p.rect_filled(
+                    Rect::from_min_max(pos2(x - 1.0, b.top() - 3.0), pos2(x + 1.0, b.bottom() + 3.0)),
+                    1.0,
+                    erp::ROUGE.encre,
+                );
+            }
+            ui.add_space(3.0);
+        }
+        Some(Mesure::Longueur { part, couleur, bulle }) => {
+            ui.add_space(4.0);
+            let (b, _) = ui.allocate_exact_size(vec2(largeur, 6.0), Sense::hover());
+            if *part > 0.0 {
+                let plein = Rect::from_min_size(b.min, vec2((b.width() * part.min(1.0)).max(6.0), b.height()));
+                p.rect_filled(plein, CornerRadius { nw: 0, sw: 0, ne: 3, se: 3 }, *couleur);
+                let id = egui::Id::unique(("mesure-de-rangee", cle.0, cle.1));
+                ui.interact(plein, id, Sense::hover()).on_hover_text(bulle);
+            }
+        }
+        None => {}
+    }
+}
+
+/// Une barre empilée dans `r` : ses parts (leur valeur, leur couleur) côte à côte en proportion, deux points de blanc
+/// entre deux, les bouts arrondis ; les parts nulles ne se voient pas ; tout nul, un rail gris. Rend la place de chaque
+/// part (vide pour une part nulle).
+pub(crate) fn barre_empilee(p: &egui::Painter, r: Rect, parts: &[(f64, Color32)]) -> Vec<Rect> {
+    let total: f64 = parts.iter().map(|(v, _)| v.max(0.0)).sum();
+    let rayon = (r.height() / 2.0).round() as u8;
+    if total <= 0.0 {
+        p.rect_filled(r, CornerRadius::same(rayon), erp::FILET);
+        return vec![Rect::NOTHING; parts.len()];
+    }
+    let visibles: Vec<usize> = (0..parts.len()).filter(|k| parts[*k].0 > 0.0).collect();
+    let ecart = 2.0;
+    let place = r.width() - ecart * (visibles.len().saturating_sub(1)) as f32;
+    let mut x = r.left();
+    let mut places = vec![Rect::NOTHING; parts.len()];
+    for (i, &k) in visibles.iter().enumerate() {
+        let (v, c) = parts[k];
+        let l = (place * (v / total) as f32).max(2.0);
+        let derniere = i + 1 == visibles.len();
+        let droite = if derniere { r.right() } else { (x + l).min(r.right()) };
+        let segment = Rect::from_min_max(pos2(x, r.top()), pos2(droite, r.bottom()));
+        let (debut, fin) = (if i == 0 { rayon } else { 0 }, if derniere { rayon } else { 0 });
+        p.rect_filled(segment, CornerRadius { nw: debut, sw: debut, ne: fin, se: fin }, c);
+        places[k] = segment;
+        x = droite + ecart;
+    }
+    places
+}
+
+/// Des cartes en maçonnerie, comme les tableaux de bord d'aujourd'hui : `n` cartes sur `colonnes` colonnes de même
+/// largeur, chacune sous la plus courte des colonnes (la plus à gauche, à égalité), à [`ECART`] l'une de l'autre — les
+/// colonnes prennent la hauteur de ce qu'elles portent, rien ne reste vide entre deux cartes. `carte(ui, k)` dessine la
+/// k-ième dans la largeur de sa colonne ; dans l'ordre, les premières en haut.
+pub(crate) fn maconnerie(ui: &mut egui::Ui, colonnes: usize, n: usize, mut carte: impl FnMut(&mut egui::Ui, usize)) {
+    if n == 0 {
+        return;
+    }
+    let colonnes = colonnes.max(1);
+    let (origine, largeur) = (ui.cursor().min, ui.available_width());
+    let l = ((largeur - ECART * (colonnes - 1) as f32) / colonnes as f32).max(40.0);
+    let mut bas = vec![origine.y; colonnes];
+    for k in 0..n {
+        let c = (0..colonnes).min_by(|a, b| bas[*a].total_cmp(&bas[*b])).unwrap_or(0);
+        let place = Rect::from_min_size(pos2(origine.x + c as f32 * (l + ECART), bas[c]), vec2(l, 100_000.0));
+        let mut enfant = ui.new_child(UiBuilder::new().max_rect(place).layout(Layout::top_down(Align::Min)));
+        carte(&mut enfant, k);
+        bas[c] = enfant.min_rect().bottom().max(bas[c]) + ECART;
+    }
+    let fond = bas.iter().copied().fold(origine.y, f32::max) - ECART;
+    ui.advance_cursor_after_rect(Rect::from_min_max(origine, pos2(origine.x + largeur, fond.max(origine.y))));
+}
+
+/// Un chiffre du tableau de bord, pour sa tuile : sa valeur en grand (« 4 », « 12 000 $ »), son étiquette grise (« au
+/// calendrier aujourd'hui »), l'icône et la teinte de sa pastille ; en alerte, la pastille rouge.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Chiffre {
+    pub(crate) valeur: String,
+    pub(crate) etiquette: String,
+    pub(crate) icone: char,
+    pub(crate) teinte: erp::Teinte,
+    pub(crate) alerte: bool,
+}
+
+/// La largeur d'une tuile de chiffre ; sous elle, la tuile se serre (sa pastille, sa valeur et ses marges plus
+/// petites, son étiquette sur deux lignes, comme les tuiles du modèle), jusqu'à la largeur serrée : six tiennent
+/// ainsi sur une rangée dans la fenêtre d'office.
+const LARGEUR_DE_TUILE: f32 = 190.0;
+const LARGEUR_DE_TUILE_SERREE: f32 = 150.0;
+
+/// Combien de tuiles par rangée pour `n` chiffres dans une largeur `l` : toutes (six au plus) sur une rangée, si
+/// chacune garde au moins sa largeur serrée ; sinon trois, deux ou une, chacune à sa pleine largeur.
+pub(crate) fn tuiles_par_rangee(n: usize, l: f32) -> usize {
+    let largeur = |k: usize| (l - ECART * (k as f32 - 1.0)) / k as f32;
+    let toutes = n.clamp(1, 6);
+    if largeur(toutes) >= LARGEUR_DE_TUILE_SERREE {
+        return toutes;
+    }
+    [3, 2].into_iter().find(|&k| k <= n && largeur(k) >= LARGEUR_DE_TUILE).unwrap_or(1)
+}
+
+/// Les tuiles des chiffres, en rangées de même hauteur ([`tuiles_par_rangee`]) : chacune sa pastille à gauche, sa
+/// valeur en grand et son étiquette grise dessous, comme les tuiles des tableaux de bord d'aujourd'hui.
+pub(crate) fn tuiles(ui: &mut egui::Ui, chiffres: &[Chiffre]) {
+    let par_rangee = tuiles_par_rangee(chiffres.len(), ui.available_width());
+    let id = egui::Id::unique(("tuiles-des-chiffres", par_rangee, chiffres.len()));
+    grille(ui, id, par_rangee, chiffres.len(), |ui, k, hauteur| tuile(ui, &chiffres[k], hauteur));
+}
+
+fn tuile(ui: &mut egui::Ui, c: &Chiffre, hauteur: f32) -> f32 {
+    // Serrée : de plus petites marges, une plus petite pastille, une valeur et une étiquette plus petites.
+    let serree = ui.available_width() < LARGEUR_DE_TUILE;
+    let (marge, cote, ecart, grande, petite) =
+        if serree { (12, 32.0, 10.0, 22.0, 12.5) } else { (18, 40.0, 14.0, 26.0, 13.0) };
+    let marges = Margin { left: marge, right: marge, top: 16, bottom: 17 };
+    carte_aux_marges(ui, None, hauteur, marges, |ui| {
+        let largeur = ui.available_width();
+        let x = cote + ecart;
+        let l_texte = (largeur - x).max(40.0);
+        let p = ui.painter().clone();
+        let gras = |taille: f32| FontId::new(taille, FontFamily::Name(GRAS.into()));
+        let mesure = p.layout_no_wrap(c.valeur.clone(), gras(grande), erp::TITRE).size().x;
+        let taille = if mesure > l_texte { (grande * l_texte / mesure).max(16.0) } else { grande };
+        let mut job = egui::text::LayoutJob::simple_singleline(c.valeur.clone(), gras(taille), erp::TITRE);
+        job.wrap = egui::text::TextWrapping::truncate_at_width(l_texte);
+        let valeur = p.layout_job(job);
+        let etiquette = p.layout(c.etiquette.clone(), FontId::proportional(petite), erp::TEXTE_2, l_texte);
+        let h_valeur = valeur.size().y;
+        let h = (h_valeur + etiquette.size().y).max(cote);
+        let (r, _) = ui.allocate_exact_size(vec2(largeur, h), Sense::hover());
+        let teinte = if c.alerte { erp::ROUGE } else { c.teinte };
+        pastille(&p, Rect::from_min_size(r.min, vec2(cote, cote)), c.icone, teinte);
+        p.galley(pos2(r.left() + x, r.top() - 3.0), valeur, erp::TITRE);
+        p.galley(pos2(r.left() + x, r.top() - 3.0 + h_valeur), etiquette, erp::TEXTE_2);
+    })
+}
+
+/// Les sortes de boutons de l'ERP : celui qui confirme (vert, celui de l'Eve de Constructo AI), le primaire
+/// (`.erp-btn-primary`, le bleu de Constructo AI : se relier), secondaire (`.erp-btn-secondary`), fantôme
+/// (`.erp-btn-ghost`).
 #[derive(Clone, Copy, PartialEq)]
-enum BoutonErp {
+pub(super) enum BoutonErp {
     Oui,
+    Primaire,
     Secondaire,
     Fantome,
 }
 
-/// Un bouton de l'ERP : un rayon de 4 points, une icône au besoin, son mot en demi-gras.
-fn bouton_erp(ui: &mut egui::Ui, code: Option<char>, texte: &str, sorte: BoutonErp) -> egui::Response {
+/// Un bouton de l'ERP mis en page : son mot, son icône, sa taille, et la marge de ses côtés.
+struct MiseEnPageDuBouton {
+    texte: std::sync::Arc<egui::Galley>,
+    icone: Option<std::sync::Arc<egui::Galley>>,
+    taille: egui::Vec2,
+    marge: f32,
+}
+
+fn mise_en_page_du_bouton(p: &egui::Painter, code: Option<char>, texte: &str, sorte: BoutonErp) -> MiseEnPageDuBouton {
     let (taille, px, py) = if sorte == BoutonErp::Fantome { (12.5, 10.0, 6.0) } else { (13.5, 16.0, 8.0) };
     // Sans couleur à la mise en page : l'encre se donne à la peinture (le survol la change).
-    let (p, aucune) = (ui.painter(), Color32::PLACEHOLDER);
+    let aucune = Color32::PLACEHOLDER;
     let g_texte = p.layout_no_wrap(texte.to_string(), FontId::new(taille, FontFamily::Name(SEMI.into())), aucune);
     let g_icone =
         code.map(|c| p.layout_no_wrap(c.to_string(), FontId::new(taille, FontFamily::Name(ICONES.into())), aucune));
     let l_icone = g_icone.as_ref().map_or(0.0, |g| g.size().x + 7.0);
-    let (rect, rep) = ui
-        .allocate_exact_size(vec2(2.0 * px + l_icone + g_texte.size().x, 2.0 * py + g_texte.size().y), Sense::click());
+    let dehors = vec2(2.0 * px + l_icone + g_texte.size().x, 2.0 * py + g_texte.size().y);
+    MiseEnPageDuBouton { texte: g_texte, icone: g_icone, taille: dehors, marge: px }
+}
+
+/// La taille d'un bouton de l'ERP, avant de le poser (pour ranger ce qui l'entoure).
+pub(super) fn taille_du_bouton_erp(p: &egui::Painter, code: Option<char>, texte: &str, sorte: BoutonErp) -> egui::Vec2 {
+    mise_en_page_du_bouton(p, code, texte, sorte).taille
+}
+
+/// Un bouton de l'ERP : un rayon de 4 points, une icône au besoin, son mot en demi-gras.
+pub(super) fn bouton_erp(ui: &mut egui::Ui, code: Option<char>, texte: &str, sorte: BoutonErp) -> egui::Response {
+    let MiseEnPageDuBouton { texte: g_texte, icone: g_icone, taille, marge: px } =
+        mise_en_page_du_bouton(ui.painter(), code, texte, sorte);
+    let (rect, rep) = ui.allocate_exact_size(taille, Sense::click());
     if ui.is_rect_visible(rect) {
         let (survol, enfonce) = (rep.hovered(), rep.is_pointer_button_down_on());
         let (fond, bord, encre) = match sorte {
@@ -696,6 +1081,15 @@ fn bouton_erp(ui: &mut egui::Ui, code: Option<char>, texte: &str, sorte: BoutonE
                     Color32::WHITE,
                 )
             }
+            BoutonErp::Primaire => (
+                match (enfonce, survol) {
+                    (true, _) => melange(erp::PRIMAIRE_FONCE, Color32::BLACK, 0.12),
+                    (false, true) => erp::PRIMAIRE_FONCE,
+                    _ => erp::PRIMAIRE,
+                },
+                Color32::TRANSPARENT,
+                Color32::WHITE,
+            ),
             BoutonErp::Secondaire => (if survol { erp::SURVOL } else { Color32::WHITE }, erp::FILET_CHAMP, erp::TEXTE),
             BoutonErp::Fantome => (
                 if survol { erp::SURVOL } else { Color32::TRANSPARENT },
@@ -719,7 +1113,7 @@ fn bouton_erp(ui: &mut egui::Ui, code: Option<char>, texte: &str, sorte: BoutonE
 /// Un rectangle aux coins arrondis peint d'un dégradé : ses sommets prennent la couleur de `couleur` à leur place (un
 /// éventail depuis le centre ; ses côtés droits coupés tous les 24 points, pour qu'un dégradé à trois arrêts y garde
 /// celui du milieu). Pour des dégradés doux, comme ceux des bulles de l'ERP.
-fn rectangle_degrade(rect: Rect, rayon: f32, couleur: impl Fn(Pos2) -> Color32) -> Shape {
+pub(super) fn rectangle_degrade(rect: Rect, rayon: f32, couleur: impl Fn(Pos2) -> Color32) -> Shape {
     let rayon = rayon.min(rect.width() / 2.0).min(rect.height() / 2.0);
     let centres = [
         (pos2(rect.right() - rayon, rect.top() + rayon), -90.0f32),
@@ -753,7 +1147,7 @@ fn rectangle_degrade(rect: Rect, rayon: f32, couleur: impl Fn(Pos2) -> Color32) 
 
 /// La couleur d'un dégradé linéaire de CSS (`linear-gradient(<angle>, …)`) dans `rect` au point `p` : ses arrêts à
 /// intervalles égaux, l'angle en degrés (0, vers le haut ; 90, vers la droite).
-fn degrade_css(rect: Rect, angle: f32, arrets: &[Color32], p: Pos2) -> Color32 {
+pub(super) fn degrade_css(rect: Rect, angle: f32, arrets: &[Color32], p: Pos2) -> Color32 {
     let (s, c) = angle.to_radians().sin_cos();
     let longueur = (rect.width() * s).abs() + (rect.height() * c).abs();
     let t = ((p - rect.center()).dot(vec2(s, -c)) / longueur.max(1.0) + 0.5).clamp(0.0, 1.0);
@@ -1428,9 +1822,8 @@ impl Fenetre {
     }
 
     /// Le tableau de bord, comme les beaux tableaux de bord d'aujourd'hui : une page qui défile — la bannière
-    /// d'accueil ([`Fenetre::banniere`]), la décision du jour, puis les échéances à gauche et tout le panneau
-    /// d'information en cartes à droite ; dans une place étroite, ou sans échéances, les cartes prennent toute la
-    /// largeur.
+    /// d'accueil ([`Fenetre::banniere`]), puis l'entreprise et la famille comme les range le choix « Tout ·
+    /// Entreprise · Famille » ([`super::tableau`]).
     fn tableau_de_bord(&mut self, ui: &mut egui::Ui) {
         // La page défile sur toute la zone ; ses marges (celles de l'ERP, `p-6`) sont dedans, pour que les ombres des
         // cartes ne s'y coupent pas.
@@ -1438,40 +1831,19 @@ impl Fenetre {
         let aujourdhui = journal::date();
         let horodatage = journal::horodatage();
         let heure = horodatage.get(11..16).unwrap_or("").replace('-', ":");
-        let sortie =
-            egui::ScrollArea::vertical().id_salt("tableau-de-bord").auto_shrink([false, false]).show(ui, |ui| {
-                egui::Frame::new().inner_margin(Margin { left: 24, right: 24, top: 22, bottom: 30 }).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    self.banniere(ui, &aujourdhui, &horodatage);
-                    ui.add_space(ECART);
-                    if self.centre.decision_carte(ui, &aujourdhui) {
-                        ui.add_space(ECART);
-                    }
-                    let largeur = ui.available_width();
-                    let echeances = self.centre.a_des_echeances(&aujourdhui);
-                    if largeur >= 900.0 && echeances {
-                        // Deux colonnes : les échéances, les cartes ; la page descend jusqu'à la plus longue.
-                        let gauche = (largeur * 0.38).clamp(330.0, 520.0);
-                        let haut = ui.cursor().min;
-                        let colonne = |ui: &mut egui::Ui, x: f32, l: f32| {
-                            let place = Rect::from_min_size(pos2(x, haut.y), vec2(l, 100_000.0));
-                            ui.new_child(UiBuilder::new().max_rect(place).layout(Layout::top_down(Align::Min)))
-                        };
-                        let mut ug = colonne(ui, haut.x, gauche);
-                        self.centre.echeances_carte(&mut ug, &aujourdhui);
-                        let reste = largeur - gauche - ECART;
-                        let mut ud = colonne(ui, haut.x + gauche + ECART, reste);
-                        self.centre.panneau_cartes(&mut ud, &aujourdhui, &heure, colonnes_pour(reste));
-                        ui.advance_cursor_after_rect(ug.min_rect().union(ud.min_rect()));
-                    } else {
-                        if echeances {
-                            self.centre.echeances_carte(ui, &aujourdhui);
-                            ui.add_space(ECART);
-                        }
-                        self.centre.panneau_cartes(ui, &aujourdhui, &heure, colonnes_pour(largeur));
-                    }
-                });
+        let mut page = egui::ScrollArea::vertical().id_salt("tableau-de-bord").auto_shrink([false, false]);
+        // Un défilement demandé (l'essai du thème, pour montrer le bas de la page) : une fois.
+        if let Some(y) = ui.ctx().data_mut(|d| d.remove_temp::<f32>(egui::Id::unique(DEFILEMENT))) {
+            page = page.vertical_scroll_offset(y);
+        }
+        let sortie = page.show(ui, |ui| {
+            egui::Frame::new().inner_margin(Margin { left: 24, right: 24, top: 22, bottom: 30 }).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                self.banniere(ui, &aujourdhui, &horodatage);
+                ui.add_space(ECART);
+                self.page_du_tableau(ui, &aujourdhui, &heure);
             });
+        });
         // Défilée, la page s'estompe sous la barre au lieu d'y être coupée net.
         if sortie.state.clamped_offset().y > 1.0 {
             fondu(ui.painter(), Rect::from_min_size(zone.min, vec2(zone.width(), 24.0)));
@@ -1535,7 +1907,9 @@ impl Fenetre {
         let taille = if large > l { (30.0 * l / large).max(22.0) } else { 30.0 };
         let g_salut = p.layout(salut, gras(taille), Color32::WHITE, l);
         let date = casse_de_phrase(&ambiance::date_longue(aujourdhui));
-        let date = format!("{date} · {}", ambiance::heure_de_veille(horodatage));
+        // L'heure comme le tableau la dit partout : « 8 h 12 », « 17 h ».
+        let heure = crate::centre::heure_parlee(&horodatage.get(11..16).unwrap_or("").replace('-', ":"));
+        let date = format!("{date} · {heure}");
         let g_date = p.layout_no_wrap(date, FontId::proportional(15.0), Color32::from_white_alpha(220));
         let g_etat = ligne_de_l_etat(p, self.champ("libelle"), self.champ("aide"), l - 44.0);
         let h_pilule = g_etat.size().y + 12.0;
@@ -1749,6 +2123,16 @@ pub(crate) fn contexte() -> Option<egui::Context> {
     super::CONTEXTE.get().cloned()
 }
 
+/// Où le tableau de bord prend un défilement demandé.
+const DEFILEMENT: &str = "defilement-du-tableau-demande";
+
+/// Fait défiler le tableau de bord jusqu'à `y` points du haut de sa page, à l'image suivante : l'essai du thème montre
+/// ainsi le bas de la page, que sa fenêtre ne voit pas.
+pub(crate) fn defiler_le_tableau(ctx: &egui::Context, y: f32) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique(DEFILEMENT), y));
+    ctx.request_repaint();
+}
+
 #[cfg(test)]
 mod essais {
     use super::*;
@@ -1852,6 +2236,8 @@ mod essais {
         assert_eq!(casse_de_phrase(&ambiance::date_longue("2026-10-24")), "Samedi 24 octobre");
         assert_eq!(casse_de_phrase("L'ENCAISSE EN VIENT"), "L'encaisse en vient");
         assert_eq!(casse_de_phrase(""), "");
+        // Un montant garde ses capitales : « 1,25 M$ », pas « 1,25 m$ ».
+        assert_eq!(casse_de_phrase("PIPELINE · 1,25\u{a0}M$"), "Pipeline · 1,25\u{a0}M$");
         assert_eq!(salut_du_moment(8), "Bonjour");
         assert_eq!(salut_du_moment(14), "Bon après-midi");
         assert_eq!(salut_du_moment(20), "Bonsoir");
@@ -1864,6 +2250,17 @@ mod essais {
         assert_eq!(colonnes_pour(LARGEUR_DE_CARTE * 2.0 + ECART), 2);
         assert_eq!(colonnes_pour(LARGEUR_DE_CARTE * 2.0 + ECART - 1.0), 1);
         assert_eq!(colonnes_pour(2000.0), 3);
+    }
+
+    #[test]
+    fn six_tuiles_sur_une_rangee_des_qu_elles_y_tiennent_serrees() {
+        assert_eq!(tuiles_par_rangee(6, 1030.0), 6, "la fenêtre d'office : six tuiles serrées");
+        assert_eq!(tuiles_par_rangee(6, 6.0 * LARGEUR_DE_TUILE_SERREE + 5.0 * ECART), 6);
+        assert_eq!(tuiles_par_rangee(6, 6.0 * LARGEUR_DE_TUILE_SERREE + 5.0 * ECART - 1.0), 3);
+        assert_eq!(tuiles_par_rangee(6, 3.0 * LARGEUR_DE_TUILE + 2.0 * ECART - 1.0), 2);
+        assert_eq!(tuiles_par_rangee(6, 300.0), 1);
+        assert_eq!(tuiles_par_rangee(2, 400.0), 2);
+        assert_eq!(tuiles_par_rangee(0, 400.0), 1);
     }
 
     #[test]

@@ -17,6 +17,8 @@
 //!   chacun avec sa conversation ;
 //! - **Constructo AI** (le privilège `constructo`) : la connexion de cette Eve à l'ERP ([`connexion`]), son
 //!   renouvellement, et son branchement dans Claude Code, au lancement et à chaque jeton neuf ;
+//! - **le tableau de bord de l'entreprise** ([`entreprise`]) : une lecture de l'ERP au démarrage, toutes les dix
+//!   minutes et à la demande, dans un fil, avec le jeton d'accès du moment ; `entreprise.json`, que lui seul écrit ;
 //! - **la mise à jour** ([`mise_a_jour`]) : une relance demandée attend la fin du tour, puis le gardien prend le relais
 //!   et Eve se ferme ; la marque de santé, cinq secondes après le démarrage, la fenêtre ouverte.
 
@@ -36,6 +38,7 @@ use serde_json::{Value, json};
 use crate::cerveau::{self, Cerveau, Lancement};
 use crate::connexion::{self, EnCours, Etat as Connexion, Lien, Refus, Retour};
 use crate::ecran::{self, Ecran};
+use crate::entreprise::{self, Entreprise, Lecture, Panne};
 use crate::fenetre;
 use crate::historique::{self, Entree};
 use crate::journal;
@@ -135,6 +138,14 @@ pub enum Evt {
     Connexion {
         tour: u64,
         etape: EtapeConnexion,
+    },
+    /// Une lecture de l'ERP pour le tableau de bord a fini, dans son fil ; `tour` : le tour de connexion qui l'a lancée
+    /// (une déconnexion entre-temps l'écarte) ; `emis` : l'émission du jeton qui a servi.
+    Entreprise {
+        tour: u64,
+        emis: u64,
+        duree: Duration,
+        issue: Result<Lecture, Panne>,
     },
 }
 
@@ -558,6 +569,16 @@ pub struct Chef {
     branchement: Option<Branchement>,
     constructo_branche: bool,
     constructo_erreur: Option<String>,
+    // Le tableau de bord de l'entreprise ([`entreprise`]) : ce que dit `entreprise.json` (le chef seul l'écrit) ; une
+    // lecture à la fois, dans un fil ; la prochaine (`None` : dès que possible) et l'attente après une panne ; le jeton
+    // qu'une lecture a vu refusé (son émission : la suivante attend un autre jeton), et quand ce refus a fait demander
+    // un jeton neuf.
+    entreprise: Entreprise,
+    entreprise_occupee: bool,
+    entreprise_a: Option<Instant>,
+    entreprise_delai: Duration,
+    entreprise_refuse: Option<u64>,
+    entreprise_renouvelee: Option<Instant>,
     /// Le dossier porte sa propre consigne (`EVE_CONSIGNE.md`, un poste d'architecture) : ce n'est pas l'Adjointe de la
     /// trousse — ni la base d'Entrepreneur Général, ni le `Scan\` où classer une numérisation.
     propre: bool,
@@ -777,6 +798,12 @@ impl Chef {
             branchement: None,
             constructo_branche: false,
             constructo_erreur: None,
+            entreprise: entreprise::charger(&dossier_local()),
+            entreprise_occupee: false,
+            entreprise_a: None,
+            entreprise_delai: entreprise::APRES_UNE_PANNE,
+            entreprise_refuse: None,
+            entreprise_renouvelee: None,
             propre,
             profil,
             laisses: Laisses::default(),
@@ -894,6 +921,11 @@ impl Chef {
             if std::env::var_os("EVE_RELIER_CONSTRUCTO").is_some() {
                 chef.connecter();
             }
+        }
+        // Sans connexion, le tableau de bord ne montre rien de l'entreprise : pas une lecture d'avant comme si Eve y
+        // était reliée. Reliée, elle relit l'ERP dès que son jeton d'accès vaut (`lire_l_entreprise`).
+        if !chef.espace.constructo || !chef.connexion.connectee() {
+            chef.montrer_l_entreprise(Entreprise::non_connecte(chef.espace.constructo));
         }
         chef
     }
@@ -1044,6 +1076,7 @@ impl Chef {
             }
             Evt::Retour(r) => self.retour_de_connexion(r),
             Evt::Connexion { tour, etape } => self.etape_de_connexion(tour, etape),
+            Evt::Entreprise { tour, emis, duree, issue } => self.entreprise_lue(tour, emis, duree, issue),
         }
     }
 
@@ -1085,6 +1118,10 @@ impl Chef {
             // Le thème de la fenêtre native, choisi dans ses réglages : l'un de ceux qu'elle offre.
             ("theme", Some(t)) if crate::reglages::THEMES.iter().any(|x| x.0 == t) => {
                 self.changer_reglage("theme", json!(t))
+            }
+            // Ce que montre le tableau de bord (« Tout », « Entreprise », « Famille »), choisi en haut du tableau.
+            ("vue_du_tableau", Some(v)) if crate::reglages::VUES_DU_TABLEAU.iter().any(|x| x.0 == v) => {
+                self.changer_reglage("vue_du_tableau", json!(v))
             }
             // Un profil, choisi dans le menu de la barre ou dans les réglages (son nom ; celui d'office y ramène).
             ("profil", Some(nom)) => self.choisir_le_profil(nom),
@@ -1133,6 +1170,8 @@ impl Chef {
             // Le bouton des réglages : « Se connecter à Constructo AI » (déjà reliée : rebrancher), « Se déconnecter ».
             ("constructo_connecter", _) => self.connecter(),
             ("constructo_deconnecter", _) => self.deconnecter(),
+            // Le tableau de bord : « Actualiser » — l'ERP relu tout de suite.
+            ("entreprise_lire", _) => self.actualiser_l_entreprise(),
             ("navigateur_erreur", Some(e)) => self.systeme(&format!("Le navigateur ne s'ouvre pas : {e}")),
             ("fenetre_fermee", _) => self.fenetre_fermee = true,
             ("quitter", _) => self.quitter = true,
@@ -1731,6 +1770,9 @@ impl Chef {
                     let au_compte = if compte.is_empty() { String::new() } else { format!(" (compte {compte})") };
                     self.systeme(&format!("Eve est reliée à Constructo AI{au_compte}."));
                     self.dire("Je suis reliée à Constructo AI.");
+                    // Le tableau de bord lit l'entreprise aussitôt.
+                    self.entreprise_a = None;
+                    self.entreprise_delai = entreprise::APRES_UNE_PANNE;
                 } else {
                     journal::ecrire("jeton de Constructo AI renouvelé");
                 }
@@ -1782,6 +1824,11 @@ impl Chef {
         self.connexion_en_cours = None;
         self.constructo_erreur = None;
         self.constructo_branche = false;
+        // Le tableau de bord n'a plus rien de l'entreprise ; une lecture en route sera écartée (son tour est passé).
+        self.entreprise_occupee = false;
+        self.entreprise_a = None;
+        self.entreprise_refuse = None;
+        self.montrer_l_entreprise(Entreprise::non_connecte(true));
         if self.init_ok {
             self.branchement = None;
             if let Some(Err(e)) = self.cerveau.as_ref().map(|c| c.brancher_mcp(self.lien.serveurs_mcp(None))) {
@@ -1960,6 +2007,109 @@ impl Chef {
             "erreur": self.constructo_erreur,
             "detail": detail,
         })
+    }
+
+    // ---- Le tableau de bord de l'entreprise ---------------------------------------------------------------------
+
+    /// `entreprise.json` prend `e`, d'un geste — s'il change : le tableau de bord le relit quand il change.
+    fn montrer_l_entreprise(&mut self, e: Entreprise) {
+        if e == self.entreprise {
+            return;
+        }
+        if let Err(err) = entreprise::ecrire(&dossier_local(), &e) {
+            journal::ecrire(&format!("tableau de bord : {err}"));
+        }
+        self.entreprise = e;
+    }
+
+    /// Au battement : une lecture de l'ERP pour le tableau de bord, quand elle est due — dès que la connexion vaut au
+    /// démarrage, toutes les dix minutes, plus tôt après une panne, aussitôt à la demande. Jamais pendant un
+    /// renouvellement, ni avec un jeton qui arrive à échéance (il mourrait en route), ni avec un jeton déjà refusé :
+    /// elle attend le suivant. Le jeton d'accès du moment part avec elle ; celui de renouvellement, jamais.
+    fn lire_l_entreprise(&mut self, maintenant: Instant) {
+        if !self.espace.constructo || self.entreprise_occupee || !self.connexion.connectee() {
+            return;
+        }
+        if self.entreprise_a.is_some_and(|t| maintenant < t) || self.entreprise_refuse == Some(self.connexion.emis) {
+            return;
+        }
+        let t = connexion::maintenant();
+        if self.connexion_occupee || !self.connexion.acces_valable(t) || self.connexion.a_renouveler(t) {
+            return;
+        }
+        self.entreprise_occupee = true;
+        self.montrer_l_entreprise(self.entreprise.en_cours());
+        let (tour, emis, rapport) = (self.connexion_tour, self.connexion.emis, self.rapport.clone());
+        let (ressource, jeton) = (self.lien.ressource(), self.connexion.acces.clone());
+        entreprise::lire_dans_un_fil(ressource, jeton, journal::date(), move |duree, issue| {
+            let _ = rapport.send(Evt::Entreprise { tour, emis, duree, issue });
+        });
+    }
+
+    /// Une lecture de l'ERP a fini : `entreprise.json` prend la nouvelle (`a_jour`), ou garde l'ancienne et dit
+    /// pourquoi (`erreur`) ; la suivante dans dix minutes, ou plus tôt après une panne (une minute, puis le double). Un
+    /// jeton refusé : la lecture attend le suivant, et si le chef croyait celui-là bon, un renouvellement tranche — au
+    /// plus un par quart d'heure : un serveur qui refuserait tout ne fait pas tourner les jetons.
+    fn entreprise_lue(&mut self, tour: u64, emis: u64, duree: Duration, issue: Result<Lecture, Panne>) {
+        if tour != self.connexion_tour {
+            journal::ecrire("tableau de bord : une lecture d'avant la déconnexion, écartée");
+            return;
+        }
+        self.entreprise_occupee = false;
+        let a = entreprise::maintenant_iso();
+        match issue {
+            Ok(l) => {
+                journal::ecrire(&format!("tableau de bord : {}", l.resume()));
+                self.entreprise_delai = entreprise::APRES_UNE_PANNE;
+                self.entreprise_a = Some(Instant::now() + entreprise::INTERVALLE);
+                self.montrer_l_entreprise(Entreprise::lue(&l, &a));
+            }
+            Err(Panne::Jeton) => {
+                journal::ecrire(&format!(
+                    "tableau de bord : Constructo AI refuse le jeton d'accès ({})",
+                    entreprise::secondes(duree)
+                ));
+                self.entreprise_refuse = Some(emis);
+                self.entreprise_a = None;
+                let message = "Constructo AI a refusé le jeton d'Eve : elle relira l'entreprise avec le suivant.";
+                self.montrer_l_entreprise(self.entreprise.manquee(message, &a));
+                let permis = self.entreprise_renouvelee.is_none_or(|t| t.elapsed() > Duration::from_secs(15 * 60));
+                if emis == self.connexion.emis
+                    && permis
+                    && !self.connexion.renouvellement.is_empty()
+                    && self.renouveler_a.is_none()
+                {
+                    self.entreprise_renouvelee = Some(Instant::now());
+                    self.connexion.expire = 0;
+                    self.renouveler();
+                }
+            }
+            Err(p) => {
+                let delai = self.entreprise_delai;
+                self.entreprise_a = Some(Instant::now() + delai);
+                self.entreprise_delai = (delai * 2).min(entreprise::INTERVALLE);
+                let minutes = delai.as_secs().div_ceil(60);
+                journal::ecrire(&format!(
+                    "tableau de bord : lecture manquée en {} — {} ; nouvel essai dans {minutes} min",
+                    entreprise::secondes(duree),
+                    p.texte()
+                ));
+                let message = format!("{}. Nouvel essai dans {minutes} min.", p.texte());
+                self.montrer_l_entreprise(self.entreprise.manquee(&message, &a));
+            }
+        }
+    }
+
+    /// « Actualiser » (le geste `entreprise_lire`) : l'ERP relu au prochain battement, si Eve y est reliée.
+    fn actualiser_l_entreprise(&mut self) {
+        if !self.espace.constructo || !self.connexion.connectee() {
+            self.systeme("Eve n'est pas reliée à Constructo AI : « Se connecter à Constructo AI », dans ses réglages.");
+            return;
+        }
+        if !self.entreprise_occupee {
+            self.entreprise_a = None;
+            self.entreprise_delai = entreprise::APRES_UNE_PANNE;
+        }
     }
 
     // ---- La parole de la personne ----------------------------------------------------------------------------
@@ -3423,6 +3573,7 @@ impl Chef {
         self.mener_la_relance(maintenant);
         self.relire_la_precedente(maintenant);
         self.surveiller_la_connexion(maintenant);
+        self.lire_l_entreprise(maintenant);
         self.relire_les_reglages();
         self.suivre_claude();
     }
@@ -4149,6 +4300,7 @@ impl Chef {
             "emotion": self.emotion.map(|(e, _)| e.nom()),
             "qui": self.reglages.qui,
             "theme": self.reglages.theme,
+            "vue_du_tableau": self.reglages.vue_du_tableau,
             // La comptabilité que lit la fenêtre (l'encaisse, les échéances fiscales) : son dossier, ou rien.
             "comptabilite": self.reglages.comptabilite,
             "nom": crate::reglages::nom_affiche(),

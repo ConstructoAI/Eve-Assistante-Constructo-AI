@@ -26,14 +26,13 @@ pub const VOCABULAIRE: &str = "Entrepreneur Général, Eve, Adjointe, chantier, 
 pub const VOIX_PAR_DEFAUT: &str = "piper:fr_FR-upmc-medium#0";
 
 /// Ce qu'Eve ne prend qu'en démarrant : son nom et celui de l'entreprise (le titre de sa fenêtre, l'amorce de
-/// l'oreille), le dossier de l'Adjointe, l'oreille et son vocabulaire, le débit, la douceur et l'inspiration de la
-/// voix, le port de la vitrine, la fenêtre, l'avance des rappels, et les privilèges de Claude — son espace d'actions se
-/// fixe au démarrage.
+/// l'oreille), le dossier de l'Adjointe, l'oreille et son vocabulaire, le débit et la douceur de la voix, le port de la
+/// vitrine, la fenêtre, l'avance des rappels, et les privilèges de Claude — son espace d'actions se fixe au démarrage.
 /// Le reste vaut tout de suite (le modèle et l'effort de Claude : entre deux demandes, la conversation reprise ; le
 /// préchauffage : à la conversation suivante).
-const AU_DEMARRAGE: [&str; 15] = [
+const AU_DEMARRAGE: [&str; 14] = [
     "nom", "entreprise", "adjointe", "oreille", "oreille_carte", "oreille_eveil", "vocabulaire", "debit", "douceur",
-    "souffle", "port", "fenetre", "fenetre_native", "alertes.minutes_avant", "privileges",
+    "port", "fenetre", "fenetre_native", "alertes.minutes_avant", "privileges",
 ];
 
 /// Une vérification de `reglages.json` au plus par seconde ([`Reglages::relire`]).
@@ -77,8 +76,6 @@ pub struct Reglages {
     /// La douceur de la voix neuronale : 0 telle quelle, 1 douce (le réglage A : une voix plus calme, des pauses un
     /// peu plus longues, les aigus adoucis), 2 plus douce encore (le réglage B).
     pub douceur: u8,
-    /// L'inspiration qu'on entend avant qu'Eve parle, très douce, au moment où son portrait inspire : éteinte d'office.
-    pub souffle: bool,
     /// Les prononciations de la personne : un mot (ou quelques mots) et ce que la voix lit à sa place (« Granby » :
     /// « Granbi »), avant la diction ([`eve::diction::avec_les_prononciations`]). `eve --prononcer` les pose, et Claude
     /// quand la personne dit qu'un mot sonne mal ; elles valent tout de suite.
@@ -100,6 +97,9 @@ pub struct Reglages {
     /// « galaxie » (le même, son réseau en Voie lactée) ou « constructo » (clair et simple, comme l'ERP de Constructo
     /// AI). Il se choisit dans ses réglages.
     pub theme: String,
+    /// Ce que montre le tableau de bord du thème « Constructo AI » ([`VUES_DU_TABLEAU`]) : « tout » (l'entreprise et la
+    /// famille côte à côte), « entreprise » ou « famille ». Il se choisit en haut du tableau et vaut tout de suite.
+    pub vue_du_tableau: String,
     /// Le dossier de la comptabilité du ménage, celui de son tableau de bord (`tableau\donnees.json`, sa forme dans
     /// `tableau\format-donnees.md`) ; vide : aucune. Nommée, elle seule donne à la fenêtre l'encaisse et les échéances
     /// fiscales, à la place de `activite\budget.js` et des échéances « fiscal » d'`activite\echeances.js`, ses copies
@@ -242,7 +242,6 @@ impl Default for Reglages {
             voix: VOIX_PAR_DEFAUT.into(),
             debit: 0.85,
             douceur: 1,
-            souffle: false,
             prononciations: BTreeMap::new(),
             touche: "ctrl_droit".into(),
             modele: "claude-sonnet-5-5".into(),
@@ -252,6 +251,7 @@ impl Default for Reglages {
             fenetre: true,
             fenetre_native: false,
             theme: "centre".into(),
+            vue_du_tableau: "tout".into(),
             comptabilite: String::new(),
             interruption: true,
             sourdine: false,
@@ -414,6 +414,10 @@ pub fn sortie_de_commande(fait: Result<String, String>) -> i32 {
 /// ([`crate::reseau::Allure`]) ; le troisième, le thème clair de l'ERP. Le premier est celui d'office.
 pub const THEMES: [(&str, &str); 3] =
     [("centre", "Réseau neuronal"), ("galaxie", "Voie lactée"), ("constructo", "Constructo AI")];
+
+/// Les vues du tableau de bord du thème « Constructo AI » (le réglage `vue_du_tableau`, le choix en haut du tableau) :
+/// leur nom, et ce que dit leur choix. La première est celle d'office.
+pub const VUES_DU_TABLEAU: [(&str, &str); 3] = [("tout", "Tout"), ("entreprise", "Entreprise"), ("famille", "Famille")];
 
 // ---- Le cerveau : le modèle et l'effort de Claude -----------------------------------------------------------------
 

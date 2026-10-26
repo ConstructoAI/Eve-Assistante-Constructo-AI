@@ -16,6 +16,7 @@
 pub(crate) mod pieces;
 pub(crate) mod portrait;
 pub(crate) mod profils;
+pub(crate) mod tableau;
 pub(crate) mod theme;
 
 use std::collections::{HashMap, VecDeque};

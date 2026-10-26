@@ -139,8 +139,9 @@ fn plus_tard(moment: &str, secondes: i64) -> Option<String> {
     Some(format!("{} {:02}:{:02}:{:02}", date_du_numero(j), s / 3600, s / 60 % 60, s % 60))
 }
 
-/// Un moment (« AAAA-MM-JJ HH:MM:SS ») en secondes depuis l'origine des numéros de jour.
-fn en_secondes(moment: &str) -> Option<i64> {
+/// Un moment (« AAAA-MM-JJ HH:MM:SS ») en secondes depuis l'origine des numéros de jour (le 1er janvier 1970) : l'heure
+/// Unix, pour un moment en temps universel. `entreprise.rs` en tire l'heure du poste avec son décalage.
+pub fn en_secondes(moment: &str) -> Option<i64> {
     let jour = numero_du_jour(moment)?;
     let champ = |a: usize, b: usize| moment.get(a..b)?.parse::<i64>().ok();
     Some(jour * 86_400 + champ(11, 13)? * 3600 + champ(14, 16)? * 60 + champ(17, 19)?)

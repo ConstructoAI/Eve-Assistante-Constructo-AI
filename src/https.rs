@@ -6,7 +6,9 @@
 //! La météo du centre de commande (`meteo.rs`) passe par `get_public` : sans jeton, sous un nom neutre — le logiciel
 //! et sa version ; un service public n'a pas à savoir pour qui Eve demande —, et sans corps compressé. La connexion à
 //! Constructo AI (`connexion.rs` : l'enregistrement d'Eve, l'échange du code, le renouvellement des jetons) passe par
-//! `post_formulaire` et `post_json`, sous le même nom neutre.
+//! `post_formulaire` et `post_json`, sous le même nom neutre ; la lecture de l'ERP pour le tableau de bord
+//! (`entreprise.rs`, une cliente MCP), par `requete` : son jeton d'accès, les en-têtes du protocole, et ceux de la
+//! réponse (la session qu'ouvre le serveur, le type de son corps).
 //!
 //! `https://` seulement — sauf `http://127.0.0.1` et `http://localhost`, qui ne quittent pas le poste : les essais de la
 //! connexion y montent un faux serveur.
@@ -20,23 +22,41 @@ const AGENT: &str = "Eve/1.0 (Entrepreneur Général)";
 /// Qui demande à un service public : le logiciel et sa version, rien de la personne ni de l'entreprise.
 const AGENT_PUBLIC: &str = concat!("Eve/", env!("CARGO_PKG_VERSION"));
 
+/// Une réponse entière : son code HTTP, ses en-têtes (leur nom en minuscules, dans l'ordre), son corps.
+#[derive(Debug, Default)]
+pub struct Reponse {
+    pub statut: u16,
+    pub entetes: Vec<(String, String)>,
+    pub corps: Vec<u8>,
+}
+
+impl Reponse {
+    /// La valeur d'un en-tête de la réponse (son nom, sans égard à la casse), s'il y est.
+    pub fn entete(&self, nom: &str) -> Option<&str> {
+        self.entetes.iter().find(|(n, _)| n.eq_ignore_ascii_case(nom)).map(|(_, v)| v.as_str())
+    }
+}
+
+/// Un jeton n'a que des caractères visibles : un retour de ligne y glisserait un autre en-tête.
+fn jeton_valable(j: &str) -> bool {
+    !j.is_empty() && j.bytes().all(|b| b.is_ascii_graphic())
+}
+
 /// `GET url` ; rend le code HTTP et le corps. `jeton` : l'en-tête `Authorization: Bearer …`.
 pub fn get(url: &str, jeton: Option<&str>, delai: Duration) -> Result<(u16, Vec<u8>), String> {
     let adresse = Adresse::lire(url)?;
-    // Un jeton d'Adjointe n'a que des caractères visibles : un retour de ligne y glisserait un autre en-tête.
-    if let Some(j) = jeton
-        && (j.is_empty() || !j.bytes().all(|b| b.is_ascii_graphic()))
-    {
+    if jeton.is_some_and(|j| !jeton_valable(j)) {
         return Err("le jeton n'a pas la forme d'un jeton : rien n'est envoyé".into());
     }
-    winhttp::envoyer("GET", &adresse, AGENT, jeton, None, true, delai)
+    winhttp::envoyer("GET", &adresse, AGENT, jeton, &[], None, true, delai).map(|r| (r.statut, r.corps))
 }
 
 /// `GET url` à un service public (la météo) : sans jeton, sous le nom `AGENT_PUBLIC`, sans suivre de redirection ;
 /// rend le code HTTP et le corps. Et sans compression : à qui offre « gzip, deflate », open-meteo répond en deflate
 /// (zlib), et WinHTTP en abandonne la lecture (E_ABORT, vu le 24 octobre 2026) ; un bulletin fait moins d'un ko.
 pub fn get_public(url: &str, delai: Duration) -> Result<(u16, Vec<u8>), String> {
-    winhttp::envoyer("GET", &Adresse::lire(url)?, AGENT_PUBLIC, None, None, false, delai)
+    winhttp::envoyer("GET", &Adresse::lire(url)?, AGENT_PUBLIC, None, &[], None, false, delai)
+        .map(|r| (r.statut, r.corps))
 }
 
 /// `POST url` d'un formulaire (`application/x-www-form-urlencoded`) : l'échange d'un code OAuth, un renouvellement.
@@ -44,21 +64,56 @@ pub fn get_public(url: &str, delai: Duration) -> Result<(u16, Vec<u8>), String> 
 pub fn post_formulaire(url: &str, champs: &[(&str, &str)], delai: Duration) -> Result<(u16, Vec<u8>), String> {
     let corps = champs.iter().map(|(n, v)| format!("{}={}", encoder(n), encoder(v))).collect::<Vec<_>>().join("&");
     let corps = Some(("application/x-www-form-urlencoded", corps.as_bytes()));
-    winhttp::envoyer("POST", &Adresse::lire(url)?, AGENT_PUBLIC, None, corps, false, delai)
+    winhttp::envoyer("POST", &Adresse::lire(url)?, AGENT_PUBLIC, None, &[], corps, false, delai)
+        .map(|r| (r.statut, r.corps))
 }
 
 /// `POST url` d'un objet JSON : l'enregistrement d'Eve auprès du serveur OAuth.
 pub fn post_json(url: &str, corps: &serde_json::Value, delai: Duration) -> Result<(u16, Vec<u8>), String> {
     let octets = corps.to_string().into_bytes();
-    winhttp::envoyer(
-        "POST",
-        &Adresse::lire(url)?,
-        AGENT_PUBLIC,
-        None,
-        Some(("application/json", &octets)),
-        false,
-        delai,
-    )
+    let corps = Some(("application/json", octets.as_slice()));
+    winhttp::envoyer("POST", &Adresse::lire(url)?, AGENT_PUBLIC, None, &[], corps, false, delai)
+        .map(|r| (r.statut, r.corps))
+}
+
+/// Une requête avec un jeton d'accès (« Bearer ») et des en-têtes de plus — le connecteur MCP de Constructo AI
+/// (`entreprise.rs` : un POST JSON-RPC, le DELETE qui ferme sa session) : `verbe`, un `corps` (son type et ses octets)
+/// s'il en a un. Sous le nom neutre, sans compression, sans suivre de redirection (le jeton n'irait nulle part
+/// ailleurs) ; rend la réponse entière, ses en-têtes compris. Un jeton ou un en-tête qui glisserait une ligne de plus
+/// est refusé avant tout envoi, et l'erreur ne le répète pas.
+pub fn requete(
+    verbe: &str,
+    url: &str,
+    jeton: &str,
+    entetes: &[(&str, &str)],
+    corps: Option<(&str, &[u8])>,
+    delai: Duration,
+) -> Result<Reponse, String> {
+    let adresse = Adresse::lire(url)?;
+    if verbe.is_empty() || !verbe.bytes().all(|b| b.is_ascii_uppercase()) {
+        return Err("verbe HTTP refusé".into());
+    }
+    if !jeton_valable(jeton) {
+        return Err("le jeton n'a pas la forme d'un jeton : rien n'est envoyé".into());
+    }
+    let nom_valable = |n: &str| !n.is_empty() && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    let valeur_valable = |v: &str| v.bytes().all(|b| b == b' ' || b.is_ascii_graphic());
+    if !entetes.iter().all(|(n, v)| nom_valable(n) && valeur_valable(v)) {
+        return Err("un en-tête n'a pas la forme d'un en-tête : rien n'est envoyé".into());
+    }
+    winhttp::envoyer(verbe, &adresse, AGENT_PUBLIC, Some(jeton), entetes, corps, false, delai)
+}
+
+/// Les en-têtes bruts d'une réponse (« HTTP/1.1 200 OK\r\nContent-Type: …\r\n… ») : la ligne d'état sautée, chaque nom
+/// en minuscules, sa valeur ébarbée.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn lire_entetes(brut: &str) -> Vec<(String, String)> {
+    brut.split("\r\n")
+        .skip(1)
+        .filter_map(|l| l.split_once(':'))
+        .map(|(n, v)| (n.trim().to_ascii_lowercase(), v.trim().to_string()))
+        .filter(|(n, _)| !n.is_empty())
+        .collect()
 }
 
 /// Le codage d'une valeur de formulaire ou d'adresse (`application/x-www-form-urlencoded`, RFC 3986 : les caractères
@@ -138,7 +193,7 @@ mod winhttp {
     use windows::Win32::Networking::WinHttp::*;
     use windows::core::PCWSTR;
 
-    use super::{Adresse, CORPS_MAX, effacer};
+    use super::{Adresse, CORPS_MAX, Reponse, effacer, lire_entetes};
 
     /// Un handle WinHTTP (session, connexion, requête), fermé à la sortie quoi qu'il arrive.
     struct Poignee(*mut c_void);
@@ -202,16 +257,19 @@ mod winhttp {
         }
     }
 
-    /// Une requête : `verbe`, et un `corps` (son type et ses octets) pour un POST.
+    /// Une requête : `verbe`, des en-têtes de plus (ils remplacent ceux d'office du même nom), et un `corps` (son type
+    /// et ses octets) pour un POST.
+    #[allow(clippy::too_many_arguments)]
     pub fn envoyer(
         verbe: &str,
         a: &Adresse,
         agent: &str,
         jeton: Option<&str>,
+        plus: &[(&str, &str)],
         corps: Option<(&str, &[u8])>,
         compression: bool,
         delai: Duration,
-    ) -> Result<(u16, Vec<u8>), String> {
+    ) -> Result<Reponse, String> {
         let agent = large(agent);
         // SAFETY : l'agent est une chaîne terminée par un zéro qui vit jusqu'au retour ; le proxy automatique ne prend
         // ni nom de proxy ni liste d'exceptions (deux pointeurs nuls) ; le handle rendu est gardé par `Poignee`.
@@ -274,6 +332,11 @@ mod winhttp {
         let entetes: Vec<u16> = "Accept: application/json\r\nCache-Control: no-cache\r\n".encode_utf16().collect();
         // SAFETY : `requete` est ouverte ; la longueur des en-têtes est passée avec eux (pas de zéro final requis).
         unsafe { WinHttpAddRequestHeaders(requete.0, &entetes, ajout) }.map_err(|e| erreur("en-têtes", code(&e)))?;
+        for (nom, valeur) in plus {
+            let ligne: Vec<u16> = format!("{nom}: {valeur}\r\n").encode_utf16().collect();
+            // SAFETY : comme ci-dessus ; le nom et la valeur sont vérifiés par l'appelant (`requete`).
+            unsafe { WinHttpAddRequestHeaders(requete.0, &ligne, ajout) }.map_err(|e| erreur("en-têtes", code(&e)))?;
+        }
         if let Some(j) = jeton {
             let mut acces: Vec<u16> = "Authorization: Bearer ".encode_utf16().chain(j.encode_utf16()).collect();
             // SAFETY : comme ci-dessus.
@@ -318,6 +381,36 @@ mod winhttp {
         }
         .map_err(|e| erreur("code de la réponse", code(&e)))?;
 
+        // Les en-têtes de la réponse, en deux temps : leur taille (l'appel échoue en la disant), puis leur texte.
+        let mut taille: u32 = 0;
+        // SAFETY : sans tampon, WinHTTP n'écrit que la taille voulue dans `taille`, qui vit pendant l'appel.
+        let _ = unsafe {
+            WinHttpQueryHeaders(
+                requete.0,
+                WINHTTP_QUERY_RAW_HEADERS_CRLF,
+                PCWSTR::null(),
+                None,
+                &mut taille,
+                std::ptr::null_mut(),
+            )
+        };
+        let mut brut = vec![0u16; (taille as usize).div_ceil(2) + 1];
+        let mut taille = (brut.len() * 2) as u32;
+        // SAFETY : le tampon fait `taille` octets et vit pendant l'appel ; aucun nom, aucun index.
+        let entetes = match unsafe {
+            WinHttpQueryHeaders(
+                requete.0,
+                WINHTTP_QUERY_RAW_HEADERS_CRLF,
+                PCWSTR::null(),
+                Some(brut.as_mut_ptr().cast()),
+                &mut taille,
+                std::ptr::null_mut(),
+            )
+        } {
+            Ok(()) => lire_entetes(&String::from_utf16_lossy(&brut[..(taille as usize / 2).min(brut.len())])),
+            Err(_) => Vec::new(),
+        };
+
         let mut corps: Vec<u8> = Vec::new();
         loop {
             let mut dispo: u32 = 0;
@@ -340,7 +433,7 @@ mod winhttp {
                 break;
             }
         }
-        Ok((u16::try_from(statut).unwrap_or(0), corps))
+        Ok(Reponse { statut: u16::try_from(statut).unwrap_or(0), entetes, corps })
     }
 }
 
@@ -348,17 +441,19 @@ mod winhttp {
 mod winhttp {
     use std::time::Duration;
 
-    use super::Adresse;
+    use super::{Adresse, Reponse};
 
+    #[allow(clippy::too_many_arguments)]
     pub fn envoyer(
         _verbe: &str,
         _a: &Adresse,
         _agent: &str,
         _jeton: Option<&str>,
+        _plus: &[(&str, &str)],
         _corps: Option<(&str, &[u8])>,
         _compression: bool,
         _delai: Duration,
-    ) -> Result<(u16, Vec<u8>), String> {
+    ) -> Result<Reponse, String> {
         Err("le HTTPS passe par WinHTTP : Windows seulement".into())
     }
 }
@@ -433,6 +528,32 @@ mod essais {
         assert!(AGENT_PUBLIC.starts_with("Eve/"), "{AGENT_PUBLIC}");
         assert!(AGENT_PUBLIC.bytes().all(|b| b.is_ascii_alphanumeric() || b"/.-".contains(&b)), "{AGENT_PUBLIC}");
         assert!(get_public("http://api.open-meteo.com/v1/forecast", Duration::from_secs(1)).is_err());
+    }
+
+    /// Une requête à jeton (le connecteur MCP) refuse, avant tout envoi, un jeton ou un en-tête qui glisseraient une
+    /// ligne de plus, un nom d'en-tête qui n'en est pas un, un verbe inconnu — et l'erreur ne les répète pas.
+    #[test]
+    fn une_requete_refuse_ce_qui_glisserait_une_ligne() {
+        let (d, url) = (Duration::from_secs(1), "https://exemple.invalid/mcp");
+        let e = requete("POST", url, "jeton\r\nX-Autre: 1", &[], None, d).unwrap_err();
+        assert!(!e.contains("X-Autre"), "{e}");
+        let e = requete("POST", url, "jeton", &[("Mcp-Session-Id", "abc\r\nX-Autre: 1")], None, d).unwrap_err();
+        assert!(!e.contains("X-Autre"), "{e}");
+        assert!(requete("POST", url, "jeton", &[("Nom faux", "x")], None, d).is_err());
+        assert!(requete("POST", url, "", &[], None, d).is_err());
+        assert!(requete("post", url, "jeton", &[], None, d).is_err());
+        assert!(requete("POST", "http://exemple.ca/mcp", "jeton", &[], None, d).is_err(), "https seulement");
+    }
+
+    /// Les en-têtes d'une réponse : la ligne d'état sautée, les noms en minuscules, les valeurs ébarbées.
+    #[test]
+    fn les_entetes_d_une_reponse_se_lisent() {
+        let e = lire_entetes("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nmcp-session-id:  abc-123 \r\n\r\n");
+        let attendu = [("content-type", "text/event-stream"), ("mcp-session-id", "abc-123")];
+        assert_eq!(e, attendu.map(|(n, v)| (n.to_string(), v.to_string())).to_vec());
+        let r = Reponse { statut: 200, entetes: e, corps: Vec::new() };
+        assert_eq!(r.entete("Mcp-Session-Id"), Some("abc-123"));
+        assert_eq!(r.entete("location"), None);
     }
 
     #[test]

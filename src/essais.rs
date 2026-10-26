@@ -23,8 +23,8 @@
 //!   et MCP), pour essayer la connexion d'Eve sans jamais toucher au vrai ;
 //! - `eve --essai-cadre [--captures DOSSIER]` : la barre de titre d'Eve, sur la vraie fenêtre, mise à l'épreuve comme
 //!   Windows le ferait ;
-//! - `eve --essai-theme [dossier] [--captures DOSSIER]` : la fenêtre native dans le thème « Constructo AI », sur un état
-//!   et des panneaux inventés, ses scènes capturées ;
+//! - `eve --essai-theme [dossier] [--captures DOSSIER] [--scenes A,B…]` : la fenêtre native dans le thème « Constructo
+//!   AI », sur un état, des panneaux et une entreprise inventés, ses scènes capturées ;
 //! - `eve --essai-pieces [--captures DOSSIER] [--sans-selecteur]` : les pièces jointes de la fenêtre native, déposées,
 //!   refusées, retirées, choisies par le trombone, sur des fichiers inventés ; et celle de la page ;
 //! - `eve --essai-profils [--captures DOSSIER]` : le menu des profils de la barre et la rubrique « Profil » des
@@ -3883,13 +3883,16 @@ mod essais_de_l_historique {
 
 // ---- Constructo AI : un faux serveur, pour essayer la connexion d'Eve -------------------------------------------------
 
-/// `eve --essai-constructo [port] [--duree secondes] [--outils N] [--reveil secondes]` : le faux Constructo AI
-/// ([`FauxConstructo`]), sur le poste, jusqu'à Ctrl+C (le port 47997 d'office ; des jetons d'accès d'une heure, d'une
-/// minute au moins). Une Eve d'essai s'y relie avec `EVE_CONSTRUCTO_MCP=http://127.0.0.1:<port>`, et
-/// `EVE_SANS_NAVIGATEUR=1` : elle joue alors elle-même la page de connexion, sans ouvrir de navigateur. `--outils N` : N
-/// lectures de plus, pour mesurer ce que coûtent des centaines d'outils ; `--reveil S` : son connecteur MCP dort, comme
-/// le vrai sur Render — la première requête le réveille, et toutes attendent S secondes (mesuré le 24 octobre 2026 :
-/// avec 40 s, Claude Code attend, `MCP_TIMEOUT` aidant). Chaque requête s'imprime — jamais un jeton.
+/// `eve --essai-constructo [port] [--duree secondes] [--outils N] [--reveil secondes] [--panne outil]… [--rediriger]` :
+/// le faux Constructo AI ([`FauxConstructo`]), sur le poste, jusqu'à Ctrl+C (le port 47997 d'office ; des jetons
+/// d'accès d'une heure, d'une minute au moins). Une Eve d'essai s'y relie avec
+/// `EVE_CONSTRUCTO_MCP=http://127.0.0.1:<port>`, et `EVE_SANS_NAVIGATEUR=1` : elle joue alors elle-même la page de
+/// connexion, sans ouvrir de navigateur ; son tableau de bord y lit une entreprise inventée. `--outils N` : N lectures
+/// de plus, pour mesurer ce que coûtent des centaines d'outils ; `--reveil S` : son connecteur MCP dort, comme le vrai
+/// sur Render — la première requête le réveille, et toutes attendent S secondes (mesuré le 24 octobre 2026 : avec
+/// 40 s, Claude Code attend, `MCP_TIMEOUT` aidant) ; `--panne outil` : cet outil rend le texte d'erreur du vrai ;
+/// `--rediriger` : « /mcp » renvoie vers « /mcp/ », comme le `Mount` de Starlette. Chaque requête s'imprime — jamais
+/// un jeton.
 pub fn constructo(args: &[String]) -> i32 {
     let nombre = |nom: &str| {
         args.iter().position(|a| a == nom).and_then(|i| args.get(i + 1)).and_then(|v| v.parse::<u64>().ok())
@@ -3906,6 +3909,16 @@ pub fn constructo(args: &[String]) -> i32 {
     };
     if let Some(s) = nombre("--reveil") {
         faux.endormir(s.min(300));
+    }
+    for (i, a) in args.iter().enumerate() {
+        if a == "--panne"
+            && let Some(outil) = args.get(i + 1)
+        {
+            faux.faire_echouer(outil);
+        }
+    }
+    if args.iter().any(|a| a == "--rediriger") {
+        faux.rediriger();
     }
     println!(
         "faux Constructo AI : http://127.0.0.1:{} — des jetons de {duree} s, {} outils ; Ctrl+C l'arrête.\n\
@@ -3930,7 +3943,7 @@ pub use faux_constructo::demander_sans_suivre;
 pub use faux_constructo::{FauxConstructo, jouer_le_navigateur};
 
 mod faux_constructo {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::io::{self, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::{Arc, Mutex};
@@ -3939,6 +3952,7 @@ mod faux_constructo {
 
     use serde_json::{Value, json};
 
+    use crate::centre::{date_du_numero, numero_du_jour};
     use crate::connexion::{b64url, defi, maintenant};
     use crate::ecran::{decoder, jeton_aleatoire};
     use crate::https::encoder;
@@ -3946,9 +3960,52 @@ mod faux_constructo {
     /// Un outil du faux serveur : son nom, sa description, ses paramètres (et leur type), ceux qu'il exige.
     type Outil = (&'static str, &'static str, &'static [(&'static str, &'static str)], &'static [&'static str]);
 
-    /// Les outils du faux serveur : deux lectures, et trois écritures qu'Eve doit faire confirmer avant qu'elles
-    /// n'arrivent ici.
-    pub const OUTILS: [Outil; 5] = [
+    /// Les outils du faux serveur : les lectures du tableau de bord d'Eve (`entreprise.rs`), deux autres lectures, et
+    /// trois écritures qu'Eve doit faire confirmer avant qu'elles n'arrivent ici.
+    pub const OUTILS: [Outil; 18] = [
+        ("tableau_kpis", "KPIs consolidés du tableau de bord. Lecture seule.", &[("periode_jours", "integer")], &[]),
+        ("tableau_alertes", "Alertes opérationnelles consolidées. Lecture seule.", &[], &[]),
+        (
+            "tableau_factures_agees",
+            "Balance âgée des comptes clients. Lecture seule.",
+            &[("inclure_detail", "boolean"), ("limite", "integer")],
+            &[],
+        ),
+        ("tableau_pipeline_ventes", "Pipeline commercial par statut. Lecture seule.", &[], &[]),
+        (
+            "lister_projets",
+            "Liste les projets de construction.",
+            &[("statut", "string"), ("client_id", "integer"), ("recherche", "string"), ("limite", "integer")],
+            &[],
+        ),
+        (
+            "lister_devis",
+            "Liste les devis/soumissions (pipeline de ventes).",
+            &[("statut", "string"), ("client_company_id", "integer"), ("recherche", "string"), ("limite", "integer")],
+            &[],
+        ),
+        (
+            "suivi_lister_notes_calendrier",
+            "Liste les notes libres du calendrier (post-it PARTAGES). Lecture.",
+            &[("date_debut", "string"), ("date_fin", "string"), ("limite", "integer")],
+            &[],
+        ),
+        ("banque_lister_comptes", "Liste les comptes bancaires lies.", &[("inclure_inactifs", "boolean")], &[]),
+        ("conformite_expirations", "Elements de conformite qui expirent.", &[("jours", "integer")], &[]),
+        (
+            "lister_pointages",
+            "Liste les entrees de pointage.",
+            &[("employee_id", "integer"), ("date_debut", "string"), ("date_fin", "string"), ("limite", "integer")],
+            &[],
+        ),
+        (
+            "lister_bons_commande",
+            "Liste les bons de commande (purchase orders).",
+            &[("statut", "string"), ("limite", "integer")],
+            &[],
+        ),
+        ("lister_bons_achat", "Liste les bons d'achat.", &[("statut", "string"), ("limite", "integer")], &[]),
+        ("lister_livraisons", "Liste les livraisons de chantier.", &[("statut", "string"), ("limite", "integer")], &[]),
         ("whoami_tenant", "Le tenant de la connexion.", &[], &[]),
         ("lister_factures", "Liste les factures (statut, client, solde).", &[("statut", "string")], &[]),
         (
@@ -3971,8 +4028,11 @@ mod faux_constructo {
     /// dynamique, PKCE S256 obligatoire, la `resource` exacte, un code à usage unique, un jeton de renouvellement qui
     /// TOURNE, et dont la réutilisation révoque toute la famille ; l'ancien jeton d'accès meurt au renouvellement —, mais
     /// sa page de connexion n'existe pas : `/authorize` accorde aussitôt (l'entreprise « tenant_essai », le compte
-    /// info@exemple.ca). Repris du `faux_constructo.py` de l'édition Constructo d'Eve. Son journal dit chaque requête,
-    /// jamais un jeton.
+    /// info@exemple.ca). Repris du `faux_constructo.py` de l'édition Constructo d'Eve. Son connecteur parle comme celui
+    /// du vrai (`StreamableHTTPSessionManager`, `stateless=False`, `json_response=False`) : une session par
+    /// `initialize` (`Mcp-Session-Id`), exigée ensuite, fermée par un DELETE ; des réponses en SSE à qui les accepte ;
+    /// et ses outils de lecture rendent les formes de `mcp_server.py`, sur une entreprise inventée. Son journal dit
+    /// chaque requête, jamais un jeton.
     pub struct FauxConstructo {
         pub port: u16,
         etat: Arc<Mutex<Faux>>,
@@ -3999,6 +4059,11 @@ mod faux_constructo {
         acces: HashMap<String, u64>,
         /// Les jetons de renouvellement : le client, et s'ils sont révoqués.
         renouvellements: HashMap<String, (String, bool)>,
+        /// Les sessions MCP ouvertes ; les outils qui rendent le texte d'erreur du vrai ; « /mcp » qui renvoie vers
+        /// « /mcp/ ».
+        sessions: HashSet<String>,
+        pannes: HashSet<String>,
+        rediriger: bool,
         journal: Vec<String>,
     }
 
@@ -4032,6 +4097,9 @@ mod faux_constructo {
                 codes: HashMap::new(),
                 acces: HashMap::new(),
                 renouvellements: HashMap::new(),
+                sessions: HashSet::new(),
+                pannes: HashSet::new(),
+                rediriger: false,
                 journal: vec![format!("démarrage : port {port}, des jetons de {duree} s")],
             }));
             let sommeil = Arc::new(Mutex::new(Sommeil::default()));
@@ -4062,6 +4130,28 @@ mod faux_constructo {
                 f.noter(format!("endormi : le connecteur se réveillera {secondes} s après sa première requête"));
             }
         }
+
+        /// Cet outil rend désormais le texte d'erreur du vrai (« Erreur lors de la lecture … (voir logs serveur). »).
+        pub fn faire_echouer(&self, outil: &str) {
+            if let Ok(mut f) = self.etat.lock() {
+                f.pannes.insert(outil.to_string());
+                f.noter(format!("panne : {outil} rendra une erreur"));
+            }
+        }
+
+        /// « /mcp » renvoie désormais vers « /mcp/ » (un 307), comme le `Mount("/mcp")` de Starlette.
+        pub fn rediriger(&self) {
+            if let Ok(mut f) = self.etat.lock() {
+                f.rediriger = true;
+                f.noter("redirection : /mcp renvoie vers /mcp/".into());
+            }
+        }
+
+        /// Les sessions MCP encore ouvertes.
+        #[cfg(test)]
+        pub fn sessions(&self) -> usize {
+            self.etat.lock().map(|f| f.sessions.len()).unwrap_or(0)
+        }
     }
 
     fn servir(mut flux: TcpStream, etat: &Mutex<Faux>, sommeil: &Mutex<Sommeil>) -> io::Result<()> {
@@ -4070,7 +4160,7 @@ mod faux_constructo {
         let (chemin, parametres) = requete.cible.split_once('?').unwrap_or((requete.cible.as_str(), ""));
         // Endormi : une requête au connecteur attend son réveil (le verrou ne se tient pas pendant l'attente).
         let reveil = match sommeil.lock() {
-            Ok(mut s) if chemin == "/mcp" && s.duree > 0 => {
+            Ok(mut s) if chemin.starts_with("/mcp") && s.duree > 0 => {
                 let duree = Duration::from_secs(s.duree);
                 Some(*s.reveil.get_or_insert_with(|| Instant::now() + duree))
             }
@@ -4082,9 +4172,8 @@ mod faux_constructo {
                 f.noter("une requête au connecteur a attendu son réveil".into());
             }
         }
-        let porteur = requete.entetes.iter().find(|(n, _)| n == "authorization").map(|(_, v)| v.as_str()).unwrap_or("");
         let reponse = match etat.lock() {
-            Ok(mut f) => f.repondre(&requete.methode, chemin, parametres, porteur, &requete.corps),
+            Ok(mut f) => f.repondre(&requete, chemin, parametres),
             Err(_) => vide(500),
         };
         let Reponse(code, sorte, plus, corps) = reponse;
@@ -4093,6 +4182,7 @@ mod faux_constructo {
             201 => "Created",
             202 => "Accepted",
             302 => "Found",
+            307 => "Temporary Redirect",
             400 => "Bad Request",
             401 => "Unauthorized",
             404 => "Not Found",
@@ -4119,6 +4209,13 @@ mod faux_constructo {
         /// Les en-têtes, leur nom en minuscules.
         entetes: Vec<(String, String)>,
         corps: Vec<u8>,
+    }
+
+    impl Requete {
+        /// La valeur d'un en-tête (son nom en minuscules).
+        fn entete(&self, nom: &str) -> Option<&str> {
+            self.entetes.iter().find(|(n, _)| n == nom).map(|(_, v)| v.as_str())
+        }
     }
 
     /// Lit une requête ; `None` si le client s'en va.
@@ -4190,8 +4287,9 @@ mod faux_constructo {
                     "refresh_token": renouvellement, "scope": "mcp" })
         }
 
-        fn repondre(&mut self, methode: &str, chemin: &str, parametres: &str, porteur: &str, corps: &[u8]) -> Reponse {
-            match (methode, chemin) {
+        fn repondre(&mut self, requete: &Requete, chemin: &str, parametres: &str) -> Reponse {
+            let corps = requete.corps.as_slice();
+            match (requete.methode.as_str(), chemin) {
                 ("POST", "/register") => self.enregistrer(corps),
                 ("GET", "/authorize") => self.autoriser(parametres),
                 ("POST", "/token") => {
@@ -4205,11 +4303,37 @@ mod faux_constructo {
                         }
                     }
                 }
-                ("POST", "/mcp") => self.mcp(porteur, corps),
+                // Le `Mount("/mcp")` de Starlette, quand on le lui demande : « /mcp » renvoie vers « /mcp/ ».
+                (methode, "/mcp") if self.rediriger => {
+                    self.noter(format!("{methode} /mcp renvoyé vers /mcp/"));
+                    Reponse(307, "text/plain", vec![("Location", format!("{}/mcp/", self.base))], Vec::new())
+                }
+                ("POST", "/mcp" | "/mcp/") => self.mcp(requete),
                 // Pas de flux SSE ouvert par le client : le transport HTTP de MCP le permet.
-                ("GET", "/mcp") => vide(405),
-                ("DELETE", "/mcp") => vide(200),
+                ("GET", "/mcp" | "/mcp/") => vide(405),
+                ("DELETE", "/mcp" | "/mcp/") => self.fermer_la_session(requete),
                 _ => vide(404),
+            }
+        }
+
+        /// Le jeton d'accès de la requête est-il le courant ? (L'ancien meurt au renouvellement.)
+        fn porteur_valable(&self, requete: &Requete) -> bool {
+            let jeton = requete.entete("authorization").and_then(|p| p.strip_prefix("Bearer ")).unwrap_or("");
+            self.acces.get(jeton).is_some_and(|&fin| fin > maintenant())
+        }
+
+        /// Le DELETE qui ferme une session MCP (le jeton d'accès courant exigé, comme partout sur le connecteur).
+        fn fermer_la_session(&mut self, requete: &Requete) -> Reponse {
+            if !self.porteur_valable(requete) {
+                return en_json(401, json!({ "error": "invalid_token" }));
+            }
+            match requete.entete("mcp-session-id") {
+                Some(s) if self.sessions.remove(s) => {
+                    self.noter("mcp DELETE : session fermée".into());
+                    vide(200)
+                }
+                Some(_) => vide(404),
+                None => vide(400),
             }
         }
 
@@ -4306,11 +4430,12 @@ mod faux_constructo {
             en_json(200, self.emettre(&client))
         }
 
-        /// Le connecteur MCP (le transport HTTP, des réponses JSON) : le jeton d'accès courant, sinon 401.
-        fn mcp(&mut self, porteur: &str, corps: &[u8]) -> Reponse {
-            let jeton = porteur.strip_prefix("Bearer ").unwrap_or("");
-            let valable = self.acces.get(jeton).is_some_and(|&fin| fin > maintenant());
-            let p: Value = serde_json::from_slice(corps).unwrap_or(Value::Null);
+        /// Le connecteur MCP, comme celui du vrai : le jeton d'accès courant (sinon 401) ; la session — `initialize` en
+        /// ouvre une, toute autre requête doit porter la sienne (400 sans elle, 404 inconnue) ; les réponses en SSE à
+        /// qui les accepte, sinon en JSON.
+        fn mcp(&mut self, requete: &Requete) -> Reponse {
+            let valable = self.porteur_valable(requete);
+            let p: Value = serde_json::from_slice(&requete.corps).unwrap_or(Value::Null);
             let methode = p.get("method").and_then(Value::as_str).unwrap_or("").to_string();
             let outil = p.pointer("/params/name").and_then(Value::as_str).unwrap_or("").to_string();
             let quoi = if outil.is_empty() { methode.clone() } else { format!("{methode} {outil}") };
@@ -4319,6 +4444,22 @@ mod faux_constructo {
                 let mut r = en_json(401, json!({ "error": "invalid_token" }));
                 r.2.push(("WWW-Authenticate", r#"Bearer error="invalid_token""#.to_string()));
                 return r;
+            }
+            let mut plus = Vec::new();
+            if methode == "initialize" {
+                let session = jeton_aleatoire();
+                self.sessions.insert(session.clone());
+                plus.push(("mcp-session-id", session));
+            } else {
+                let erreur = |code: u16, message: &str| {
+                    let e = json!({ "code": -32600, "message": message });
+                    en_json(code, json!({ "jsonrpc": "2.0", "id": "server-error", "error": e }))
+                };
+                match requete.entete("mcp-session-id") {
+                    None => return erreur(400, "Bad Request: Missing session ID"),
+                    Some(s) if !self.sessions.contains(s) => return erreur(404, "Session not found"),
+                    Some(_) => {}
+                }
             }
             let Some(id) = p.get("id").cloned() else { return vide(202) };
             let resultat = match methode.as_str() {
@@ -4330,25 +4471,43 @@ mod faux_constructo {
                 "tools/list" => json!({ "tools": self.outils() }),
                 "tools/call" => {
                     let a = p.pointer("/params/arguments").cloned().unwrap_or(Value::Null);
-                    let x = |n: &str| a.get(n).map(|v| v.to_string().trim_matches('"').to_string()).unwrap_or_default();
-                    let texte = match outil.as_str() {
-                        "whoami_tenant" => "Connecté au tenant : tenant_essai (par la connexion OAuth de l'entreprise).".into(),
-                        "lister_factures" => "FACT-0142 · Gagnon et fils · en retard de 47 jours · solde 5214,90 $\n\
-                                              FACT-0151 · Rénovations Tremblay · en retard de 33 jours · solde 2300,02 $"
-                            .into(),
-                        "creer_facture" => format!("Facture FACT-0160 créée pour {} ({} $).", x("client"), x("montant")),
-                        "supprimer_projet" => format!("Projet {} annulé.", x("project_id")),
-                        "enregistrer_paiement" => {
-                            format!("Paiement de {} $ enregistré sur la facture {}.", x("montant"), x("invoice_id"))
-                        }
-                        o if o.starts_with("lister_registre_") => "Aucune entrée.".into(),
-                        _ => "Outil inconnu.".to_string(),
+                    let (texte, erreur) = match self.appeler(&outil, &a) {
+                        Ok(t) => (t, false),
+                        Err(t) => (t, true),
                     };
-                    json!({ "content": [{ "type": "text", "text": texte }] })
+                    json!({ "content": [{ "type": "text", "text": texte }], "isError": erreur })
                 }
                 _ => json!({}),
             };
-            en_json(200, json!({ "jsonrpc": "2.0", "id": id, "result": resultat }))
+            let message = json!({ "jsonrpc": "2.0", "id": id, "result": resultat });
+            let mut r = if requete.entete("accept").is_some_and(|a| a.contains("text/event-stream")) {
+                // sse-starlette : des fins de ligne `\r\n`, un événement par message.
+                let flux = format!("event: message\r\ndata: {message}\r\n\r\n");
+                Reponse(200, "text/event-stream", Vec::new(), flux.into_bytes())
+            } else {
+                en_json(200, message)
+            };
+            r.2.extend(plus);
+            r
+        }
+
+        /// Un outil : son texte, ou son erreur (`isError`, comme FastMCP pour un outil qu'il n'a pas). Un outil en
+        /// panne rend le texte d'erreur du vrai, sans `isError` (les outils de lecture attrapent tout).
+        fn appeler(&self, outil: &str, a: &Value) -> Result<String, String> {
+            if self.pannes.contains(outil) {
+                return Ok("Erreur lors de la lecture (voir logs serveur).".into());
+            }
+            let x = |n: &str| a.get(n).map(|v| v.to_string().trim_matches('"').to_string()).unwrap_or_default();
+            Ok(match outil {
+                "whoami_tenant" => "Connecté au tenant : tenant_essai (par la connexion OAuth de l'entreprise).".into(),
+                "creer_facture" => format!("Facture FACT-0160 créée pour {} ({} $).", x("client"), x("montant")),
+                "supprimer_projet" => format!("Projet {} annulé.", x("project_id")),
+                "enregistrer_paiement" => {
+                    format!("Paiement de {} $ enregistré sur la facture {}.", x("montant"), x("invoice_id"))
+                }
+                o if o.starts_with("lister_registre_") => "Aucune entrée.".into(),
+                o => entreprise_inventee(o, a).ok_or_else(|| format!("Unknown tool: {o}"))?,
+            })
         }
 
         fn outils(&self) -> Vec<Value> {
@@ -4374,6 +4533,287 @@ mod faux_constructo {
             }
             liste
         }
+    }
+
+    /// Le jour à `decalage` jours d'aujourd'hui (« 2026-10-26 ») : les dates de l'entreprise inventée suivent l'essai.
+    fn jour(decalage: i64) -> String {
+        date_du_numero(numero_du_jour(&crate::journal::date()).unwrap_or(0) + decalage)
+    }
+
+    /// Le JSON d'un outil comme le rend `mcp_server.py` (`json.dumps(…, ensure_ascii=False, indent=2)`), derrière sa
+    /// ligne d'en-tête s'il en a une (« 3 projet(s) trouve(s): »).
+    fn rendu(entete: &str, v: &Value) -> String {
+        let json = serde_json::to_string_pretty(v).unwrap_or_default();
+        if entete.is_empty() { json } else { format!("{entete}\n{json}") }
+    }
+
+    /// Un statut tel que le compare le serveur : sans la casse (et sans `_` pour un projet).
+    fn statut(v: &Value) -> String {
+        v.as_str().unwrap_or("").to_lowercase().replace('_', " ")
+    }
+
+    /// Les lectures du tableau de bord d'Eve, sur une entreprise inventée (« Construction Exemple inc. »), dans les
+    /// formes de `mcp_server.py` — ses filtres compris (le statut, les dates, la limite). `None` : un outil que le faux
+    /// serveur n'a pas.
+    fn entreprise_inventee(outil: &str, a: &Value) -> Option<String> {
+        let limite = a["limite"].as_u64().unwrap_or(50) as usize;
+        Some(match outil {
+            "tableau_kpis" => rendu(
+                "",
+                &json!({
+                    "projets_total": 14, "projets_en_cours": 3, "projets_termines": 9, "clients_actifs": 27,
+                    "contacts_total": 61, "opportunites_ouvertes": 5, "pipeline_valeur": 612500.0, "devis_total": 38,
+                    "devis_acceptes": 15, "factures_total": 112, "factures_solde_du": 48230.55,
+                    "revenu_encaisse_periode": 73410.2, "employes_actifs": 8, "produits_actifs": 240,
+                    "stock_critique": 2, "valeur_stock": 18450.75, "fournisseurs_actifs": 17, "bt_total": 44,
+                    "devis_taux_conversion_pct": 39.5, "periode_jours": a["periode_jours"].as_u64().unwrap_or(30),
+                }),
+            ),
+            "tableau_alertes" => {
+                rendu("", &json!({ "factures_en_retard": { "nb": 3, "montant": 9714.92 }, "produits_sous_seuil": 2 }))
+            }
+            "tableau_factures_agees" => {
+                let mut v = json!({
+                    "tranches": [
+                        { "tranche": "a_venir", "nb": 6, "montant": 38515.63 },
+                        { "tranche": "0_30", "nb": 1, "montant": 2200.0 },
+                        { "tranche": "31_60", "nb": 2, "montant": 7514.92 },
+                    ],
+                    "total_du": 48230.55,
+                });
+                if a["inclure_detail"].as_bool() == Some(true) {
+                    let facture = |numero: &str, client: &str, jours: i64, solde: f64| {
+                        json!({ "numero_facture": numero, "client_nom": client, "date_echeance": jour(-jours),
+                                "solde_du": solde, "jours_retard": jours })
+                    };
+                    v["factures_en_retard"] = json!([
+                        facture("F-2026-0142", "Construction Exemple inc.", 47, 5214.9),
+                        facture("F-2026-0151", "Rénovations Exemple", 33, 2300.02),
+                        facture("F-2026-0158", "Habitations Modèle inc.", 12, 2200.0),
+                    ]);
+                }
+                rendu("", &v)
+            }
+            "tableau_pipeline_ventes" => rendu(
+                "",
+                &json!({
+                    "par_statut": [
+                        { "statut": "Proposition", "nb": 3, "valeur": 420000.0 },
+                        { "statut": "GAGNE", "nb": 4, "valeur": 385000.0 },
+                        { "statut": "Qualification", "nb": 2, "valeur": 192500.0 },
+                        { "statut": "PERDU", "nb": 2, "valeur": 96000.0 },
+                    ],
+                    "valeur_totale": 1093500.0,
+                }),
+            ),
+            "lister_projets" => {
+                let projets = [
+                    json!({ "id": 14, "nom_projet": "Agrandissement, 12 rue des Exemples",
+                            "numero_projet": "PROJ-2026-00014", "client_company_id": 7,
+                            "client_nom_cache": "Construction Exemple inc.", "statut": "En cours", "priorite": "Haute",
+                            "budget_total": 425000.0, "prix_estime": null, "date_debut_reel": jour(-40),
+                            "date_fin_reel": jour(50), "ville_chantier": "Exempleville" }),
+                    json!({ "id": 12, "nom_projet": "Toiture, 8 chemin du Modèle", "numero_projet": "PROJ-2026-00012",
+                            "client_nom_cache": null, "client_nom_direct": "Sam Exemple", "statut": "EN_COURS",
+                            "priorite": "Moyenne", "budget_total": null, "prix_estime": 38000.0,
+                            "date_debut_reel": jour(-10), "date_fin_reel": jour(8), "ville_chantier": "Exempleville" }),
+                    json!({ "id": 9, "nom_projet": "Sous-sol, 3 rue de l'Essai", "numero_projet": "PROJ-2026-00009",
+                            "client_nom_cache": "Rénovations Exemple", "statut": "En cours", "priorite": "Basse",
+                            "budget_total": 72500.0, "date_debut_reel": jour(-75), "date_fin_reel": null,
+                            "ville_chantier": "Démoville" }),
+                    json!({ "id": 7, "nom_projet": "Cuisine, 5 avenue du Modèle", "numero_projet": "PROJ-2026-00007",
+                            "statut": "Termine", "budget_total": 54000.0 }),
+                ];
+                let voulu = statut(&a["statut"]);
+                let l: Vec<Value> = projets
+                    .into_iter()
+                    .filter(|p| voulu.is_empty() || statut(&p["statut"]) == voulu)
+                    .take(limite)
+                    .collect();
+                rendu(&format!("{} projet(s) trouve(s):", l.len()), &Value::Array(l))
+            }
+            "lister_devis" => {
+                let modifie = |decalage: i64| format!("{}T09:30:00", jour(decalage));
+                let devis = [
+                    json!({ "id": 35, "numero_devis": "DEV-2026-035", "nom_projet": "Véranda, 5 avenue du Modèle",
+                            "client_nom_cache": "Construction Exemple inc.", "statut": "Brouillon",
+                            "investissement_total": 0.0, "prix_estime": 26000.0, "date_soumis": null,
+                            "created_at": modifie(-1), "updated_at": modifie(0) }),
+                    json!({ "id": 33, "numero_devis": "DEV-2026-033", "nom_projet": "Terrasse, rang du Modèle",
+                            "statut": "En attente", "investissement_total": null, "prix_estime": 12800.0,
+                            "date_soumis": jour(-3), "updated_at": modifie(-2) }),
+                    json!({ "id": 31, "numero_devis": "DEV-2026-031", "nom_projet": "Garage double, rue des Exemples",
+                            "client_nom_cache": "Habitations Modèle inc.", "statut": "Envoye",
+                            "investissement_total": 48000.0, "date_soumis": jour(-12), "updated_at": modifie(-12) }),
+                    json!({ "id": 29, "numero_devis": "DEV-2026-029", "nom_projet": "Cuisine, avenue de l'Essai",
+                            "client_nom_cache": null, "client_nom_direct": "Sam Exemple", "statut": "Envoye",
+                            "investissement_total": 31500.0, "date_soumis": jour(-20), "updated_at": modifie(-15) }),
+                    json!({ "id": 20, "numero_devis": "DEV-2026-020", "nom_projet": "Salle de bain, rue des Exemples",
+                            "statut": "Accepte", "investissement_total": 22000.0, "date_soumis": jour(-60),
+                            "updated_at": modifie(-40) }),
+                ];
+                let voulu = a["statut"].as_str().unwrap_or("").to_lowercase();
+                let l: Vec<Value> = devis
+                    .into_iter()
+                    .filter(|d| voulu.is_empty() || d["statut"].as_str().unwrap_or("").to_lowercase() == voulu)
+                    .take(limite)
+                    .collect();
+                rendu(&format!("{} devis trouve(s):", l.len()), &Value::Array(l))
+            }
+            "suivi_lister_notes_calendrier" => {
+                let note = |id: u64, decalage: i64, contenu: &str| {
+                    json!({ "id": id, "note_date": jour(decalage), "contenu": contenu, "scope": "partage",
+                            "created_by_name": "Sam Exemple", "created_at": format!("{}T08:00:00", jour(-30)) })
+                };
+                let notes = [
+                    note(40, 20, "Hors de la fenêtre : une note dans trois semaines"),
+                    note(31, 6, "Livraison des fermes de toit"),
+                    note(29, 1, "Visite de chantier, 12 rue des Exemples"),
+                    note(27, 0, "Réunion de chantier, 8 h"),
+                    note(20, -6, "Une note de la semaine passée"),
+                ];
+                let (debut, fin) = (a["date_debut"].as_str().unwrap_or(""), a["date_fin"].as_str().unwrap_or(""));
+                let l: Vec<Value> = notes
+                    .into_iter()
+                    .filter(|n| {
+                        let d = n["note_date"].as_str().unwrap_or("");
+                        (debut.is_empty() || d >= debut) && (fin.is_empty() || d <= fin)
+                    })
+                    .take(limite)
+                    .collect();
+                rendu(&format!("{} note(s) partagee(s):", l.len()), &Value::Array(l))
+            }
+            "banque_lister_comptes" => "2 compte(s) bancaire(s) :\n\n\
+                 #1 Compte courant (CHEQUE, GL 1010) ***4821\n\
+                 \x20   solde publie : 51,240.18 $   solde banque : 52,010.43 $   ECART : 770.25 $\n\
+                 \x20   7 operation(s) en attente\n\
+                 #2 Marge de crédit (CREDIT, GL 2150)\n\
+                 \x20   solde publie : -12,500.00 $   solde banque : inconnu (aucun releve importe)\n\
+                 \x20   0 operation(s) en attente"
+                .to_string(),
+            "conformite_expirations" => rendu(
+                "",
+                &json!({
+                    "date_reference": jour(0),
+                    "jours": a["jours"].as_u64().unwrap_or(60),
+                    "licences": [{ "id": 1, "numero_licence": "0000-0000-01",
+                                   "nom_entreprise": "Construction Exemple inc.", "categories": ["1.2"],
+                                   "date_emission": jour(-344), "date_expiration": jour(21), "statut": "ACTIVE" }],
+                    "cartes": [],
+                    "attestations": [{ "id": 3, "type": "CNESST", "numero": "A-0001", "date_emission": jour(-320),
+                                       "date_expiration": jour(45), "statut": "VALIDE" }],
+                    "total": 2,
+                }),
+            ),
+            // Les factures, clients et fournisseurs mêlées : l'ERP garde le nom du fournisseur dans `client_nom`.
+            "lister_factures" => {
+                let facture =
+                    |id: u64, nom: &str, projet: u64, destinataire: &str, decalage: i64, ttc: f64, solde: f64| {
+                        let statut = if solde > 0.0 { "ENVOYEE" } else { "PAYEE" };
+                        json!({ "id": id, "numero_facture": format!("FACT-2026-{id:05}"), "client_company_id": null,
+                            "client_nom": nom, "project_id": projet, "type_document": "FACTURE",
+                            "type_destinataire": destinataire, "date_facture": jour(decalage),
+                            "date_echeance": jour(decalage + 30), "statut": statut, "montant_ttc": ttc,
+                            "montant_total": ttc, "montant_paye": ttc - solde, "solde_du": solde,
+                            "conditions_paiement": "Net 30", "date_paiement": null, "mode_paiement": null })
+                    };
+                let l: Vec<Value> = [
+                    facture(212, "Béton Exemple ltée", 14, "fournisseur", -3, 3449.25, 3449.25),
+                    facture(211, "Construction Exemple inc.", 14, "client", -4, 28743.75, 28743.75),
+                    facture(207, "Quincaillerie Démo", 12, "fournisseur", -6, 412.5, 0.0),
+                ]
+                .into_iter()
+                .take(limite)
+                .collect();
+                rendu(&format!("{} facture(s) trouvée(s):", l.len()), &Value::Array(l))
+            }
+            "lister_bons_commande" => {
+                let l: Vec<Value> = [
+                    json!({ "id": 5, "numero": "BC-2026-005", "numero_bon": null,
+                            "fournisseur_nom": "Bois Exemple inc.", "projet_nom": "Agrandissement, 12 rue des Exemples",
+                            "sous_total": 8000.0, "tps": 400.0, "tvq": 798.0, "total": 9198.0, "statut": "commande",
+                            "date_commande": jour(-6), "date_livraison_prevue": jour(3),
+                            "notes": "Fermes de toit, livrer avant 9 h" }),
+                    json!({ "id": 4, "numero": "BC-2026-004", "numero_bon": null,
+                            "fournisseur_nom": "Quincaillerie Démo", "projet_nom": null, "total": 640.0,
+                            "statut": "recu", "date_commande": jour(-16), "date_livraison_prevue": jour(-11),
+                            "notes": null }),
+                ]
+                .into_iter()
+                .filter(|b| statut(&a["statut"]).is_empty() || statut(&b["statut"]) == statut(&a["statut"]))
+                .take(limite)
+                .collect();
+                if l.is_empty() {
+                    "0 bon(s) de commande trouvé(s):\nAucun(e) bon de commande trouvé(e).".to_string()
+                } else {
+                    rendu(&format!("{} bon(s) de commande trouvé(s):", l.len()), &Value::Array(l))
+                }
+            }
+            "lister_bons_achat" => {
+                let l: Vec<Value> =
+                    [json!({ "id": 40, "numero_document": "BA-2026-040", "type_formulaire": "BON_ACHAT",
+                                             "statut": "EN_ATTENTE", "priorite": "NORMAL", "montant_total": 1250.0,
+                                             "date_creation": format!("{}T10:00:00", jour(-4)),
+                                             "date_echeance": jour(2), "notes": "Revêtement de plancher du balcon",
+                                             "projet_nom": "Agrandissement, 12 rue des Exemples",
+                                             "fournisseur_nom": null })]
+                    .into_iter()
+                    .take(limite)
+                    .collect();
+                rendu(&format!("{} bon(s) d'achat trouvé(s):", l.len()), &Value::Array(l))
+            }
+            "lister_livraisons" => {
+                let l: Vec<Value> =
+                    [json!({ "id": 8, "reference": "LIV-2026-008", "project_id": 14, "fournisseur_id": 3,
+                                             "date_prevue": jour(3), "heure_prevue": "08:30:00", "date_effective": null,
+                                             "heure_effective": null, "statut": "planifiee",
+                                             "type_livraison": "Matériaux", "zone_stockage": "Cour arrière",
+                                             "notes": null })]
+                    .into_iter()
+                    .filter(|d| statut(&a["statut"]).is_empty() || statut(&d["statut"]) == statut(&a["statut"]))
+                    .take(limite)
+                    .collect();
+                rendu(&format!("{} livraison(s):", l.len()), &Value::Array(l))
+            }
+            // Les pointages : la semaine passée (Sam du lundi au jeudi, Alex du lundi au vendredi), et aujourd'hui
+            // (Alex a fini sa matinée, Sam est au travail) ; les bornes de l'appel sur `punch_in`.
+            "lister_pointages" => {
+                let n = numero_du_jour(&crate::journal::date()).unwrap_or(0);
+                let lundi = -(n + 3).rem_euclid(7);
+                // (numéro, employé, projet, jour, début, fin et heures : rien d'un pointage encore ouvert)
+                type Pointage<'a> = (i64, (u64, &'a str, &'a str), u64, i64, &'a str, Option<(&'a str, f64)>);
+                let pointage = |(id, qui, projet, decalage, debut, fin): Pointage<'_>| {
+                    let j = jour(decalage);
+                    json!({ "id": id, "employee_id": qui.0, "project_id": projet, "formulaire_bt_id": null,
+                            "operation_id": null, "punch_in": format!("{j}T{debut}:00"),
+                            "punch_out": fin.map(|(f, _)| format!("{j}T{f}:00")), "total_hours": fin.map(|(_, h)| h),
+                            "type_travail": "normal", "notes": null, "validated": false, "billable": true,
+                            "is_billed": false, "finalized_at": null, "prenom": qui.1, "nom_employe": qui.2 })
+                };
+                let (sam, alex) = ((2, "Sam", "Exemple"), (1, "Alex", "Modèle"));
+                let mut tous = Vec::new();
+                for k in 0..5 {
+                    if k < 4 {
+                        tous.push(pointage((400 + k, sam, 14, lundi - 7 + k, "07:00", Some(("15:00", 8.0)))));
+                    }
+                    tous.push(pointage((300 + k, alex, 9, lundi - 7 + k, "06:00", Some(("15:00", 9.0)))));
+                }
+                tous.push(pointage((501, alex, 14, 0, "06:30", Some(("10:00", 3.5)))));
+                tous.push(pointage((502, sam, 12, 0, "07:00", None)));
+                let (debut, fin) = (a["date_debut"].as_str().unwrap_or(""), a["date_fin"].as_str().unwrap_or(""));
+                let mut l: Vec<Value> = tous
+                    .into_iter()
+                    .filter(|p| {
+                        let d = p["punch_in"].as_str().and_then(|t| t.get(..10)).unwrap_or("");
+                        (debut.is_empty() || d >= debut) && (fin.is_empty() || d <= fin)
+                    })
+                    .collect();
+                l.sort_by(|x, y| y["punch_in"].as_str().cmp(&x["punch_in"].as_str()));
+                l.truncate(limite.min(200));
+                rendu(&format!("{} pointage(s) trouve(s):", l.len()), &Value::Array(l))
+            }
+            _ => return None,
+        })
     }
 
     /// `GET url` sur le poste (`http://127.0.0.1:…` seulement), sans suivre de redirection : le code HTTP, et l'adresse
@@ -5059,10 +5499,16 @@ struct SceneDuTheme {
     taille: Option<[f32; 2]>,
 }
 
-/// Les scènes de `eve --essai-theme`, dans l'ordre : le tableau de bord au repos, Eve qui réfléchit, sa réponse (un
-/// tableau, qui devient une carte), Eve qui la dit (une voix inventée, que suit la bouche du portrait), une demande
-/// d'accord, la fenêtre étroite (la conversation seule) pendant qu'Eve écoute, et le tableau de bord de nouveau.
-const SCENES_DU_THEME: [SceneDuTheme; 7] = [
+/// Les scènes de `eve --essai-theme`, dans l'ordre : le tableau de bord au repos (l'entreprise et la famille
+/// ensemble, Constructo AI relié et ses chiffres à jour), Eve qui réfléchit, sa réponse (un tableau, qui devient une
+/// carte), Eve qui la dit (une voix inventée, que suit la bouche du portrait), une demande d'accord, la fenêtre étroite
+/// (la conversation seule) pendant qu'Eve écoute, et le tableau de bord de nouveau ; puis ses vues (l'entreprise, la
+/// famille), une grande fenêtre (et le bas de sa page, défilée : « suite », « entreprise-suite ») et une moyenne, et
+/// les états de l'entreprise : pas reliée, la page de connexion ouverte, la première lecture, une lecture qui n'a pas
+/// abouti (avec des chiffres d'avant, puis sans), la liaison perdue (des chiffres d'hier). Puis la vitrine
+/// (`--vitrine`), les moments d'une même journée ([`MOMENTS_DE_LA_VITRINE`]) : la première attend le portrait et ses
+/// poses.
+static SCENES_DU_THEME: [SceneDuTheme; 25] = [
     SceneDuTheme { nom: "tableau", duree: 6.0, taille: Some([1560.0, 900.0]) },
     SceneDuTheme { nom: "reflexion", duree: 4.0, taille: None },
     SceneDuTheme { nom: "reponse", duree: 5.0, taille: None },
@@ -5070,23 +5516,54 @@ const SCENES_DU_THEME: [SceneDuTheme; 7] = [
     SceneDuTheme { nom: "accord", duree: 5.0, taille: None },
     SceneDuTheme { nom: "etroite", duree: 5.0, taille: Some([980.0, 820.0]) },
     SceneDuTheme { nom: "retour", duree: 4.0, taille: Some([1560.0, 900.0]) },
+    SceneDuTheme { nom: "entreprise", duree: 5.0, taille: None },
+    SceneDuTheme { nom: "famille", duree: 5.0, taille: None },
+    SceneDuTheme { nom: "grande", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "suite", duree: 4.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "entreprise-suite", duree: 4.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "moyenne", duree: 5.0, taille: Some([1180.0, 880.0]) },
+    SceneDuTheme { nom: "non-reliee", duree: 5.0, taille: Some([1560.0, 900.0]) },
+    SceneDuTheme { nom: "connexion", duree: 4.0, taille: None },
+    SceneDuTheme { nom: "lecture", duree: 4.0, taille: None },
+    SceneDuTheme { nom: "erreur", duree: 5.0, taille: None },
+    SceneDuTheme { nom: "erreur-sans-chiffres", duree: 4.0, taille: None },
+    SceneDuTheme { nom: "perdue", duree: 5.0, taille: None },
+    SceneDuTheme { nom: "vitrine-joie", duree: 14.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "vitrine-serieuse", duree: 7.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "vitrine-entreprise-suite", duree: 6.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "vitrine-empathie", duree: 7.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "vitrine-amusee", duree: 7.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "vitrine-famille", duree: 6.0, taille: Some([2100.0, 1180.0]) },
 ];
 
-/// `eve --essai-theme [dossier] [--captures DOSSIER] [--secondes N]` : la vraie fenêtre native, dans le thème
-/// « Constructo AI », sur un état inventé que l'essai lui publie comme le chef le ferait — une conversation, une
-/// réponse en tableau, une demande d'accord, Eve qui réfléchit puis écoute — et ses panneaux sur les données inventées
-/// de l'essai des panneaux (`activite\*.js`), sans `famille.js` : ni météo ni aucune requête. Ses scènes défilent
-/// d'elles-mêmes, puis la fenêtre reste au tableau de bord.
+/// Le fichier qui dit que l'`entreprise.json` du dossier local est celui de l'essai du thème : l'essai le réécrit.
+/// Sans lui, un `entreprise.json` est celui d'une vraie Eve (sa lecture de l'ERP) : rien n'y est écrit.
+const MARQUE_DE_L_ENTREPRISE: &str = "essai-theme-entreprise.txt";
+
+/// `eve --essai-theme [dossier] [--captures DOSSIER] [--secondes N] [--scenes A,B…] [--meteo] [--vitrine]` : la vraie
+/// fenêtre native, dans le thème « Constructo AI », sur un état inventé que l'essai lui publie comme le chef le
+/// ferait — une conversation, une réponse en tableau, une demande d'accord, Eve qui réfléchit puis écoute, la liaison
+/// à Constructo AI et la vue du tableau de bord — et ses panneaux sur les données inventées de l'essai des panneaux
+/// (`activite\*.js`), sans `famille.js` : ni météo ni aucune requête. `--meteo` y met la famille inventée de l'essai
+/// des panneaux, et sa ville : la météo se lit alors pour de vrai chez open-meteo. Ses scènes défilent d'elles-mêmes
+/// (`--scenes` : seulement celles-là), puis la fenêtre reste au tableau de bord. `--vitrine` : la journée de la vitrine
+/// ([`Vitrine`]), ses captures nommées d'après ses moments.
+///
+/// L'entreprise inventée (« Construction Exemple inc. », ses projets, ses factures, son pipeline) s'écrit dans
+/// l'`entreprise.json` du dossier local que nomme `EVE_DOSSIER_LOCAL`, scène après scène, comme Eve l'écrirait en
+/// lisant l'ERP : seulement si ce dossier est nommé (jamais celui d'office), et si son `entreprise.json` manque ou
+/// vient de cet essai (sa marque à côté). Sinon, les scènes de l'entreprise montrent ce qui s'y trouve.
 ///
 /// L'essai joue le chef : un texte écrit reçoit une réponse inventée, « Nouvelle conversation » vide le fil, l'accord
 /// se donne ou se refuse, le thème se change dans les réglages (« Centre de commande » : la musique du tableau se ferait
-/// entendre), « Quitter Eve » ou la fermeture de la fenêtre l'arrêtent. `--captures` enregistre la fenêtre en PNG à la
-/// fin de chaque scène, puis la ferme ; `--secondes N` la ferme d'elle-même. Le dossier (d'office
+/// entendre), la vue du tableau se choisit, « Relire » relit l'entreprise inventée, « Se connecter » la relie (en deux
+/// secondes et demie), « Quitter Eve » ou la fermeture de la fenêtre l'arrêtent. `--captures` enregistre la fenêtre en
+/// PNG à la fin de chaque scène, puis la ferme ; `--secondes N` la ferme d'elle-même. Le dossier (d'office
 /// `%TEMP%\eve-essai-theme`) reçoit les données inventées ; un dossier dont le `activite\` vient d'ailleurs se lit tel
 /// quel, et rien n'y est écrit.
 pub fn theme(args: &[String]) -> i32 {
     let valeur = |nom: &str| args.iter().position(|a| a == nom).and_then(|i| args.get(i + 1)).cloned();
-    let a_valeur = ["--captures", "--secondes"];
+    let a_valeur = ["--captures", "--secondes", "--scenes"];
     let dossier = args
         .iter()
         .enumerate()
@@ -5099,13 +5576,49 @@ pub fn theme(args: &[String]) -> i32 {
     let maintenant = crate::journal::horodatage().get(11..).unwrap_or("12-00-00").replace('-', ":");
     let seconde = seconde_du_jour(&maintenant).unwrap_or(12 * 3600);
     let activite = dossier.join("activite");
-    if activite.is_dir() && !activite.join(MARQUE_DES_PANNEAUX).is_file() {
+    let meteo = args.iter().any(|a| a == "--meteo");
+    // La vitrine : ses scènes seulement, d'office ; ses données, dès qu'une de ses scènes est demandée.
+    let vitrine_voulue = args.iter().any(|a| a == "--vitrine");
+    let scenes: Vec<&SceneDuTheme> = match valeur("--scenes") {
+        Some(noms) => {
+            let voulues: Vec<&str> = noms.split(',').map(str::trim).collect();
+            if let Some(inconnue) = voulues.iter().find(|n| !SCENES_DU_THEME.iter().any(|s| s.nom == **n)) {
+                let toutes: Vec<&str> = SCENES_DU_THEME.iter().map(|s| s.nom).collect();
+                eprintln!("scène inconnue : {inconnue} (les scènes : {})", toutes.join(", "));
+                return 2;
+            }
+            SCENES_DU_THEME.iter().filter(|s| voulues.contains(&s.nom)).collect()
+        }
+        None => SCENES_DU_THEME.iter().filter(|s| s.nom.starts_with("vitrine") == vitrine_voulue).collect(),
+    };
+    let etrangeres = activite.is_dir() && !activite.join(MARQUE_DES_PANNEAUX).is_file();
+    let vitrine = (vitrine_voulue || scenes.iter().any(|s| s.nom.starts_with("vitrine")))
+        .then(|| crate::centre::numero_du_jour(JOUR_DE_LA_VITRINE))
+        .flatten()
+        .map(|jour| Vitrine { jour, activite: (!etrangeres).then(|| activite.clone()) });
+    if etrangeres {
         println!("{} : des données qui ne sont pas de l'essai, lues telles quelles", activite.display());
-    } else if let Err(e) = ecrire_les_panneaux_d_essai(&dossier, jour, seconde, true) {
+    } else if let Some(v) = &vitrine {
+        if let Err(e) = v.ecrire_la_famille() {
+            eprintln!("{} : {e}", dossier.display());
+            return 1;
+        }
+        println!("la vitrine (une famille, une entreprise, le {JOUR_DE_LA_VITRINE}) : {}", dossier.display());
+    } else if let Err(e) = ecrire_les_panneaux_d_essai(&dossier, jour, seconde, !meteo) {
         eprintln!("{} : {e}", dossier.display());
         return 1;
+    } else if meteo {
+        println!("données inventées (celles de l'essai des panneaux, sa famille et sa ville) : {}", dossier.display());
     } else {
         println!("données inventées (celles de l'essai des panneaux, sans famille.js) : {}", dossier.display());
+    }
+    let entreprise = entreprise_de_l_essai();
+    match &entreprise {
+        Some(f) => println!("l'entreprise inventée : {}", f.display()),
+        None => println!(
+            "l'entreprise inventée ne s'écrit pas (EVE_DOSSIER_LOCAL non nommé, ou un entreprise.json qui n'est pas de \
+             l'essai) : les scènes de l'entreprise montrent ce qui s'y trouve"
+        ),
     }
     let captures = valeur("--captures").map(std::path::PathBuf::from);
     if let Some(c) = &captures
@@ -5124,16 +5637,885 @@ pub fn theme(args: &[String]) -> i32 {
             return 1;
         }
     };
-    let mut etat = EtatDuTheme::nouveau();
-    etat.scene(SCENES_DU_THEME[0].nom);
+    let mut etat = EtatDuTheme::nouveau(entreprise, vitrine);
+    if let Some(premiere) = scenes.first() {
+        etat.scene(premiere.nom);
+    }
     ecran.publier(&etat.json());
     let abonnement = ecran.abonner();
-    thread::spawn(move || mener_l_essai_du_theme(&ecran, &gestes, etat, captures, secondes));
+    thread::spawn(move || mener_l_essai_du_theme(&ecran, &gestes, etat, &scenes, captures, secondes));
     if crate::natif::lancer(abonnement, rapport, "Eve — Essai du thème", Some(dossier)) {
         0
     } else {
         eprintln!("la fenêtre native ne s'ouvre pas (OpenGL)");
         1
+    }
+}
+
+/// L'`entreprise.json` où l'essai du thème écrit son entreprise inventée : celui du dossier local que nomme
+/// `EVE_DOSSIER_LOCAL`, s'il manque ou vient de l'essai (sa marque à côté, posée ici quand il manque) ; `None` sinon.
+fn entreprise_de_l_essai() -> Option<std::path::PathBuf> {
+    std::env::var_os("EVE_DOSSIER_LOCAL").filter(|d| !d.is_empty())?;
+    let local = crate::reglages::dossier_local();
+    let (fichier, marque) = (local.join(crate::centre::ENTREPRISE), local.join(MARQUE_DE_L_ENTREPRISE));
+    if fichier.exists() && !marque.is_file() {
+        return None;
+    }
+    let pose = "Cet entreprise.json est inventé par eve --essai-theme, qui le réécrit à chaque scène.\n";
+    std::fs::write(&marque, pose).ok()?;
+    Some(fichier)
+}
+
+/// L'heure du poste dans la forme de la lecture de l'ERP (RFC 3339, avec le fuseau du poste), il y a `secondes`.
+fn heure_de_lecture(secondes: i64) -> String {
+    let local = crate::journal::date_et_heure();
+    let jour = crate::centre::numero_du_jour(&local).unwrap_or(0);
+    let s = seconde_du_jour(local.get(11..).unwrap_or("12:00:00")).unwrap_or(12 * 3600);
+    let civiles = jour * 86_400 + s;
+    let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+    // Le fuseau du poste, au quart d'heure.
+    let fuseau = ((civiles - unix) as f64 / 900.0).round() as i64 * 900;
+    let lu = civiles - secondes;
+    let (j, s) = (lu.div_euclid(86_400), lu.rem_euclid(86_400));
+    let signe = if fuseau < 0 { '-' } else { '+' };
+    format!(
+        "{}T{:02}:{:02}:{:02}{signe}{:02}:{:02}",
+        crate::centre::date_du_numero(j),
+        s / 3600,
+        s / 60 % 60,
+        s % 60,
+        fuseau.abs() / 3600,
+        fuseau.abs() / 60 % 60
+    )
+}
+
+/// L'entreprise inventée de l'essai (personne de vrai : « Construction Exemple inc. », ses clients et ses chantiers
+/// d'exemple), de la forme d'`entreprise.json` (celle qu'écrit la lecture de l'ERP) : son état, l'heure de sa lecture
+/// (il y a `il_y_a` secondes), son erreur, et ses chiffres (`chiffres`), cohérents entre eux — ce qui est à recevoir
+/// est la somme de la balance âgée, le retard celle des factures en retard, rangées dans leurs tranches, le pipeline
+/// celle de ses étapes.
+fn entreprise_inventee(etat: &str, il_y_a: i64, erreur: Option<&str>, chiffres: bool) -> Value {
+    let mut v = serde_json::json!({ "etat": etat });
+    if let Some(e) = erreur {
+        v["erreur"] = e.into();
+    }
+    if !chiffres {
+        return v;
+    }
+    let jour = crate::centre::numero_du_jour(&crate::journal::date()).unwrap_or(0);
+    let d = |k: i64| crate::centre::date_du_numero(jour + k);
+    v["lu_a"] = heure_de_lecture(il_y_a).into();
+    v["kpis"] = serde_json::json!({
+        "projets_en_cours": 7, "valeur_projets_en_cours": 2_131_500.0,
+        "a_recevoir": 86_420.0, "en_retard": 23_150.0, "factures_en_retard": 4,
+        "devis_en_attente": 6, "valeur_devis_en_attente": 312_800.0,
+        "pipeline": 945_000.0, "opportunites_ouvertes": 9,
+        "encaissements_30_jours": 132_640.0, "produits_sous_seuil": 3,
+        "clients_actifs": 38, "employes_actifs": 9, "taux_conversion_devis": 41.5, "solde_banque": 57_310.0,
+        "bons_a_commander": 2, "commandes_ouvertes": 2, "livraisons_prevues": 1
+    });
+    v["alertes"] = serde_json::json!([
+        { "texte": "4 factures en retard : 23 150 $", "gravite": "haute", "sorte": "factures" },
+        { "texte": "Heures manquantes le vendredi : Jo Démo", "gravite": "moyenne", "sorte": "heures" },
+        { "texte": "2 cartes de compétence à renouveler d'ici 60 jours", "gravite": "moyenne",
+          "sorte": "conformite" },
+        { "texte": "3 produits sous le seuil de réapprovisionnement", "gravite": "moyenne", "sorte": "stock" },
+        { "texte": "14 opérations bancaires à classer", "gravite": "info", "sorte": "banque" }
+    ]);
+    v["projets"] = serde_json::json!([
+        { "nom": "Résidence", "adresse": "12 rue des Exemples", "numero": "PROJ-2026-00031",
+          "client": "Construction Exemple inc.", "statut": "En cours", "valeur": 425_000.0, "ville": "Exempleville",
+          "debut": d(-40), "fin": d(50) },
+        { "nom": "Agrandissement", "adresse": "45 chemin du Test", "numero": "PROJ-2026-00029",
+          "client": "Gestion Démo ltée", "statut": "En cours", "valeur": 318_500.0, "ville": "Villedémo",
+          "debut": d(-62), "fin": d(18) },
+        { "nom": "Rénovation de cuisine, 8 rue Fictive", "numero": "PROJ-2026-00027",
+          "statut": "En cours", "valeur": 96_000.0, "ville": "Exempleville", "debut": d(-20), "fin": d(9) },
+        { "nom": "Duplex, 3 avenue de l'Essai", "numero": "PROJ-2026-00024", "client": "Immeubles Fictifs inc.",
+          "statut": "En cours", "valeur": 445_000.0, "ville": "Lac-Exemple", "debut": d(-95) },
+        { "nom": "Garage double, 210 rang Démo", "numero": "PROJ-2026-00022", "client": "Client Exemple inc.",
+          "statut": "En cours", "valeur": 88_000.0, "ville": "Saint-Démo", "debut": d(-30), "fin": d(25) },
+        { "nom": "Sous-sol aménagé, 77 rue des Essais", "numero": "PROJ-2026-00019",
+          "statut": "En cours", "valeur": 59_000.0, "ville": "Exempleville", "debut": d(-12), "fin": d(30) },
+        { "nom": "Entrepôt, 1 boulevard de l'Exemple", "numero": "PROJ-2026-00015",
+          "client": "Coopérative Exemple", "statut": "En cours", "valeur": 700_000.0, "ville": "Villedémo",
+          "debut": d(-150), "fin": d(120) }
+    ]);
+    v["factures_en_retard"] = serde_json::json!([
+        { "numero": "F-2026-0142", "client": "Gestion Démo ltée", "solde": 12_480.0, "jours": 67, "echeance": d(-67) },
+        { "numero": "F-2026-0157", "client": "Client Exemple inc.", "solde": 6_230.5, "jours": 41, "echeance": d(-41) },
+        { "numero": "F-2026-0163", "client": "Immeubles Fictifs inc.", "solde": 3_190.0, "jours": 18,
+          "echeance": d(-18) },
+        { "numero": "F-2026-0170", "client": "Rénovations Exemple", "solde": 1_249.5, "jours": 6, "echeance": d(-6) }
+    ]);
+    v["balance_agee"] = serde_json::json!({
+        "a_venir": 63_270.0, "0_30": 4_439.5, "31_60": 6_230.5, "61_90": 12_480.0, "plus_de_90": 0.0,
+        "total": 86_420.0
+    });
+    v["pipeline"] = serde_json::json!([
+        { "etape": "Proposition", "nombre": 3, "valeur": 420_000.0 },
+        { "etape": "Prospection", "nombre": 3, "valeur": 210_000.0 },
+        { "etape": "Qualification", "nombre": 2, "valeur": 185_000.0 },
+        { "etape": "Négociation", "nombre": 1, "valeur": 130_000.0 }
+    ]);
+    v["agenda"] = serde_json::json!([
+        { "quand": d(0), "texte": "Visite de chantier, 12 rue des Exemples" },
+        { "quand": d(1), "texte": "Livraison de béton, 45 chemin du Test" },
+        { "quand": d(2), "texte": "Rencontre client : la soumission du garage double" },
+        { "quand": d(4), "texte": "Inspection municipale, 3 avenue de l'Essai" }
+    ]);
+    v["devis"] = serde_json::json!([
+        { "numero": "DEV-2026-041", "nom": "Agrandissement, 9 rue de l'Essai", "client": "Client Exemple inc.",
+          "statut": "Envoye", "valeur": 96_400.0, "depuis": d(-5) },
+        { "numero": "DEV-2026-038", "nom": "Toiture, 18 rang Démo", "client": "Gestion Démo ltée",
+          "statut": "En attente", "valeur": 41_200.0, "depuis": d(-12) },
+        { "numero": "DEV-2026-035", "nom": "Garage double, 210 rang Démo", "client": "Client Exemple inc.",
+          "statut": "Envoye", "valeur": 88_000.0, "depuis": d(-19) },
+        { "numero": "DEV-2026-031", "nom": "Galerie et escalier, 4 rue Fictive", "statut": "Envoye",
+          "valeur": 23_700.0, "depuis": d(-26) },
+        { "numero": "DEV-2026-027", "nom": "Salle de bain, 66 avenue de l'Exemple", "client": "Rénovations Exemple",
+          "statut": "En attente", "valeur": 31_500.0, "depuis": d(-33) },
+        { "numero": "DEV-2026-022", "nom": "Fondation, lot 12 du Test", "client": "Immeubles Fictifs inc.",
+          "statut": "Envoye", "valeur": 32_000.0, "depuis": d(-47) }
+    ]);
+    v["banque"] = serde_json::json!([
+        { "nom": "Compte courant", "solde": 48_910.0, "solde_publie": 47_380.0, "a_classer": 14 },
+        { "nom": "Marge de crédit", "solde": 8_400.0, "solde_publie": 8_400.0, "a_classer": 0 },
+        { "nom": "Compte en dollars américains", "solde_publie": 1_250.0, "a_classer": 0 }
+    ]);
+    // Les cartes du modèle : les soumissions, les factures reçues, les commandes et les livraisons, les heures — avec
+    // des employés et des fournisseurs inventés.
+    v["soumissions"] = serde_json::json!([
+        { "numero": "DEV-2026-044", "nom": "Cuisine, 5 avenue du Modèle", "client": "Client Exemple inc.",
+          "statut": "Brouillon", "valeur": 26_000.0, "depuis": d(-1), "modifie": d(0) },
+        { "numero": "DEV-2026-041", "nom": "Agrandissement, 9 rue de l'Essai", "client": "Client Exemple inc.",
+          "statut": "Envoye", "valeur": 96_400.0, "depuis": d(-5), "modifie": d(-5) },
+        { "numero": "DEV-2026-038", "nom": "Toiture, 18 rang Démo", "client": "Gestion Démo ltée",
+          "statut": "En attente", "valeur": 41_200.0, "depuis": d(-12), "modifie": d(-8) },
+        { "numero": "DEV-2026-036", "nom": "Galerie et escalier, 4 rue Fictive", "statut": "Valide",
+          "valeur": 23_700.0, "depuis": d(-14), "modifie": d(-10) }
+    ]);
+    v["factures_recues"] = serde_json::json!([
+        { "numero": "FACT-2026-00214", "fournisseur": "Béton Exemple ltée", "projet": "Agrandissement",
+          "date": d(-3), "montant": 3_449.25, "solde": 3_449.25, "statut": "ENVOYEE" },
+        { "numero": "FACT-2026-00211", "fournisseur": "Bois Exemple inc.", "projet": "Résidence",
+          "date": d(-4), "montant": 9_198.0, "solde": 0.0, "statut": "PAYEE" },
+        { "numero": "FACT-2026-00207", "fournisseur": "Quincaillerie Démo", "projet": "Rénovation de cuisine",
+          "date": d(-6), "montant": 612.4, "solde": 612.4, "statut": "ENVOYEE" }
+    ]);
+    v["commandes"] = serde_json::json!([
+        { "sorte": "a_commander", "numero": "BA-2026-040", "projet": "Agrandissement", "statut": "EN_ATTENTE",
+          "date": d(2), "montant": 1_250.0, "texte": "Revêtement de plancher du balcon" },
+        { "sorte": "a_commander", "numero": "BA-2026-041", "projet": "Résidence", "statut": "EN_ATTENTE",
+          "date": d(5), "texte": "Gypse pour le sous-sol" },
+        { "sorte": "commande", "numero": "BC-2026-005", "fournisseur": "Bois Exemple inc.", "projet": "Résidence",
+          "statut": "commande", "date": d(3), "montant": 9_198.0, "texte": "Fermes de toit, livrer avant 9 h" },
+        { "sorte": "livraison", "numero": "LIV-2026-008", "projet": "Agrandissement", "statut": "planifiee",
+          "date": d(1), "heure": "08:30", "texte": "Matériaux · cour arrière" }
+    ]);
+    let lundi = d(-((jour + 3).rem_euclid(7)));
+    let semaine_passee = |k: i64| crate::centre::date_du_numero(jour - (jour + 3).rem_euclid(7) - 7 + k);
+    // Les heures : celles d'aujourd'hui pour cette semaine (quel que soit le jour de l'essai), la semaine passée en
+    // entier ; une absence vendredi dernier.
+    v["heures"] = serde_json::json!({
+        "semaine": lundi, "cette_semaine": 15.0, "semaine_passee": 126.5, "a_venir": 8.0, "employes_actifs": 3,
+        "derniere_saisie": format!("{}T07:00", d(0)),
+        "manquantes": { "jour": semaine_passee(4), "employes": ["Jo Démo"] },
+        "employes": [
+            { "nom": "Alex Modèle", "cette_semaine": 8.0, "semaine_passee": 45.0, "a_venir": 0.0, "au_travail": true,
+              "jours": [ { "jour": semaine_passee(0), "heures": 9.0 }, { "jour": d(0), "heures": 8.0 } ] },
+            { "nom": "Charlie Essai", "cette_semaine": 7.0, "semaine_passee": 41.0, "a_venir": 8.0,
+              "au_travail": false,
+              "jours": [ { "jour": semaine_passee(1), "heures": 8.5 }, { "jour": d(0), "heures": 7.0 } ] },
+            { "nom": "Jo Démo", "cette_semaine": 0.0, "semaine_passee": 40.5, "a_venir": 0.0, "au_travail": false,
+              "jours": [ { "jour": semaine_passee(0), "heures": 8.0 } ] }
+        ],
+        "par_projet": [
+            { "nom": "Résidence", "numero": "PROJ-2026-00031", "heures": 8.0 },
+            { "nom": "Agrandissement", "numero": "PROJ-2026-00029", "heures": 7.0 }
+        ]
+    });
+    v
+}
+
+// ---- La vitrine de l'essai du thème ------------------------------------------------------------------------------
+
+/// Le jour de la vitrine : un vendredi d'automne, la veille de l'Halloween.
+const JOUR_DE_LA_VITRINE: &str = "2026-10-30";
+
+/// Un moment de la journée de la vitrine : sa scène, son heure (en secondes du jour), la vue du tableau de bord,
+/// l'émotion d'Eve, combien de lignes de la conversation sont déjà là, le temps qu'il fait (la température, le code
+/// WMO), les courriels non lus (la maison, le bureau ; l'un vient-il de l'école ou du CPE).
+struct MomentDeLaVitrine {
+    scene: &'static str,
+    heure: i64,
+    vue: &'static str,
+    emotion: Option<&'static str>,
+    lignes: usize,
+    meteo: (f64, u32),
+    non_lus: (u32, u32, bool),
+}
+
+/// La journée de la vitrine, dans l'ordre : le matin (le chantier de l'école, puis le CPE qui accepte la soumission :
+/// la joie) ; l'avant-midi (qui doit le plus d'argent : le sérieux ; puis l'entreprise, le bas de sa page) ; le début
+/// de l'après-midi (la petite qui fait de la fièvre : l'empathie) ; la fin de l'après-midi (le hockey du garçon :
+/// l'amusement ; puis la famille).
+const MOMENTS_DE_LA_VITRINE: [MomentDeLaVitrine; 6] = [
+    MomentDeLaVitrine {
+        scene: "vitrine-joie",
+        heure: 8 * 3600 + 12 * 60,
+        vue: "tout",
+        emotion: Some("joie"),
+        lignes: 4,
+        meteo: (1.4, 0),
+        non_lus: (2, 9, false),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-serieuse",
+        heure: 10 * 3600 + 43 * 60,
+        vue: "tout",
+        emotion: Some("serieuse"),
+        lignes: 6,
+        meteo: (5.2, 1),
+        non_lus: (2, 6, false),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-entreprise-suite",
+        heure: 11 * 3600 + 20 * 60,
+        vue: "entreprise",
+        emotion: None,
+        lignes: 6,
+        meteo: (6.1, 1),
+        non_lus: (2, 7, false),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-empathie",
+        heure: 13 * 3600 + 38 * 60,
+        vue: "tout",
+        emotion: Some("empathie"),
+        lignes: 9,
+        meteo: (8.6, 2),
+        non_lus: (3, 5, true),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-amusee",
+        heure: 16 * 3600 + 22 * 60,
+        vue: "tout",
+        emotion: Some("amusee"),
+        lignes: 11,
+        meteo: (7.8, 2),
+        non_lus: (1, 4, false),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-famille",
+        heure: 16 * 3600 + 41 * 60,
+        vue: "famille",
+        emotion: None,
+        lignes: 11,
+        meteo: (7.1, 3),
+        non_lus: (1, 4, false),
+    },
+];
+
+/// Les lignes de la conversation de la vitrine, quand le rappel du hockey est posé : il est dans `rappels.json`.
+const LIGNES_DU_RAPPEL: usize = 11;
+
+/// Ce qui est à recevoir dans la vitrine : la balance âgée, additionnée.
+const A_RECEVOIR: f64 = 2_380_000.0;
+
+/// Les factures en retard de la vitrine, de la plus vieille échéance à la plus récente : le numéro, le client, le
+/// solde, les jours de retard. Leur somme est le retard ; elles remplissent les tranches échues de la balance âgée.
+const RETARDS_DE_LA_VITRINE: [(&str, &str, f64, i64); 6] = [
+    ("F-2026-0402", "Développements Riveneuve inc.", 141_863.47, 64),
+    ("F-2026-0411", "Immeubles Carrier-Dion", 22_781.35, 48),
+    ("F-2026-0417", "Atelier Sorbier inc.", 45_096.20, 39),
+    ("F-2026-0428", "Groupe médical des Méandres", 96_331.15, 21),
+    ("F-2026-0433", "Usinage Vermeil inc.", 38_452.90, 12),
+    ("F-2026-0441", "Entrepôts Giguère-Dumont inc.", 65_195.08, 5),
+];
+
+/// Les chantiers en cours de la vitrine, du plus récent au plus ancien : le numéro, le nom, le client, la valeur, la
+/// fin prévue (dans combien de jours). Tous à Lévis.
+const CHANTIERS_DE_LA_VITRINE: [(&str, &str, &str, f64, i64); 9] = [
+    ("PROJ-2026-00137", "Condos Le Riveneuve, 24 unités", "Développements Riveneuve inc.", 4_800_000.0, 236),
+    ("PROJ-2026-00135", "Entrepôt Giguère-Dumont, 3 400 m²", "Entrepôts Giguère-Dumont inc.", 3_150_000.0, 97),
+    (
+        "PROJ-2026-00133",
+        "Agrandissement de l'école des Sentiers-Fleuris",
+        "Centre de services scolaire des Deux-Lacs",
+        2_650_000.0,
+        84,
+    ),
+    ("PROJ-2026-00130", "Clinique médicale des Méandres", "Groupe médical des Méandres", 1_480_000.0, 64),
+    ("PROJ-2026-00127", "Résidence Belleau", "Famille Belleau", 865_000.0, 119),
+    ("PROJ-2026-00126", "Toiture industrielle, Usinage Vermeil", "Usinage Vermeil inc.", 520_000.0, 21),
+    ("PROJ-2026-00121", "Aménagement commercial, Atelier Sorbier", "Atelier Sorbier inc.", 410_000.0, 9),
+    ("PROJ-2026-00118", "Rénovation d'un triplex", "Immeubles Carrier-Dion", 340_000.0, 46),
+    ("PROJ-2026-00109", "Garage d'entretien, Excavation Poulin-Roy", "Excavation Poulin-Roy inc.", 285_000.0, 68),
+];
+
+/// Les soumissions de la vitrine, la dernière modifiée d'abord : le numéro, le nom, le client, le statut de l'ERP, la
+/// valeur, envoyée et modifiée il y a combien de jours. Celles qui attendent une réponse (« Envoye », « En attente »)
+/// sont les devis en attente.
+const SOUMISSIONS_DE_LA_VITRINE: [(&str, &str, &str, &str, f64, i64, i64); 13] = [
+    ("DEV-2026-0219", "Agrandissement d'usine, 2 200 m²", "Usinage Vermeil inc.", "Brouillon", 2_450_000.0, 2, 0),
+    ("DEV-2026-0216", "Immeuble de 12 logements", "Habitations Lagacé-Roy inc.", "Valide", 2_180_000.0, 5, 1),
+    ("DEV-2026-0214", "Centre de la petite enfance, 80 places", "CPE Les Mésangeais", "Envoye", 1_450_000.0, 9, 3),
+    ("DEV-2026-0211", "Résidence secondaire au lac", "Famille Paquin", "Envoye", 1_120_000.0, 10, 6),
+    (
+        "DEV-2026-0208",
+        "Rénovation de bureaux, 3e étage",
+        "Gestion Valcourt-Bédard inc.",
+        "En attente",
+        685_000.0,
+        14,
+        9,
+    ),
+    ("DEV-2026-0205", "Entrepôt frigorifique", "Distribution Côté-Morin inc.", "Envoye", 1_960_000.0, 16, 12),
+    (
+        "DEV-2026-0201",
+        "Agrandissement de clinique dentaire",
+        "Clinique dentaire Mercier-Bégin",
+        "En attente",
+        410_000.0,
+        18,
+        14,
+    ),
+    ("DEV-2026-0198", "Atelier de carrosserie", "Carrosserie Bélisle-Hamel inc.", "Envoye", 126_000.0, 21, 17),
+    ("DEV-2026-0196", "Quatre jumelés", "Habitations Lagacé-Roy inc.", "En attente", 1_280_000.0, 23, 19),
+    ("DEV-2026-0192", "Réfection de toiture, 2 400 m²", "Entrepôts Giguère-Dumont inc.", "Envoye", 248_000.0, 27, 24),
+    ("DEV-2026-0189", "Salle de montre", "Machinerie Tardif-Hébert inc.", "En attente", 255_000.0, 30, 27),
+    ("DEV-2026-0185", "Mezzanine et bureaux", "Entrepôts Giguère-Dumont inc.", "Envoye", 214_000.0, 34, 31),
+    ("DEV-2026-0181", "Rénovation de chalet", "Famille Bérubé", "En attente", 152_000.0, 39, 36),
+];
+
+/// Le pipeline de la vitrine, ses étapes ouvertes par valeur : l'étape, le nombre d'opportunités, la valeur.
+const PIPELINE_DE_LA_VITRINE: [(&str, u32, f64); 4] = [
+    ("Proposition", 7, 6_900_000.0),
+    ("Qualification", 6, 4_200_000.0),
+    ("Prospection", 7, 3_100_000.0),
+    ("Négociation", 3, 1_900_000.0),
+];
+
+/// L'équipe de la vitrine telle que la lecture la rend (vingt employés au plus, par nom) : le nom, ses heures de
+/// lundi à jeudi, celles de la semaine passée. Deux n'ont rien saisi jeudi.
+const EQUIPE_DE_LA_VITRINE: [(&str, [f64; 4], f64); 20] = [
+    ("Alexis Tremblay", [9.0, 9.5, 9.0, 9.5], 46.5),
+    ("Benoît Lachance", [8.0, 8.0, 8.5, 8.0], 40.0),
+    ("Carl Dufresne", [8.0, 8.0, 8.0, 0.0], 40.0),
+    ("David Thibodeau", [8.5, 8.0, 8.0, 8.5], 41.5),
+    ("Émile Gauthier", [8.0, 8.0, 8.0, 8.0], 40.0),
+    ("Francis Lavoie", [8.5, 8.5, 8.0, 0.0], 42.0),
+    ("Guillaume Côté", [9.0, 8.5, 9.0, 8.5], 43.0),
+    ("Jonathan Pelletier", [8.0, 8.0, 8.0, 8.5], 40.5),
+    ("Kevin Simard", [8.0, 8.5, 8.0, 8.0], 40.0),
+    ("Louis-Philippe Bergeron", [7.5, 8.0, 8.0, 8.0], 39.5),
+    ("Marc-André Gagné", [8.0, 8.0, 8.5, 8.5], 41.0),
+    ("Maxime Ouellet", [9.0, 9.0, 8.5, 9.0], 44.5),
+    ("Nicolas Poulin", [8.0, 8.0, 8.0, 8.0], 40.0),
+    ("Olivier Martel", [8.5, 8.0, 8.0, 8.0], 40.5),
+    ("Patrick Girard", [8.0, 8.0, 7.5, 8.0], 39.0),
+    ("Steve Boucher", [8.0, 8.5, 8.5, 8.0], 41.0),
+    ("Tommy Bélanger", [8.0, 8.0, 8.0, 8.0], 38.5),
+    ("Vincent Lapointe", [8.5, 8.5, 8.0, 8.5], 42.5),
+    ("William Morin", [8.0, 8.0, 8.0, 8.0], 40.0),
+    ("Yannick Leblanc", [8.0, 7.5, 8.0, 8.0], 39.5),
+];
+
+/// Les heures de la semaine par chantier (de lundi à jeudi : celles de vendredi se saisissent le soir), toute l'équipe
+/// comprise : le chantier, son numéro, ses heures.
+const HEURES_DE_LA_VITRINE: [(&str, &str, f64); 6] = [
+    ("Condos Le Riveneuve, 24 unités", "PROJ-2026-00137", 412.0),
+    ("Entrepôt Giguère-Dumont, 3 400 m²", "PROJ-2026-00135", 268.5),
+    ("Agrandissement de l'école des Sentiers-Fleuris", "PROJ-2026-00133", 231.0),
+    ("Clinique médicale des Méandres", "PROJ-2026-00130", 146.0),
+    ("Résidence Belleau", "PROJ-2026-00127", 89.0),
+    ("Toiture industrielle, Usinage Vermeil", "PROJ-2026-00126", 58.0),
+];
+
+/// La vitrine de `eve --essai-theme` (`--vitrine`, ou ses scènes) : la journée d'une entreprise et d'une famille
+/// inventées mais vraisemblables, pour des captures à montrer — un entrepreneur général d'une vingtaine de millions par
+/// année et d'une quarantaine d'employés, sa conjointe, un garçon de 6 ans en 1re année qui joue au hockey, une fille
+/// de 4 ans au CPE qui fait de la danse. Personne de vrai : aucune entreprise connue ; la météo de Lévis, inventée
+/// (sans requête). Tout se tient d'une capture à l'autre : les noms, les chiffres (le retard est la somme des factures
+/// en retard, la balance âgée celle de ce qui est à recevoir, le pipeline celle de ses étapes, les heures celles des
+/// chantiers), et l'heure, que la vitrine règle à chaque moment de sa journée ([`MOMENTS_DE_LA_VITRINE`]).
+struct Vitrine {
+    /// Le numéro du jour de la vitrine.
+    jour: i64,
+    /// Le `activite\` de l'essai, où s'écrivent sa famille et ses courriels ; `None` : un `activite\` d'ailleurs, où
+    /// rien ne s'écrit.
+    activite: Option<std::path::PathBuf>,
+}
+
+impl Vitrine {
+    fn d(&self, k: i64) -> String {
+        crate::centre::date_du_numero(self.jour + k)
+    }
+
+    /// Une date de la vitrine en toutes lettres, en minuscules : « jeudi 29 octobre ».
+    fn en_lettres(&self, k: i64) -> String {
+        crate::ambiance::date_longue(&self.d(k)).to_lowercase()
+    }
+
+    /// Le temps qu'il fait à un moment de la journée (`(température, code WMO)`), et la prévision de trois jours, lus
+    /// comme une réponse d'open-meteo pour Lévis.
+    fn bulletin(&self, (temperature, code): (f64, u32)) -> Option<crate::meteo::Bulletin> {
+        let reponse = serde_json::json!({
+            "current": { "temperature_2m": temperature, "weather_code": code },
+            "daily": {
+                "time": [self.d(0), self.d(1), self.d(2)],
+                "snowfall_sum": [0.0, 0.0, 0.0],
+                "wind_gusts_10m_max": [28.0, 41.0, 35.0],
+                "temperature_2m_max": [9.4, 6.8, 4.1],
+                "temperature_2m_min": [-0.6, 1.2, -2.3],
+                "weather_code": [2, 61, 80],
+                "precipitation_probability_max": [10, 60, 40]
+            }
+        });
+        let lieu = crate::meteo::Lieu {
+            ville: "Lévis".into(),
+            latitude: 46.80,
+            longitude: -71.18,
+            fuseau: "America/Toronto".into(),
+        };
+        crate::meteo::lire(reponse.to_string().as_bytes(), &lieu, 10).ok()
+    }
+
+    /// La famille dans `activite\` : ses personnes et sa ville, ses échéances, sa décision du jour, ses questions, son
+    /// épicerie, son souper, et les courriels du matin. La marque de l'essai des panneaux reste : l'essai les réécrit.
+    fn ecrire_la_famille(&self) -> std::io::Result<()> {
+        use serde_json::json;
+        let Some(activite) = &self.activite else { return Ok(()) };
+        std::fs::create_dir_all(activite)?;
+        let ecrire = |nom: &str, quoi: &str, v: Value| std::fs::write(activite.join(nom), format!("{quoi} = {v};\n"));
+        let marque = "Ces fichiers sont inventés par eve --essai-theme, qui les réécrit à chaque essai.\n";
+        std::fs::write(activite.join(MARQUE_DES_PANNEAUX), marque)?;
+        // Ni budget ni comptabilité dans la vitrine : celui de l'essai des panneaux s'en va.
+        let budget = activite.join("budget.js");
+        if budget.exists() {
+            std::fs::remove_file(budget)?;
+        }
+        let famille = json!({
+            "personnes": [
+                { "nom": "Sam", "couleur": [0, 229, 255], "anniversaire": "1988-03-21" },
+                { "nom": "Émilie", "couleur": [255, 122, 184], "anniversaire": "1990-12-04" },
+                { "nom": "Félix", "couleur": [255, 210, 63], "motifs": ["hockey"], "anniversaire": "2020-02-11" },
+                { "nom": "Rosalie", "couleur": [124, 255, 107], "motifs": ["CPE", "danse"],
+                  "anniversaire": "2022-06-18" }
+            ],
+            "ecole": { "motifs": ["1re année"], "conge_de": "Félix" },
+            "meteo": { "ville": "Lévis", "latitude": 46.80, "longitude": -71.18, "fuseau": "America/Toronto" },
+            "cueillette": { "jours": [1, 2, 3, 4, 5], "debut": "15:20", "fin": "15:40",
+                            "texte": "Va chercher Félix à l'école" }
+        });
+        ecrire("famille.js", "window.EVE_FAMILLE", famille)?;
+        let echeances = json!([
+            { "d": self.d(3), "q": "Journée pédagogique · pas d'école", "t": "ecole" },
+            { "d": self.d(12), "q": "Vaccin des 4 ans de Rosalie, au CLSC", "t": "famille" },
+            { "d": self.d(20), "q": "Rencontre de parents, 1re année", "t": "ecole" },
+            { "d": self.d(46), "q": "Acompte provisionnel", "t": "fiscal" }
+        ]);
+        ecrire("echeances.js", "window.EVE_ECHEANCES", echeances)?;
+        let decision = json!({
+            "date": self.d(0), "avant": self.d(2), "texte": "Inscrire Félix au camp de la journée pédagogique",
+            "source": "Le service de garde de l'école"
+        });
+        ecrire("decision.js", "window.EVE_DECISION", decision)?;
+        let questions = json!([
+            "Costume d'Halloween de Rosalie : licorne ou pompière ?",
+            "Pointure des patins de Félix ?",
+            "Qui garde les enfants le samedi 14 novembre ?"
+        ]);
+        ecrire("questions.js", "window.EVE_QUESTIONS", questions)?;
+        let articles = [
+            ("lait 2 %", false),
+            ("bananes", false),
+            ("pain de blé entier", false),
+            ("yogourt à boire", false),
+            ("œufs", true),
+            ("cheddar", false),
+            ("pommes Cortland", true),
+            ("bonbons d'Halloween", false),
+        ];
+        let items: Vec<Value> = articles.iter().map(|(n, ok)| json!({ "n": n, "ok": ok })).collect();
+        ecrire("epicerie.js", "window.EVE_EPICERIE", json!({ "maj": self.d(0), "items": items }))?;
+        let souper = json!({ "date": self.d(0), "menu": "Pâté chinois", "sortir": "le bœuf haché du congélateur" });
+        ecrire("souper.js", "window.EVE_SOUPER", souper)?;
+        self.ecrire_les_courriels(MOMENTS_DE_LA_VITRINE[0].non_lus)
+    }
+
+    /// Les courriels non lus d'un moment (la maison, le bureau ; `ecole` : l'un vient de l'école ou du CPE) et l'agenda
+    /// de la journée et du lendemain, comme les écrit le script d'Outlook (une marque d'ordre des octets en tête).
+    fn ecrire_les_courriels(&self, (maison, bureau, ecole): (u32, u32, bool)) -> std::io::Result<()> {
+        let Some(activite) = &self.activite else { return Ok(()) };
+        let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |x| x.as_secs());
+        let boites = serde_json::json!({ "t": unix, "boites": [
+            { "nom": "Maison", "non_lus": maison, "ecole": ecole },
+            { "nom": "Bureau", "non_lus": bureau, "ecole": false }
+        ] });
+        let agenda = serde_json::json!({ "t": unix, "rdv": [
+            { "d": self.d(0), "h": "09:30", "titre": "Appel avec la banque : la marge de crédit" },
+            { "d": self.d(0), "h": "15:30", "titre": "Rencontre avec l'architecte, résidence Belleau" },
+            { "d": self.d(0), "h": "16:00", "titre": "Réunion de coordination, entrepôt Giguère-Dumont" },
+            { "d": self.d(0), "h": "17:30", "titre": "Hockey de Félix, à l'aréna" },
+            { "d": self.d(1), "h": "09:00", "titre": "Cours de danse de Rosalie" },
+            { "d": self.d(1), "h": "17:00", "titre": "Tournée d'Halloween avec les enfants" }
+        ] });
+        let texte = format!("\u{feff}window.EVE_OUTLOOK={boites};\nwindow.EVE_AGENDA={agenda};\n");
+        std::fs::write(activite.join("outlook.js"), texte)
+    }
+
+    /// Le rappel du hockey, tel que `rappels.json` le garde.
+    fn rappels(&self) -> Value {
+        serde_json::json!([{
+            "id": "vitrine-hockey", "a": format!("{} 17:00", self.d(0)), "texte": "Le hockey de Félix",
+            "dit": false, "minuterie": false
+        }])
+    }
+
+    /// L'entreprise de la vitrine, lue dans son ERP à `lu` (en secondes du jour de la vitrine, l'heure du poste sans
+    /// fuseau), de la forme d'`entreprise.json` : ses chiffres viennent de ses listes, qui les additionnent.
+    fn entreprise(&self, lu: i64) -> Value {
+        use serde_json::json;
+        let d = |k: i64| self.d(k);
+        let argent = |v: f64| format!("{}\u{a0}$", crate::centre::milliers(v));
+        let retard: f64 = RETARDS_DE_LA_VITRINE.iter().map(|f| f.2).sum();
+        let tranche = |de: i64, a: i64| -> f64 {
+            RETARDS_DE_LA_VITRINE.iter().filter(|f| (de..=a).contains(&f.3)).map(|f| f.2).sum()
+        };
+        let valeur: f64 = CHANTIERS_DE_LA_VITRINE.iter().map(|c| c.3).sum();
+        let en_attente: Vec<_> =
+            SOUMISSIONS_DE_LA_VITRINE.iter().filter(|s| matches!(s.3, "Envoye" | "En attente")).collect();
+        let pipeline: f64 = PIPELINE_DE_LA_VITRINE.iter().map(|e| e.2).sum();
+        let opportunites: u32 = PIPELINE_DE_LA_VITRINE.iter().map(|e| e.1).sum();
+        let cette_semaine: f64 = HEURES_DE_LA_VITRINE.iter().map(|h| h.2).sum();
+        let soumissions: Vec<Value> = SOUMISSIONS_DE_LA_VITRINE
+            .iter()
+            .map(|(numero, nom, client, statut, valeur, depuis, modifie)| {
+                json!({ "numero": numero, "nom": nom, "client": client, "statut": statut, "valeur": valeur,
+                        "depuis": d(-depuis), "modifie": d(-modifie) })
+            })
+            .collect();
+        let lu_a = format!("{}T{:02}:{:02}:00", d(0), lu / 3600, lu / 60 % 60);
+        json!({
+            "lu_a": lu_a,
+            "etat": "a_jour",
+            "essai_a": lu_a,
+            "kpis": {
+                "projets_en_cours": CHANTIERS_DE_LA_VITRINE.len(), "valeur_projets_en_cours": valeur,
+                "a_recevoir": A_RECEVOIR, "en_retard": retard, "factures_en_retard": RETARDS_DE_LA_VITRINE.len(),
+                "devis_en_attente": en_attente.len(),
+                "valeur_devis_en_attente": en_attente.iter().map(|s| s.4).sum::<f64>(),
+                "pipeline": pipeline, "opportunites_ouvertes": opportunites,
+                "encaissements_30_jours": 1_720_000.0, "produits_sous_seuil": 0,
+                "clients_actifs": 64, "employes_actifs": 38, "taux_conversion_devis": 34.5,
+                "solde_banque": 612_438.27,
+                "bons_a_commander": 1, "commandes_ouvertes": 2, "livraisons_prevues": 3
+            },
+            "alertes": [
+                { "texte": format!("{} factures en retard : {}", RETARDS_DE_LA_VITRINE.len(), argent(retard)),
+                  "gravite": "haute", "sorte": "factures" },
+                { "texte": "Licence RBQ à renouveler d'ici 45\u{a0}jours", "gravite": "moyenne",
+                  "sorte": "conformite" },
+                { "texte": "3 cartes de compétence CCQ à renouveler d'ici 60\u{a0}jours", "gravite": "moyenne",
+                  "sorte": "conformite" },
+                { "texte": format!("Heures manquantes le {} : Carl Dufresne, Francis Lavoie", self.en_lettres(-1)),
+                  "gravite": "moyenne", "sorte": "heures" },
+                { "texte": "9 opérations bancaires à classer", "gravite": "info", "sorte": "banque" }
+            ],
+            "projets": CHANTIERS_DE_LA_VITRINE.iter().map(|(numero, nom, client, valeur, fin)| json!({
+                "nom": nom, "numero": numero, "client": client, "statut": "En cours", "valeur": valeur,
+                "ville": "Lévis", "fin": d(*fin)
+            })).collect::<Vec<_>>(),
+            "factures_en_retard": RETARDS_DE_LA_VITRINE.iter().map(|(numero, client, solde, jours)| json!({
+                "numero": numero, "client": client, "solde": solde, "jours": jours, "echeance": d(-jours)
+            })).collect::<Vec<_>>(),
+            "balance_agee": {
+                "a_venir": A_RECEVOIR - retard, "0_30": tranche(1, 30), "31_60": tranche(31, 60),
+                "61_90": tranche(61, 90), "plus_de_90": tranche(91, i64::MAX), "total": A_RECEVOIR
+            },
+            "pipeline": PIPELINE_DE_LA_VITRINE.iter().map(|(etape, nombre, valeur)| json!({
+                "etape": etape, "nombre": nombre, "valeur": valeur
+            })).collect::<Vec<_>>(),
+            "agenda": [
+                { "quand": d(0), "texte": "Réunion de chantier à 7 h, condos Le Riveneuve" },
+                { "quand": d(3), "texte": "Livraison des fermes de toit, entrepôt Giguère-Dumont" },
+                { "quand": d(4), "texte": "Inspection municipale, clinique médicale des Méandres" },
+                { "quand": d(6), "texte": "Coulée de la dalle du gymnase, école des Sentiers-Fleuris" }
+            ],
+            "soumissions": soumissions,
+            "banque": [
+                { "nom": "Compte courant", "solde": 612_438.27, "solde_publie": 598_215.40, "a_classer": 9 },
+                { "nom": "Marge de crédit", "solde": -350_000.0, "solde_publie": -350_000.0, "a_classer": 0 }
+            ],
+            "factures_recues": [
+                { "numero": "FACT-2026-01482", "fournisseur": "Béton Rioux-Marquis inc.",
+                  "projet": "Condos Le Riveneuve, 24 unités", "date": d(-1), "montant": 38_642.15, "solde": 38_642.15,
+                  "statut": "ENVOYEE" },
+                { "numero": "FACT-2026-01479", "fournisseur": "Armatures Belhumeur inc.",
+                  "projet": "Agrandissement de l'école des Sentiers-Fleuris", "date": d(-2), "montant": 21_984.60,
+                  "solde": 21_984.60, "statut": "ENVOYEE" },
+                { "numero": "FACT-2026-01471", "fournisseur": "Fenestration Héroux-Lemire inc.",
+                  "projet": "Clinique médicale des Méandres", "date": d(-4), "montant": 64_210.0, "solde": 64_210.0,
+                  "statut": "ENVOYEE" },
+                { "numero": "FACT-2026-01466", "fournisseur": "Structures Vallon inc.",
+                  "projet": "Entrepôt Giguère-Dumont, 3 400 m²", "date": d(-5), "montant": 47_815.32, "solde": 0.0,
+                  "statut": "PAYEE" },
+                { "numero": "FACT-2026-01458", "fournisseur": "Location d'équipement Hamel-Ouellet",
+                  "projet": "Condos Le Riveneuve, 24 unités", "date": d(-7), "montant": 6_948.75, "solde": 6_948.75,
+                  "statut": "ENVOYEE" },
+                { "numero": "FACT-2026-01452", "fournisseur": "Matériaux Gendreau inc.", "projet": "Résidence Belleau",
+                  "date": d(-8), "montant": 12_377.04, "solde": 4_377.04, "statut": "PARTIELLEMENT_PAYEE" }
+            ],
+            "commandes": [
+                { "sorte": "a_commander", "numero": "BA-2026-0311", "projet": "Condos Le Riveneuve, 24 unités",
+                  "statut": "EN_ATTENTE", "date": d(5), "montant": 186_400.0, "texte": "Portes et fenêtres, phase 2" },
+                { "sorte": "commande", "numero": "BC-2026-0207", "fournisseur": "Armatures Belhumeur inc.",
+                  "projet": "Agrandissement de l'école des Sentiers-Fleuris", "statut": "commande", "date": d(4),
+                  "montant": 31_640.0, "texte": "Acier d'armature, dalle du gymnase" },
+                { "sorte": "commande", "numero": "BC-2026-0205", "fournisseur": "Structures Vallon inc.",
+                  "projet": "Entrepôt Giguère-Dumont, 3 400 m²", "statut": "commande", "date": d(3),
+                  "montant": 88_900.0, "texte": "Fermes de toit, 34 unités" },
+                { "sorte": "livraison", "numero": "LIV-2026-0439", "projet": "Entrepôt Giguère-Dumont, 3 400 m²",
+                  "statut": "planifiee", "date": d(3), "heure": "08:00", "texte": "Fermes de toit · entrée nord" },
+                { "sorte": "livraison", "numero": "LIV-2026-0442",
+                  "projet": "Agrandissement de l'école des Sentiers-Fleuris", "statut": "planifiee", "date": d(6),
+                  "heure": "06:30", "texte": "Béton 32 MPa, 48 m³ · dalle du gymnase" },
+                { "sorte": "livraison", "numero": "LIV-2026-0445", "projet": "Condos Le Riveneuve, 24 unités",
+                  "statut": "planifiee", "date": d(7), "heure": "07:30", "texte": "Portes et fenêtres, 3e étage" }
+            ],
+            "heures": {
+                "semaine": d(-4), "cette_semaine": cette_semaine, "semaine_passee": 1_482.0, "a_venir": 0.0,
+                "employes_actifs": 38, "derniere_saisie": format!("{}T17:46", d(-1)),
+                "manquantes": { "jour": d(-1), "employes": ["Carl Dufresne", "Francis Lavoie"] },
+                "employes": EQUIPE_DE_LA_VITRINE.iter().map(|(nom, jours, passee)| {
+                    let saisis: Vec<Value> = jours.iter().enumerate().filter(|(_, h)| **h > 0.0)
+                        .map(|(k, h)| json!({ "jour": d(k as i64 - 4), "heures": h })).collect();
+                    json!({ "nom": nom, "cette_semaine": jours.iter().sum::<f64>(), "semaine_passee": passee,
+                            "a_venir": 0.0, "au_travail": false, "jours": saisis })
+                }).collect::<Vec<_>>(),
+                "par_projet": HEURES_DE_LA_VITRINE.iter().map(|(nom, numero, heures)| json!({
+                    "nom": nom, "numero": numero, "heures": heures
+                })).collect::<Vec<_>>()
+            }
+        })
+    }
+
+    /// La conversation de la journée, ligne après ligne, comme le chef la publie : le texte que montre la fenêtre (son
+    /// émotion déjà ôtée ; ses cartes après les trois tirets) et, sous chaque réponse de Claude, ce que son tour a
+    /// pris. Elle dit ce que montre le tableau de bord : le chantier de l'école, la plus grosse facture en retard, le
+    /// hockey.
+    fn conversation(&self) -> Vec<Value> {
+        // Ce qui se dit à la française ; les cartes (après les trois tirets) telles quelles.
+        let francais = |texte: &str| match texte.split_once("\n---\n") {
+            Some((dit, cartes)) => format!("{}\n---\n{cartes}", insecables(dit)),
+            None => insecables(texte),
+        };
+        let ligne = |de: &str, texte: &str, heure: &str| EtatDuTheme::ligne(de, &francais(texte), heure, false);
+        let eve = |texte: &str, heure: &str, tour: &str| {
+            let mut l = ligne("eve", texte, heure);
+            l["tour"] = Value::String(format!("{tour} · Sonnet 5.5, moyen"));
+            l
+        };
+        // Un montant au cent, comme Claude l'écrit dans une carte : « 141 863,47 $ ».
+        let argent = |v: f64| {
+            let cents = (v * 100.0).round() as i64;
+            format!("{},{:02}\u{a0}$", crate::centre::milliers((cents / 100) as f64), cents % 100)
+        };
+        let mut retards: Vec<_> = RETARDS_DE_LA_VITRINE.iter().collect();
+        retards.sort_by(|a, b| b.2.total_cmp(&a.2));
+        let lignes: Vec<Value> = retards
+            .iter()
+            .map(|(_, client, solde, jours)| serde_json::json!([client, format!("{jours} j"), argent(*solde)]))
+            .collect();
+        let total: f64 = RETARDS_DE_LA_VITRINE.iter().map(|f| f.2).sum();
+        let tableau = serde_json::json!({
+            "type": "tableau", "titre": "Factures en retard", "colonnes": ["Client", "Retard", "Solde"],
+            "lignes": lignes, "pied": ["Total", "", argent(total)]
+        });
+        let premiere = RETARDS_DE_LA_VITRINE[0];
+        let rappel = serde_json::json!({ "type": "rappel", "a": format!("{} 17:00", self.d(0)),
+                                         "texte": "Le hockey de Félix" });
+        let dette = format!(
+            "{} : environ {} 000 $, en retard de {} jours. En tout, six factures sont en retard, pour à peu près \
+             410 000 $. Veux-tu que je prépare une relance ?\n---\n```carte\n{tableau}\n```",
+            premiere.1.trim_end_matches(" inc."),
+            (premiere.2 / 1000.0).round(),
+            premiere.3
+        );
+        vec![
+            ligne("toi", "Où en est le chantier de l'école ?", "07:52"),
+            eve(
+                "L'agrandissement de l'école des Sentiers-Fleuris est rendu à environ 60 %. La coulée de la dalle du \
+                 gymnase est prévue jeudi prochain, à 6 h 30. Une seule réserve : l'inspecteur veut voir le coupe-feu \
+                 du local technique corrigé avant qu'on ferme les murs.",
+                "07:52",
+                "7 s · 0,04 $",
+            ),
+            ligne("toi", "As-tu des nouvelles du CPE pour la soumission ?", "08:09"),
+            eve(
+                "Oui, et c'est une bonne nouvelle : le CPE Les Mésangeais accepte notre soumission, environ 1,45 M$. \
+                 Leur courriel est arrivé à 7 h 58. Veux-tu que je prépare le contrat pour ta signature ?",
+                "08:09",
+                "6 s · 0,03 $",
+            ),
+            ligne("toi", "Qui me doit le plus d'argent ?", "10:41"),
+            eve(&dette, "10:41", "9 s · 0,05 $"),
+            ligne(
+                "alerte",
+                "Un courriel du CPE vient d'arriver : Rosalie fait de la fièvre, il faudrait venir la chercher.",
+                "13:31",
+            ),
+            ligne("toi", "La petite fait de la fièvre, je dois partir plus tôt.", "13:36"),
+            eve(
+                "Oh non, pauvre Rosalie. Va la chercher, je m'occupe de ton après-midi : ta rencontre de 15 h 30 avec \
+                 l'architecte peut glisser à lundi, et Alexis peut mener la réunion de 16 h à l'entrepôt. Je les \
+                 préviens ?",
+                "13:36",
+                "5 s · 0,03 $",
+            ),
+            ligne(
+                "toi",
+                "Rappelle-moi le hockey de Félix à 17 h. Il veut que je l'appelle « le Mur », maintenant.",
+                "16:20",
+            ),
+            eve(
+                &format!(
+                    "C'est noté, je te le rappelle à 17 h. Bonne game au Mur ! Il embarque sur la glace à 17 h 30.\n\
+                     ---\n```carte\n{rappel}\n```"
+                ),
+                "16:20",
+                "4 s · 0,02 $",
+            ),
+        ]
+    }
+}
+
+/// Un texte de la vitrine à la française : une espace insécable devant « ? ! : ; » et « », après « et entre un nombre
+/// et son unité ($, %, M$, h) ; une espace fine entre les milliers. Une bulle ne se coupe plus au mauvais endroit
+/// (« soumission / ? », « 1,45 / M$ »).
+fn insecables(texte: &str) -> String {
+    let mut s = texte.to_string();
+    for (de, a) in [
+        (" ?", "\u{a0}?"),
+        (" !", "\u{a0}!"),
+        (" :", "\u{a0}:"),
+        (" ;", "\u{a0};"),
+        ("« ", "«\u{a0}"),
+        (" »", "\u{a0}»"),
+        (" $", "\u{a0}$"),
+        (" %", "\u{a0}%"),
+        (" M$", "\u{a0}M$"),
+    ] {
+        s = s.replace(de, a);
+    }
+    // Les heures (« 6 h 30 », « 17 h ») et les milliers (« 142 000 ») : un nombre ne se sépare pas de ce qui le suit.
+    let c: Vec<char> = s.chars().collect();
+    let a = |k: usize| c.get(k).copied().unwrap_or(' ');
+    (0..c.len())
+        .map(|k| match c[k] {
+            ' ' if k > 0 && a(k - 1).is_ascii_digit() && a(k + 1).is_ascii_digit() => '\u{202f}',
+            ' ' if k > 0 && a(k - 1).is_ascii_digit() && a(k + 1) == 'h' && !a(k + 2).is_alphabetic() => '\u{a0}',
+            ' ' if k > 2
+                && a(k - 1) == 'h'
+                && a(k - 2) == ' '
+                && a(k - 3).is_ascii_digit()
+                && a(k + 1).is_ascii_digit() =>
+            {
+                '\u{a0}'
+            }
+            x => x,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod essais_de_la_vitrine {
+    use super::*;
+
+    fn vitrine() -> Vitrine {
+        Vitrine { jour: crate::centre::numero_du_jour(JOUR_DE_LA_VITRINE).unwrap(), activite: None }
+    }
+
+    fn nombre(v: &Value) -> f64 {
+        v.as_f64().unwrap()
+    }
+
+    #[test]
+    fn ses_chiffres_se_tiennent() {
+        let e = vitrine().entreprise(8 * 3600);
+        let (k, h) = (&e["kpis"], &e["heures"]);
+        let somme = |v: &Value, champ: &str| v.as_array().unwrap().iter().map(|x| nombre(&x[champ])).sum::<f64>();
+        let pareils = |a: f64, b: f64| (a - b).abs() < 0.01;
+        assert!(pareils(nombre(&k["en_retard"]), somme(&e["factures_en_retard"], "solde")), "le retard");
+        assert_eq!(k["factures_en_retard"], e["factures_en_retard"].as_array().unwrap().len());
+        let b = &e["balance_agee"];
+        let tranches: f64 = ["a_venir", "0_30", "31_60", "61_90", "plus_de_90"].iter().map(|t| nombre(&b[t])).sum();
+        assert!(pareils(tranches, nombre(&k["a_recevoir"])), "la balance âgée donne ce qui est à recevoir");
+        let echu: f64 = ["0_30", "31_60", "61_90", "plus_de_90"].iter().map(|t| nombre(&b[t])).sum();
+        assert!(pareils(echu, nombre(&k["en_retard"])), "ce qui est échu est en retard");
+        assert_eq!(k["projets_en_cours"], e["projets"].as_array().unwrap().len());
+        assert!(pareils(nombre(&k["valeur_projets_en_cours"]), somme(&e["projets"], "valeur")));
+        assert!(pareils(nombre(&k["pipeline"]), somme(&e["pipeline"], "valeur")), "le pipeline et ses étapes");
+        assert!(pareils(nombre(&h["cette_semaine"]), somme(&h["par_projet"], "heures")), "les heures des chantiers");
+        // Une quarantaine d'employés, quatre jours d'environ huit heures.
+        let par_employe = nombre(&h["cette_semaine"]) / nombre(&h["employes_actifs"]) / 4.0;
+        assert!((7.5..=8.5).contains(&par_employe), "{par_employe} h par jour");
+        // Les chantiers des factures, des commandes et des heures sont ceux de la carte.
+        let chantiers: Vec<&str> =
+            e["projets"].as_array().unwrap().iter().map(|p| p["nom"].as_str().unwrap()).collect();
+        for liste in [&e["factures_recues"], &e["commandes"], &h["par_projet"]] {
+            for x in liste.as_array().unwrap() {
+                let nom = x.get("projet").or(x.get("nom")).and_then(Value::as_str).unwrap();
+                assert!(chantiers.contains(&nom), "{nom} n'est pas un chantier en cours");
+            }
+        }
+    }
+
+    #[test]
+    fn sa_conversation_dit_ce_que_montre_le_tableau() {
+        let v = vitrine();
+        let fil = v.conversation();
+        let texte = |k: usize| fil[k]["texte"].as_str().unwrap().to_string();
+        // La plus grosse facture en retard est la première de la carte : son client, son montant, ses jours.
+        let (_, client, _, jours) = RETARDS_DE_LA_VITRINE[0];
+        assert!(RETARDS_DE_LA_VITRINE.iter().all(|f| f.2 <= RETARDS_DE_LA_VITRINE[0].2));
+        let dette = texte(5);
+        assert!(dette.starts_with(client.trim_end_matches(" inc.")), "{dette}");
+        assert!(dette.contains("142\u{202f}000\u{a0}$") && dette.contains(&format!("{jours} jours")), "{dette}");
+        // Le chantier de l'école est sur la carte des chantiers, et sa coulée à l'agenda, jeudi prochain.
+        let e = v.entreprise(8 * 3600);
+        assert!(
+            CHANTIERS_DE_LA_VITRINE.iter().any(|c| texte(1).contains(c.1.trim_start_matches("Agrandissement de ")))
+        );
+        let coulee = e["agenda"].as_array().unwrap().iter().find(|a| a["texte"].as_str().unwrap().contains("Coulée"));
+        assert_eq!(crate::ambiance::date_longue(coulee.unwrap()["quand"].as_str().unwrap()).get(..5), Some("JEUDI"));
+        // Le rappel du hockey : sa carte, et le même dans rappels.json.
+        assert!(texte(10).contains(&format!("\"a\":\"{} 17:00\"", v.d(0))), "{}", texte(10));
+        assert_eq!(v.rappels()[0]["a"], format!("{} 17:00", v.d(0)));
+        // Chaque moment montre la conversation jusqu'à son heure, pas plus loin ; les moments se suivent.
+        let seconde = |h: &str| seconde_du_jour(h).unwrap();
+        for (k, m) in MOMENTS_DE_LA_VITRINE.iter().enumerate() {
+            assert!(seconde(fil[m.lignes - 1]["heure"].as_str().unwrap()) <= m.heure, "{}", m.scene);
+            if let Some(suivante) = fil.get(m.lignes) {
+                assert!(seconde(suivante["heure"].as_str().unwrap()) > m.heure, "{}", m.scene);
+            }
+            if let Some(avant) = k.checked_sub(1).map(|j| &MOMENTS_DE_LA_VITRINE[j]) {
+                assert!(avant.heure < m.heure && avant.lignes <= m.lignes, "{}", m.scene);
+            }
+        }
+        assert_eq!(fil.len(), MOMENTS_DE_LA_VITRINE.last().unwrap().lignes);
+    }
+
+    #[test]
+    fn un_texte_a_la_francaise() {
+        assert_eq!(
+            insecables("la soumission ? Oui : 1,45 M$, 60 %, à 6 h 30, à 17 h. Environ 142 000 $ !"),
+            "la soumission\u{a0}? Oui\u{a0}: 1,45\u{a0}M$, 60\u{a0}%, à 6\u{a0}h\u{a0}30, à 17\u{a0}h. Environ \
+             142\u{202f}000\u{a0}$\u{a0}!"
+        );
+        assert_eq!(insecables("« le Mur », à 16 h à l'entrepôt"), "«\u{a0}le Mur\u{a0}», à 16\u{a0}h à l'entrepôt");
     }
 }
 
@@ -5154,11 +6536,21 @@ struct EtatDuTheme {
     parle: Option<(Instant, Instant)>,
     /// L'émotion de la réponse, que montre le visage d'Eve.
     emotion: Option<&'static str>,
+    /// La vue du tableau de bord (le réglage `vue_du_tableau`) ; la liaison à Constructo AI, comme le chef la publie
+    /// (`constructo`) ; l'`entreprise.json` où s'écrit l'entreprise inventée (`None` : rien ne s'écrit) ; une lecture
+    /// (ou une liaison) inventée qui finit à cet instant.
+    vue: String,
+    constructo: Value,
+    entreprise: Option<std::path::PathBuf>,
+    lecture_finie_a: Option<Instant>,
+    /// La vitrine : sa famille, son entreprise, sa journée ([`Vitrine`]) ; `None` : les données de l'essai.
+    vitrine: Option<Vitrine>,
 }
 
 impl EtatDuTheme {
-    fn nouveau() -> EtatDuTheme {
+    fn nouveau(entreprise: Option<std::path::PathBuf>, vitrine: Option<Vitrine>) -> EtatDuTheme {
         EtatDuTheme {
+            vitrine,
             theme: "constructo".into(),
             etat: "pret",
             libelle: String::new(),
@@ -5170,6 +6562,10 @@ impl EtatDuTheme {
             reponse_a: None,
             parle: None,
             emotion: None,
+            vue: "tout".into(),
+            constructo: Value::Null,
+            entreprise,
+            lecture_finie_a: None,
         }
     }
 
@@ -5202,10 +6598,116 @@ impl EtatDuTheme {
         crate::voix::faire_entendre(None);
     }
 
-    /// L'état d'une scène (personne de vrai : une famille et des données inventées). Ce qui se disait s'arrête.
+    /// La liaison à Constructo AI, comme le chef la publie : son état (« connectee », « en_cours », « deconnectee ») et
+    /// sa ligne.
+    fn relier(&mut self, etat: &str) {
+        let detail = match etat {
+            "connectee" => "Reliée au compte sam@exemple.ca : ses outils sont prêts.",
+            "en_cours" => {
+                "La page de connexion de Constructo AI est ouverte dans ton navigateur : entre le courriel et le mot \
+                 de passe de ton entreprise, puis reviens ici."
+            }
+            _ => "Pas encore reliée à Constructo AI.",
+        };
+        self.constructo = serde_json::json!({
+            "permis": true,
+            "etat": etat,
+            "connectee": etat == "connectee",
+            "branchee": etat == "connectee",
+            "compte": if etat == "connectee" { "sam@exemple.ca" } else { "" },
+            "erreur": Value::Null,
+            "detail": detail,
+        });
+    }
+
+    /// L'entreprise inventée, écrite comme Eve l'écrirait en lisant l'ERP (`None` : le fichier s'efface).
+    fn ecrire_l_entreprise(&self, contenu: Option<Value>) {
+        let Some(fichier) = &self.entreprise else { return };
+        let fait = match contenu {
+            Some(v) => crate::reglages::ecrire_d_un_geste(fichier, v.to_string().as_bytes()),
+            None if fichier.exists() => std::fs::remove_file(fichier),
+            None => Ok(()),
+        };
+        if let Err(e) = fait {
+            eprintln!("{} : {e}", fichier.display());
+        }
+    }
+
+    /// L'entreprise à jour, lue il y a `il_y_a` secondes : celle de la vitrine (à l'heure de son horloge), sinon celle
+    /// de l'essai.
+    fn entreprise_a_jour(&self, etat: &str, il_y_a: i64) -> Value {
+        match &self.vitrine {
+            Some(v) => {
+                let maintenant = seconde_du_jour(&crate::journal::heure()).unwrap_or(12 * 3600);
+                let mut e = v.entreprise((maintenant - il_y_a).max(0));
+                e["etat"] = etat.into();
+                e
+            }
+            None => entreprise_inventee(etat, il_y_a, None, true),
+        }
+    }
+
+    /// Un moment de la journée de la vitrine : son heure (l'horloge de la fenêtre), son temps, ses courriels, la
+    /// lecture de l'ERP faite quatre minutes plus tôt, le rappel du hockey une fois posé, la conversation jusque-là,
+    /// et l'émotion d'Eve.
+    fn moment_de_la_vitrine(&mut self, m: &MomentDeLaVitrine) {
+        let Some(v) = &self.vitrine else { return };
+        crate::journal::regler_l_horloge(Some(v.jour * 86_400 + m.heure));
+        if let Some(b) = v.bulletin(m.meteo) {
+            crate::meteo::imposer(b);
+        }
+        if let Err(e) = v.ecrire_les_courriels(m.non_lus) {
+            eprintln!("les courriels de la vitrine : {e}");
+        }
+        let entreprise = v.entreprise(m.heure - 4 * 60);
+        let rappels = (m.lignes >= LIGNES_DU_RAPPEL).then(|| v.rappels());
+        let fil: Vec<Value> = v.conversation().into_iter().take(m.lignes).collect();
+        self.vue = m.vue.into();
+        self.relier("connectee");
+        self.ecrire_l_entreprise(Some(entreprise));
+        self.ecrire_les_rappels(rappels);
+        self.lecture_finie_a = None;
+        self.fil = fil;
+        self.emotion = m.emotion;
+        self.accord = Value::Null;
+        self.a_corriger = Value::Null;
+        self.prete();
+    }
+
+    /// Les rappels de la vitrine dans `rappels.json` du dossier local de l'essai : écrits seulement s'il n'y en a pas
+    /// ou s'ils viennent d'elle (sa marque à côté), effacés de même ; jamais ceux d'une vraie Eve.
+    fn ecrire_les_rappels(&self, rappels: Option<Value>) {
+        if self.entreprise.is_none() {
+            return;
+        }
+        let local = crate::reglages::dossier_local();
+        let (fichier, marque) = (local.join("rappels.json"), local.join("essai-theme-rappels.txt"));
+        if fichier.exists() && !marque.is_file() {
+            return;
+        }
+        let fait = match rappels {
+            Some(r) => std::fs::write(&marque, "Ces rappels sont inventés par la vitrine de eve --essai-theme.\n")
+                .and_then(|()| crate::reglages::ecrire_d_un_geste(&fichier, r.to_string().as_bytes())),
+            None if fichier.exists() => std::fs::remove_file(&fichier),
+            None => Ok(()),
+        };
+        if let Err(e) = fait {
+            eprintln!("{} : {e}", fichier.display());
+        }
+    }
+
+    /// L'état d'une scène (personne de vrai : une famille et une entreprise inventées). Ce qui se disait s'arrête.
     fn scene(&mut self, nom: &str) {
         self.parle = None;
         crate::voix::faire_entendre(None);
+        // Un moment de la vitrine règle son horloge ; les autres scènes ont la vraie heure.
+        if let Some(m) = MOMENTS_DE_LA_VITRINE.iter().find(|m| m.scene == nom) {
+            self.moment_de_la_vitrine(m);
+            return;
+        }
+        crate::journal::regler_l_horloge(None);
+        // Le rappel qu'aurait laissé une vitrine d'avant ne sonne pas dans les autres scènes.
+        self.ecrire_les_rappels(None);
         // L'émotion de chaque scène : la joie d'une réponse, l'empathie en la disant, le sérieux d'un accord.
         self.emotion = match nom {
             "reponse" => Some("joie"),
@@ -5213,6 +6715,32 @@ impl EtatDuTheme {
             "accord" => Some("serieuse"),
             _ => None,
         };
+        // La vue du tableau et l'entreprise de chaque scène ; les scènes de la conversation gardent celles d'avant.
+        let lue = self.entreprise_a_jour("a_jour", 4 * 60);
+        let a_jour = || Some(lue.clone());
+        let panne = "le serveur de Constructo AI ne répond pas (il se réveille peut-être)";
+        let entreprise = match nom {
+            "tableau" | "retour" | "grande" | "suite" | "moyenne" => Some(("tout", "connectee", a_jour())),
+            "entreprise" | "entreprise-suite" => Some(("entreprise", "connectee", a_jour())),
+            "famille" => Some(("famille", "connectee", a_jour())),
+            "non-reliee" => Some(("tout", "deconnectee", Some(entreprise_inventee("non_connecte", 0, None, false)))),
+            "connexion" => Some(("tout", "en_cours", Some(entreprise_inventee("non_connecte", 0, None, false)))),
+            "lecture" => Some(("tout", "connectee", Some(entreprise_inventee("en_cours", 0, None, false)))),
+            "erreur" => {
+                Some(("entreprise", "connectee", Some(entreprise_inventee("erreur", 3 * 3600, Some(panne), true))))
+            }
+            "erreur-sans-chiffres" => {
+                Some(("tout", "connectee", Some(entreprise_inventee("erreur", 0, Some(panne), false))))
+            }
+            "perdue" => Some(("entreprise", "deconnectee", Some(entreprise_inventee("a_jour", 22 * 3600, None, true)))),
+            _ => None,
+        };
+        if let Some((vue, liaison, contenu)) = entreprise {
+            self.vue = vue.into();
+            self.relier(liaison);
+            self.ecrire_l_entreprise(contenu);
+            self.lecture_finie_a = None;
+        }
         match nom {
             "tableau" | "retour" => {
                 self.prete();
@@ -5292,7 +6820,7 @@ impl EtatDuTheme {
                 self.aide = "Relâche pour envoyer".into();
                 self.niveau = 0.45;
             }
-            _ => {}
+            _ => self.prete(),
         }
     }
 
@@ -5302,6 +6830,19 @@ impl EtatDuTheme {
         match (action, valeur.as_str()) {
             ("quitter", _) => return false,
             ("theme", Some(t)) => self.theme = t.to_string(),
+            ("vue_du_tableau", Some(v)) if crate::reglages::VUES_DU_TABLEAU.iter().any(|x| x.0 == v) => {
+                self.vue = v.to_string();
+            }
+            // Relire : la lecture d'avant reste, son état dit qu'Eve lit ; deux secondes plus tard, elle est à jour.
+            ("entreprise_lire", _) if self.constructo["etat"].as_str() == Some("connectee") => {
+                self.ecrire_l_entreprise(Some(self.entreprise_a_jour("en_cours", 4 * 60)));
+                self.lecture_finie_a = Some(Instant::now() + Duration::from_secs(2));
+            }
+            // Se relier : la page de connexion s'ouvre, puis la liaison se fait en deux secondes et demie.
+            ("constructo_connecter", _) => {
+                self.relier("en_cours");
+                self.lecture_finie_a = Some(Instant::now() + Duration::from_millis(2500));
+            }
             ("texte", Some(t)) => {
                 self.fil.push(Self::ligne("toi", t, &crate::journal::heure(), false));
                 self.etat = "reflexion";
@@ -5329,7 +6870,8 @@ impl EtatDuTheme {
         true
     }
 
-    /// La réponse inventée à un texte, quand elle est due, puis dite trois secondes et demie ; la fin de ce qui se dit.
+    /// La réponse inventée à un texte, quand elle est due, puis dite trois secondes et demie ; la fin de ce qui se
+    /// dit ; la fin d'une lecture ou d'une liaison inventée (reliée, à jour).
     fn avancer(&mut self) {
         if self.reponse_a.is_some_and(|t| Instant::now() >= t) {
             self.reponse_a = None;
@@ -5340,6 +6882,11 @@ impl EtatDuTheme {
         }
         if self.parle.is_some_and(|(_, fin)| Instant::now() >= fin) {
             self.prete();
+        }
+        if self.lecture_finie_a.is_some_and(|t| Instant::now() >= t) {
+            self.lecture_finie_a = None;
+            self.relier("connectee");
+            self.ecrire_l_entreprise(Some(self.entreprise_a_jour("a_jour", 0)));
         }
     }
 
@@ -5352,11 +6899,13 @@ impl EtatDuTheme {
             "emotion": self.emotion,
             "qui": "Sam",
             "theme": self.theme,
-            "nom": "Essai",
+            "vue_du_tableau": self.vue,
+            // La vitrine se montre comme une vraie Eve : le profil du bureau, un micro.
+            "nom": if self.vitrine.is_some() { "Bureau" } else { "Essai" },
             "propre": true,
             "entreprise": "",
             "base": "",
-            "micro": "Le micro de l'essai",
+            "micro": if self.vitrine.is_some() { "Microphone" } else { "Le micro de l'essai" },
             "oreille": "prete",
             "accord": self.accord,
             "a_corriger": self.a_corriger,
@@ -5381,6 +6930,7 @@ impl EtatDuTheme {
             "touche": "Ctrl droit",
             "camera": false,
             "camera_ordre": { "n": 0, "geste": "" },
+            "constructo": self.constructo,
         })
         .to_string()
     }
@@ -5407,6 +6957,7 @@ fn mener_l_essai_du_theme(
     ecran: &crate::ecran::Ecran,
     gestes: &mpsc::Receiver<Evt>,
     mut etat: EtatDuTheme,
+    scenes: &[&SceneDuTheme],
     captures: Option<std::path::PathBuf>,
     secondes: Option<f64>,
 ) {
@@ -5430,7 +6981,7 @@ fn mener_l_essai_du_theme(
         etat.avancer();
         // Les scènes attendent la fenêtre : son contexte est là dès sa première image.
         if let Some(ctx) = crate::natif::theme::contexte()
-            && let Some(s) = SCENES_DU_THEME.get(scene)
+            && let Some(s) = scenes.get(scene)
         {
             let depuis = *debut_de_scene.get_or_insert_with(|| {
                 println!("scène : {}", s.nom);
@@ -5440,14 +6991,30 @@ fn mener_l_essai_du_theme(
                 if let Some([l, h]) = s.taille {
                     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(l, h)));
                 }
+                // Les autres scènes montrent le haut de la page, même après une scène défilée.
+                if !s.nom.ends_with("suite") {
+                    crate::natif::theme::defiler_le_tableau(&ctx, 0.0);
+                }
                 t
             });
+            // Le bas de la page, jusqu'à la capture : la vue et la taille de la scène se prennent entre-temps.
+            if s.nom.ends_with("suite") && !capturee {
+                crate::natif::theme::defiler_le_tableau(&ctx, 820.0);
+            }
             if let Some(dossier) = &captures
                 && !capturee
                 && t - depuis >= s.duree - 1.0
             {
                 capturee = true;
-                let chemin = dossier.join(format!("theme-{}-{}.png", scene + 1, s.nom));
+                // Le rang de la scène dans l'essai entier : une capture garde son nom d'un essai à l'autre ; celles de
+                // la vitrine portent le nom de leur moment (« vitrine-joie.png »).
+                let rang = SCENES_DU_THEME.iter().position(|x| x.nom == s.nom).unwrap_or(scene) + 1;
+                let nom = if s.nom.starts_with("vitrine") {
+                    format!("{}.png", s.nom)
+                } else {
+                    format!("theme-{rang:02}-{}.png", s.nom)
+                };
+                let chemin = dossier.join(nom);
                 ctx.request_screenshot(move |image| match enregistrer_png(&image, &chemin) {
                     Ok(()) => println!("capture : {}", chemin.display()),
                     Err(e) => eprintln!("capture {} : {e}", chemin.display()),
@@ -5455,7 +7022,7 @@ fn mener_l_essai_du_theme(
             }
             if t - depuis >= s.duree {
                 (scene, debut_de_scene, capturee) = (scene + 1, None, false);
-                if scene == SCENES_DU_THEME.len() && captures.is_some() {
+                if scene == scenes.len() && captures.is_some() {
                     thread::sleep(Duration::from_millis(600));
                     crate::natif::fermer();
                     return;

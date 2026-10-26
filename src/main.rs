@@ -11,6 +11,7 @@ mod cerveau;
 mod chef;
 mod connexion;
 mod ecran;
+mod entreprise;
 mod essais;
 mod fenetre;
 mod groupe;

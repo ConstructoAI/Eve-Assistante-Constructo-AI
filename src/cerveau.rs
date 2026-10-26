@@ -79,6 +79,10 @@ impl Cerveau {
             consigne.push_str("\n\n");
             consigne.push_str(&consigne_constructo());
         }
+        if l.espace.constructo {
+            consigne.push_str("\n\n");
+            consigne.push_str(&consigne_du_tableau(&crate::reglages::dossier_local()));
+        }
         consigne.push_str("\n\n");
         consigne.push_str(&consigne_des_profils(&l.profil, &l.dossier, &l.dossier_d_eve));
         consigne.push_str("\n\n");
@@ -575,6 +579,26 @@ pub fn consigne_des_prononciations() -> String {
     )
 }
 
+/// La ligne qui ouvre la partie « TABLEAU DE BORD » de la consigne.
+const ENTETE_TABLEAU: &str = "TABLEAU DE BORD";
+
+/// La partie « TABLEAU DE BORD » de la consigne, que reçoit une Eve à qui Constructo AI est permis : sa fenêtre montre
+/// déjà l'entreprise, qu'elle lit elle-même dans l'ERP (`entreprise.rs`), et sa dernière lecture est dans
+/// `entreprise.json` du dossier local (`local`) — Claude y répond à une question d'ensemble sans rappeler l'ERP. Elle
+/// vit avec le programme qui écrit ce fichier, et n'en recopie rien.
+pub fn consigne_du_tableau(local: &Path) -> String {
+    format!(
+        "{ENTETE_TABLEAU}\n\
+         - La fenêtre d'Eve montre déjà l'entreprise, qu'elle lit elle-même dans Constructo AI toutes les dix \
+         minutes : les chiffres, les alertes, les chantiers en cours, les factures en retard, le pipeline, les \
+         soumissions, les factures des fournisseurs, les achats en route, les heures des employés, l'agenda partagé, \
+         les comptes en banque. Sa dernière lecture est dans {fichier} (du JSON ; son heure : lu_a) : pour une \
+         question d'ensemble (« où en est l'entreprise ? », « qui n'a pas d'heures vendredi ? »), lis-le d'abord, \
+         sans appeler l'ERP ; pour un détail, ou un chiffre à la minute près, prends l'outil de Constructo AI.",
+        fichier = local.join(crate::entreprise::FICHIER).display()
+    )
+}
+
 /// La ligne qui ouvre la partie « RAPPELS » de la consigne.
 const ENTETE_RAPPELS: &str = "RAPPELS";
 
@@ -832,6 +856,20 @@ mod essais {
             assert!(c.contains(attendu), "{attendu} manque :\n{c}");
         }
         assert!(!c.contains("  "), "les lignes se suivent sans blancs doublés :\n{c}");
+    }
+
+    /// La partie « TABLEAU DE BORD » dit ce que montre la fenêtre et où est sa dernière lecture, sans rien en recopier.
+    #[test]
+    fn la_consigne_du_tableau_de_bord() {
+        let local = Path::new(r"C:\Users\Sam\AppData\Local\Eve\specialistes\essai");
+        let c = consigne_du_tableau(local);
+        assert!(c.starts_with("TABLEAU DE BORD\n- La fenêtre d'Eve montre déjà l'entreprise"), "{c}");
+        for attendu in
+            [r"C:\Users\Sam\AppData\Local\Eve\specialistes\essai\entreprise.json", "lu_a", "sans appeler l'ERP"]
+        {
+            assert!(c.contains(attendu), "{attendu} manque :\n{c}");
+        }
+        assert!(!c.contains("  ") && !c.contains('$'), "ni blancs doublés ni montant :\n{c}");
     }
 
     /// La partie « CONSTRUCTO AI » que donne Eve est celle de la consigne du kit, entière, sans gabarit à remplir.
