@@ -17,7 +17,7 @@
 //! `Evt::VoixFinie(id)` part une fois, et une seule, par identifiant, dans l'ordre : quand c'est dit, coupé ou en
 //! échec ; avant lui, `Evt::VoixEntendue(id)` quand le premier son de la parole s'entend (rien si elle ne s'entend pas).
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -95,6 +95,8 @@ enum Ordre {
         saut: Saut,
     },
     Choisir(String),
+    /// Les prononciations de la personne (`reglages.json`), changées.
+    Prononciations(BTreeMap<String, String>),
     /// Réveille le fil : le seuil de la coupure est dans [`Coupure`].
     Taire,
 }
@@ -500,6 +502,11 @@ impl Voix {
     pub fn choisir(&self, id: &str) {
         let _ = self.tx.send(Ordre::Choisir(id.to_string()));
     }
+
+    /// Les prononciations de la personne : elles valent pour ce qui se donne ensuite.
+    pub fn prononcer(&self, prononciations: BTreeMap<String, String>) {
+        let _ = self.tx.send(Ordre::Prononciations(prononciations));
+    }
 }
 
 pub fn demarrer(reglages: &Reglages, rapport: Sender<Evt>) -> Voix {
@@ -517,7 +524,12 @@ fn lancer(reglages: &Reglages, rapport: Sender<Evt>, trace: Option<Sender<Trace>
         adoucir(&mut w, douceur);
         w
     });
-    thread::spawn(move || Fil::ouvrir(&voulue, debit, douceur, souffle, c, rapport, trace).mener(&rx));
+    let prononciations = reglages.prononciations.clone();
+    thread::spawn(move || {
+        let mut fil = Fil::ouvrir(&voulue, debit, douceur, souffle, c, rapport, trace);
+        fil.prononciations = prononciations;
+        fil.mener(&rx)
+    });
     Voix { tx, coupure }
 }
 
@@ -1526,6 +1538,8 @@ struct Fil {
     choisie: String,
     debit: f64,
     douceur: Douceur,
+    /// Les prononciations de la personne, avant la diction.
+    prononciations: BTreeMap<String, String>,
     /// Le dossier des WAV de Piper (`parole`).
     dossier: PathBuf,
     file: File<Son>,
@@ -1588,6 +1602,7 @@ impl Fil {
             choisie,
             debit,
             douceur,
+            prononciations: BTreeMap::new(),
             dossier,
             file: File::nouvelle(raccord::pause_de_phrase(douceur.silence)),
             tait: None,
@@ -1653,14 +1668,17 @@ impl Fil {
             Ordre::Dire { id, texte, saut } => {
                 // Coupée avant d'arriver jusqu'ici : elle se termine à son tour, sans un mot.
                 let coupee = id <= self.coupure.seuil();
-                // Le texte tel qu'il se dit (« 14 h 30 » : « quatorze heures trente ») : la voix, quelle qu'elle soit,
-                // et la bouche du portrait, qui en suit les syllabes, reçoivent les mêmes mots.
-                self.file.ajouter(id, &diction::tel_qu_il_se_dit(&texte), coupee, saut);
+                // Le texte tel qu'il se dit (« 14 h 30 » : « quatorze heures trente »), les mots de la personne d'abord
+                // (« Granby » : « Granbi ») : la voix, quelle qu'elle soit, et la bouche du portrait, qui en suit les
+                // syllabes, reçoivent les mêmes mots.
+                let dit = diction::tel_qu_il_se_dit(&diction::avec_les_prononciations(&texte, &self.prononciations));
+                self.file.ajouter(id, &dit, coupee, saut);
                 if !coupee {
                     self.inspirer();
                 }
             }
             Ordre::Choisir(id) => self.choisir(id),
+            Ordre::Prononciations(p) => self.prononciations = p,
             Ordre::Taire => {}
         }
     }

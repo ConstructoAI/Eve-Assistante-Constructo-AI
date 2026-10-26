@@ -11,6 +11,8 @@
 //! abréviations, les sigles qui s'épellent, et les mots anglais du monde d'Eve écrits comme ils se prononcent. Le reste
 //! passe tel quel, la ponctuation et les blancs aussi : Piper en tire ses pauses.
 
+use std::collections::BTreeMap;
+
 /// Le texte tel qu'il se dit : ce que reçoivent la voix (Piper, ou une voix de Windows) et la bouche du portrait.
 pub fn tel_qu_il_se_dit(texte: &str) -> String {
     // Les espaces insécables (celles des milliers, et devant « $ », « % », « : ») sont des espaces comme les autres.
@@ -25,6 +27,56 @@ pub fn tel_qu_il_se_dit(texte: &str) -> String {
         }
     }
     d.sortie
+}
+
+/// Les prononciations de la personne (`prononciations` de `reglages.json`, que posent `eve --prononcer` et Claude
+/// quand elle dit qu'un mot sonne mal) : un mot, ou quelques mots, et ce que la voix lit à sa place (« Granby » :
+/// « Granbi »). Elles passent avant la diction ([`tel_qu_il_se_dit`]) : ses mots à elle l'emportent sur le lexique.
+/// En mots entiers, sans égard à la casse ni à l'apostrophe (droite ou courbe), les plus longs d'abord ; un mot écrit
+/// avec une majuscule la garde.
+pub fn avec_les_prononciations(texte: &str, prononciations: &BTreeMap<String, String>) -> String {
+    let bas = |x: char| if x == '’' { '\'' } else { x.to_lowercase().next().unwrap_or(x) };
+    let mut cles: Vec<(Vec<char>, &str)> = prononciations
+        .iter()
+        .filter(|(mot, dit)| !mot.trim().is_empty() && !dit.trim().is_empty())
+        .map(|(mot, dit)| (mot.trim().chars().map(bas).collect(), dit.trim()))
+        .collect();
+    if cles.is_empty() {
+        return texte.to_string();
+    }
+    cles.sort_by_key(|(c, _)| std::cmp::Reverse(c.len()));
+    let c: Vec<char> = texte.chars().collect();
+    let minuscules: Vec<char> = c.iter().copied().map(bas).collect();
+    let mut sortie = String::with_capacity(texte.len());
+    let mut i = 0;
+    while i < c.len() {
+        let au_debut_d_un_mot = i == 0 || !c[i - 1].is_alphanumeric();
+        let trouve = cles.iter().find(|(cle, _)| {
+            au_debut_d_un_mot
+                && minuscules[i..].starts_with(cle)
+                && c.get(i + cle.len()).is_none_or(|x| !x.is_alphanumeric())
+        });
+        match trouve {
+            Some((cle, dit)) => {
+                // La première lettre a la casse de celle du texte : « Granby » donne « Granbi », « granby » « granbi ».
+                let mut d = dit.chars();
+                if let Some(premiere) = d.next() {
+                    if c[i].is_uppercase() {
+                        sortie.extend(premiere.to_uppercase());
+                    } else {
+                        sortie.extend(premiere.to_lowercase());
+                    }
+                    sortie.extend(d);
+                }
+                i += cle.len();
+            }
+            None => {
+                sortie.push(c[i]);
+                i += 1;
+            }
+        }
+    }
+    sortie
 }
 
 const UNITES: [&str; 17] = [
@@ -380,8 +432,10 @@ const SIGLES_EPELES: [&str; 26] = [
 
 /// Les mots qu'eSpeak lit avec des sons anglais (ou à côté), écrits comme on les dit au Québec ; chaque graphie,
 /// vérifiée dans eSpeak : rien que des phonèmes français. Sans égard à la casse, sauf ceux qui commencent par une
-/// majuscule (« python », le serpent, se dit en français). Un pluriel en s (« emails ») prend la même graphie.
-const LEXIQUE: [(&str, &str); 88] = [
+/// majuscule (« python », le serpent, se dit en français). Un pluriel en s (« emails ») prend la même graphie. Les
+/// villes du Québec au nom anglais ou autochtone qu'eSpeak lit à l'anglaise (relevé le 2026-10-26 sur 120 villes :
+/// « Granby » y devient « gɹanbi », avec un r anglais et sans nasale), comme les y disent les francophones.
+const LEXIQUE: [(&str, &str); 112] = [
     ("eve", "Ève"),
     ("aujourd'hui", "aujourdhui"),
     ("reer", "Èrééèr"),
@@ -420,7 +474,6 @@ const LEXIQUE: [(&str, &str); 88] = [
     ("iphone", "Aïfone"),
     ("ipad", "Aïpade"),
     ("macbook", "Mac-bouk"),
-    ("thinkpad", "Tinnk-pad"),
     ("quickbooks", "Kouik-bouks"),
     ("sketchup", "Sketch-eup"),
     ("firefox", "Faïeur-fox"),
@@ -467,6 +520,31 @@ const LEXIQUE: [(&str, &str); 88] = [
     ("beaconsfield", "Bîconsfîld"),
     ("valleyfield", "Valléfîld"),
     ("thetford", "Tèttforde"),
+    ("granby", "Granbi"),
+    ("waterloo", "Ouatèrlou"),
+    ("waterville", "Ouatèrville"),
+    ("coaticook", "Coaticouk"),
+    ("knowlton", "Noltonne"),
+    ("sutton", "Seuttonne"),
+    ("dunham", "Donnam"),
+    ("marieville", "Mariville"),
+    ("frelighsburg", "Frélisbourg"),
+    ("sweetsburg", "Souitsbourg"),
+    ("kingsbury", "Kinngzbéri"),
+    ("kingsey", "Kinngsi"),
+    ("warwick", "Ouarouik"),
+    ("ormstown", "Ormstaoune"),
+    ("howick", "Haouik"),
+    ("rawdon", "Rodonne"),
+    ("wakefield", "Ouèkfilde"),
+    ("shawville", "Chôville"),
+    ("cookshire", "Coukchaïre"),
+    ("weedon", "Ouidonne"),
+    ("Bury", "Béri"),
+    ("Pike", "Païk"),
+    ("kahnawake", "Kanawaké"),
+    ("kanesatake", "Kanéssataké"),
+    ("wendake", "Ouèndaké"),
     ("calgary", "Calgari"),
     ("winnipeg", "Ouinnipègue"),
     ("Roy", "Roi"),
@@ -1474,6 +1552,34 @@ mod essais {
         // Le serpent reste un serpent, et un mot inconnu passe tel quel.
         assert_eq!(dit("Un python et du Python."), "Un python et du Païtonne.");
         assert_eq!(dit("Claude, Opus, Excel, Chrome."), "Claude, Opus, Excel, Chrome.");
+    }
+
+    #[test]
+    fn les_villes_au_nom_anglais_se_disent_comme_au_quebec() {
+        assert_eq!(dit("La rue des Pins à Granby."), "La rue des Pins à Granbi.");
+        assert_eq!(dit("De Waterloo à Sutton, puis Knowlton."), "De Ouatèrlou à Seuttonne, puis Noltonne.");
+        assert_eq!(dit("Marieville, Coaticook et Saint-Hyacinthe."), "Mariville, Coaticouk et Saint-Iacinte.");
+        // « Bury » et « Pike » ne se disent ainsi que nommés, avec leur majuscule.
+        assert_eq!(dit("Bury et Pike River."), "Béri et Païk River.");
+    }
+
+    #[test]
+    fn les_prononciations_de_la_personne_passent_avant() {
+        let p: BTreeMap<String, String> =
+            [("Granby", "Grannbi"), ("Saint-Lin", "Saint-Linne"), ("ayer's cliff", "Èrz Clif"), ("vide", " ")]
+                .iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect();
+        let dit = |t: &str| avec_les_prononciations(t, &p);
+        // Sans égard à la casse, la majuscule gardée ; en mots entiers seulement.
+        assert_eq!(dit("À Granby, et granby."), "À Grannbi, et grannbi.");
+        assert_eq!(dit("Granbyville et Granby2 restent."), "Granbyville et Granby2 restent.");
+        // Quelques mots, l'apostrophe courbe comme la droite ; une graphie vide ne compte pas.
+        assert_eq!(dit("Ayer’s Cliff, le vide."), "Èrz Clif, le vide.");
+        assert_eq!(dit("Saint-Lin."), "Saint-Linne.");
+        // Puis la diction : un mot de la personne n'est pas lu à nouveau par le lexique.
+        assert_eq!(tel_qu_il_se_dit(&dit("Granby à 14 h.")), "Grannbi à quatorze heures.");
+        assert_eq!(avec_les_prononciations("Granby.", &BTreeMap::new()), "Granby.");
     }
 
     #[test]

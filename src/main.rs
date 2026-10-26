@@ -301,6 +301,8 @@ fn aide() {
          eve --modele [sonnet|opus [moyen|max]]  le modèle de Claude et son effort (rien : ceux de cette Eve) ;\n\
          \x20                            Eve repart avec eux entre deux demandes, la conversation reprise\n\
          eve --effort moyen|max       l'effort seul\n\
+         eve --prononcer [\"mot\" [\"ce que la voix lit\"]]  une prononciation à soi (« Granby » : « Granbi ») ;\n\
+         \x20                            rien : celles de cette Eve ; le mot seul : la retire\n\
          eve --version                la version de ce programme et l'empreinte de sa source (son commit)\n\
          eve --mettre-a-jour eve.exe  installe ce programme-là (une version commitée, construite par Compiler.bat) :\n\
          \x20                            l'Eve qui tourne (EVE_DOSSIER_LOCAL) redémarre dedans à la fin de sa\n\

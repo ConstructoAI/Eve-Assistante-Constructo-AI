@@ -58,6 +58,11 @@ LUI PARLER
   --dossier %LOCALAPPDATA%\Eve\commun (dans %LOCALAPPDATA%\Eve), puis une jonction « supertonic » dans le dossier
   du spécialiste (%LOCALAPPDATA%\Eve\specialistes\<son nom court>) vers commun\supertonic, comme celle de « voix » ;
   relance Eve. Ou demande-le à Eve elle-même.
+· Elle dit les heures, les montants, les dates et les sigles comme on les dit au Québec, et les villes au nom anglais
+  comme les francophones (Granby, Waterloo, Knowlton…). Un nom qu'elle dit mal se corrige pour de bon : dis-le-lui
+  (« tu prononces mal Bromont »), elle le note ; ou à la main : programme\eve.exe --prononcer "Bromont" "Bromonne",
+  dans une invite de commandes où EVE_DOSSIER_LOCAL nomme son dossier (--prononcer seul les montre, le mot seul en
+  retire un). Ses prononciations sont dans reglages.json (« prononciations ») ; elles valent tout de suite.
 · Elle a d'office la liberté de Claude Code : chercher sur le Web, lire et écrire des fichiers, lancer des commandes
   sur ton ordinateur, travailler à plusieurs en parallèle, se servir de Chrome, des connecteurs de ton compte claude.ai,
   des serveurs MCP de ton poste et de Constructo AI ; regarder une pièce jointe ou une page photographiée avec la caméra

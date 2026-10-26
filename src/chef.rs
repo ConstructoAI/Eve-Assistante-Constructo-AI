@@ -1350,6 +1350,10 @@ impl Chef {
                 _ => {}
             }
         }
+        // Une prononciation posée ou retirée (« prononciations.Granby ») : la voix la prend pour ce qu'elle dira.
+        if cles.iter().any(|c| c == "prononciations" || c.starts_with("prononciations.")) {
+            self.voix.prononcer(r.prononciations.clone());
+        }
         let au_demarrage: Vec<&str> =
             cles.iter().map(String::as_str).filter(|c| crate::reglages::au_prochain_demarrage(c)).collect();
         if !au_demarrage.is_empty() {

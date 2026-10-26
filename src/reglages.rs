@@ -6,6 +6,7 @@
 //! d'office s'y écrivent. Le nom de l'entreprise n'y est pas d'office : Eve le lit au démarrage dans les réglages de
 //! l'Adjointe (`config/entreprise.json`, par `scripts/adjointe_config.py --nom`).
 
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -78,6 +79,10 @@ pub struct Reglages {
     pub douceur: u8,
     /// L'inspiration qu'on entend avant qu'Eve parle, très douce, au moment où son portrait inspire : éteinte d'office.
     pub souffle: bool,
+    /// Les prononciations de la personne : un mot (ou quelques mots) et ce que la voix lit à sa place (« Granby » :
+    /// « Granbi »), avant la diction ([`eve::diction::avec_les_prononciations`]). `eve --prononcer` les pose, et Claude
+    /// quand la personne dit qu'un mot sonne mal ; elles valent tout de suite.
+    pub prononciations: BTreeMap<String, String>,
     /// La touche à tenir pour parler : ctrl_droit, ctrl_gauche, alt_droit, f8, f9, pause, arret_defil.
     pub touche: String,
     /// Le modèle de Claude.
@@ -238,6 +243,7 @@ impl Default for Reglages {
             debit: 0.85,
             douceur: 1,
             souffle: false,
+            prononciations: BTreeMap::new(),
             touche: "ctrl_droit".into(),
             modele: "claude-sonnet-5-5".into(),
             // « medium » : au plus haut, une question simple a pris sept minutes ; la voix demande vite.
@@ -447,10 +453,13 @@ pub fn effort_dit(mot: &str) -> Option<&'static str> {
     EFFORTS.iter().find(|e| e.0 == mot || e.1 == mot).map(|e| e.0)
 }
 
-/// Les commandes du cerveau, si `args` en est une : `eve --modele` (le modèle et l'effort de cette Eve, et les choix),
-/// `eve --modele <modèle> [<effort>]`, `eve --effort <effort>`. Elles écrivent dans `reglages.json` du dossier local
-/// (`EVE_DOSSIER_LOCAL`) comme la fenêtre ([`Reglages::changer`]) ; l'Eve en marche relit le fichier et relance Claude
-/// Code avec eux entre deux demandes, la conversation reprise. Ni le journal ni la vitrine ne s'ouvrent.
+/// Les commandes des réglages, si `args` en est une : celles du cerveau — `eve --modele` (le modèle et l'effort de
+/// cette Eve, et les choix), `eve --modele <modèle> [<effort>]`, `eve --effort <effort>` — et celle des prononciations
+/// — `eve --prononcer` (les siennes), `eve --prononcer "mot" "ce que la voix lit"`, `eve --prononcer "mot"` (la
+/// retire). Elles écrivent dans `reglages.json` du dossier local (`EVE_DOSSIER_LOCAL`) comme la fenêtre
+/// ([`Reglages::changer`]) ; l'Eve en marche relit le fichier : elle relance Claude Code avec un autre cerveau entre
+/// deux demandes, la conversation reprise, et sa voix prend aussitôt une prononciation. Ni le journal ni la vitrine ne
+/// s'ouvrent.
 pub fn commande(args: &[String]) -> Option<i32> {
     let (premier, reste) = args.split_first()?;
     let mots: Vec<&str> = reste.iter().map(String::as_str).collect();
@@ -462,9 +471,58 @@ pub fn commande(args: &[String]) -> Option<i32> {
         }
         ("--effort", &[effort]) => a_changer().and_then(|mut r| changer_le_cerveau(&mut r, None, Some(effort))),
         ("--modele" | "--effort", _) => Err(USAGE_DU_CERVEAU.to_string()),
+        ("--prononcer", &[]) => lire_du_poste().map(|r| prononciations_de(&r)),
+        ("--prononcer", &[mot]) => a_changer().and_then(|mut r| prononcer(&mut r, mot, None)),
+        ("--prononcer", &[mot, dit]) => a_changer().and_then(|mut r| prononcer(&mut r, mot, Some(dit))),
+        ("--prononcer", _) => Err(USAGE_DES_PRONONCIATIONS.to_string()),
         _ => return None,
     };
     Some(sortie_de_commande(fait))
+}
+
+// ---- Les prononciations de la personne ---------------------------------------------------------------------------
+
+/// Comment s'écrit la commande des prononciations, quand elle est mal écrite.
+const USAGE_DES_PRONONCIATIONS: &str = "eve --prononcer [\"mot\" [\"ce que la voix lit\"]]";
+/// Au-delà, ce n'est plus un mot ni un nom : une phrase.
+const LONGUEUR_D_UNE_PRONONCIATION: usize = 60;
+
+/// Les prononciations de cette Eve, une par ligne.
+fn prononciations_de(r: &Reglages) -> String {
+    if r.prononciations.is_empty() {
+        return format!("Aucune prononciation à soi dans {}.", r.chemin().display());
+    }
+    let lignes: Vec<String> = r.prononciations.iter().map(|(m, d)| format!("  {m} : « {d} »")).collect();
+    format!("Les prononciations de cette Eve (dans {}) :\n{}", r.chemin().display(), lignes.join("\n"))
+}
+
+/// Une prononciation posée (`dit`) ou retirée (`None`) dans `reglages.json`, comme la fenêtre y écrit
+/// ([`Reglages::changer`]) : l'Eve en marche la prend aussitôt.
+pub fn prononcer(r: &mut Reglages, mot: &str, dit: Option<&str>) -> Result<String, String> {
+    let mot = mot.split_whitespace().collect::<Vec<_>>().join(" ");
+    let dit = dit.map(|d| d.split_whitespace().collect::<Vec<_>>().join(" "));
+    let trop_long = |t: &str| t.chars().count() > LONGUEUR_D_UNE_PRONONCIATION;
+    if mot.is_empty() || trop_long(&mot) || dit.as_deref().is_some_and(|d| d.is_empty() || trop_long(d)) {
+        return Err(format!(
+            "Un mot et ce que la voix lit, de {LONGUEUR_D_UNE_PRONONCIATION} caractères au plus : \
+             {USAGE_DES_PRONONCIATIONS}"
+        ));
+    }
+    let mut toutes = r.prononciations.clone();
+    // Un mot déjà là, écrit autrement (« granby ») : le même mot.
+    toutes.retain(|m, _| m.to_lowercase() != mot.to_lowercase());
+    let fait = match &dit {
+        Some(d) => {
+            toutes.insert(mot.clone(), d.clone());
+            format!("« {mot} » se dira « {d} ».")
+        }
+        None if toutes.len() == r.prononciations.len() => {
+            return Ok(format!("« {mot} » n'avait pas de prononciation."));
+        }
+        None => format!("« {mot} » se lit de nouveau comme il s'écrit."),
+    };
+    r.changer("prononciations", serde_json::to_value(&toutes).map_err(|e| e.to_string())?)?;
+    Ok(fait)
 }
 
 /// Le cerveau de cette Eve, et les choix : « Sonnet 5.5, effort moyen ; les choix : Sonnet 5.5, Opus 5.5 ; effort
@@ -1274,5 +1332,30 @@ mod essais {
         changer_le_cerveau(&mut r, None, Some("moyen")).unwrap();
         let lu = charger_de(chemin);
         assert_eq!((lu.modele.as_str(), lu.effort.as_str()), ("claude-opus-5-5", "medium"));
+    }
+
+    /// `eve --prononcer` pose, remplace et retire une prononciation dans le fichier, sans toucher au reste ; un mot vide
+    /// ou une phrase sont refusés.
+    #[test]
+    fn prononcer_pose_remplace_et_retire() {
+        let (chemin, mut r) = ouvrir("prononcer", "{\r\n  \"nom\": \"Essai\"\r\n}\r\n");
+        assert_eq!(prononcer(&mut r, " Granby ", Some("Granbi")).unwrap(), "« Granby » se dira « Granbi ».");
+        prononcer(&mut r, "Ayer's  Cliff", Some("Èrz Clif")).unwrap();
+        let texte = fs::read_to_string(&chemin).unwrap();
+        assert!(texte.starts_with("{\r\n  \"nom\": \"Essai\""), "{texte}");
+        let lu = charger_de(chemin.clone());
+        assert_eq!(lu.prononciations.get("Granby").map(String::as_str), Some("Granbi"));
+        assert_eq!(lu.prononciations.get("Ayer's Cliff").map(String::as_str), Some("Èrz Clif"));
+        // Le même mot écrit autrement remplace l'ancien.
+        prononcer(&mut r, "granby", Some("Grannbi")).unwrap();
+        let lu = charger_de(chemin.clone());
+        assert_eq!(lu.prononciations.len(), 2);
+        assert_eq!(lu.prononciations.get("granby").map(String::as_str), Some("Grannbi"));
+        assert!(prononcer(&mut r, "", Some("x")).is_err());
+        assert!(prononcer(&mut r, "Granby", Some(&"une très longue phrase ".repeat(4))).is_err());
+        assert!(prononcer(&mut r, "Granby", Some("  ")).is_err());
+        assert_eq!(prononcer(&mut r, "GRANBY", None).unwrap(), "« GRANBY » se lit de nouveau comme il s'écrit.");
+        assert_eq!(prononcer(&mut r, "Granby", None).unwrap(), "« Granby » n'avait pas de prononciation.");
+        assert_eq!(charger_de(chemin).prononciations.len(), 1);
     }
 }

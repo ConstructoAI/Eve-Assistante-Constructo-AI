@@ -89,6 +89,8 @@ impl Cerveau {
         consigne.push_str(&consigne_des_rappels(&crate::reglages::dossier_local()));
         consigne.push_str("\n\n");
         consigne.push_str(&consigne_des_emotions());
+        consigne.push_str("\n\n");
+        consigne.push_str(&consigne_des_prononciations());
         let mut c = Command::new(&l.claude);
         c.current_dir(&l.dossier)
             .args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"])
@@ -553,6 +555,26 @@ pub fn consigne_des_emotions() -> String {
     )
 }
 
+/// La ligne qui ouvre la partie « PRONONCIATION » de la consigne.
+const ENTETE_PRONONCIATION: &str = "PRONONCIATION";
+
+/// La partie « PRONONCIATION » de la consigne, que reçoit toute Eve : sa voix lit le texte par la diction
+/// (`eve::diction`), puis les prononciations de la personne (`prononciations` de `reglages.json`), que Claude pose par
+/// `eve --prononcer` quand elle dit qu'un mot sonne mal. Elle vit avec le programme qui les applique.
+pub fn consigne_des_prononciations() -> String {
+    format!(
+        "{ENTETE_PRONONCIATION}\n\
+         - Ta voix lit le texte à la française. Un nom qu'elle dit mal — une ville, une rue, une personne, une \
+         entreprise, un mot anglais — se corrige pour de bon : quand la personne te le dit (« tu prononces mal \
+         Granby »), lance & $env:EVE_PROGRAMME --prononcer \"Granby\" \"Granbi\" (en Bash : \"$EVE_PROGRAMME\" \
+         --prononcer …) : le mot tel qu'il s'écrit, puis comme ta voix doit le lire, en lettres françaises \
+         (« Ouatèrlou » pour Waterloo, « Noltonne » pour Knowlton). Ta voix le prend aussitôt, sans rien relancer ; \
+         dis-le en une phrase qui le contient, pour qu'elle l'entende.\n\
+         - --prononcer seul les montre ; --prononcer \"mot\" en retire un. Des noms et des mots seulement, jamais une \
+         phrase."
+    )
+}
+
 /// La ligne qui ouvre la partie « RAPPELS » de la consigne.
 const ENTETE_RAPPELS: &str = "RAPPELS";
 
@@ -790,6 +812,22 @@ mod essais {
             "font-family=\"Segoe UI\"",
             "<title>",
             "ni script",
+        ] {
+            assert!(c.contains(attendu), "{attendu} manque :\n{c}");
+        }
+        assert!(!c.contains("  "), "les lignes se suivent sans blancs doublés :\n{c}");
+    }
+
+    /// La partie « PRONONCIATION » dit la commande, en PowerShell et en Bash, et ce qu'on y écrit.
+    #[test]
+    fn la_consigne_des_prononciations() {
+        let c = consigne_des_prononciations();
+        assert!(c.starts_with("PRONONCIATION\n- Ta voix lit"), "{c}");
+        for attendu in [
+            "& $env:EVE_PROGRAMME --prononcer \"Granby\" \"Granbi\"",
+            "\"$EVE_PROGRAMME\" --prononcer",
+            "en lettres françaises",
+            "--prononcer \"mot\" en retire un",
         ] {
             assert!(c.contains(attendu), "{attendu} manque :\n{c}");
         }
