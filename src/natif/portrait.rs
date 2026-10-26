@@ -14,11 +14,14 @@
 //! la bouche — ouverte, la mâchoire de plus en plus basse (`portrait-bouche-1`…), ronde (`portrait-rond-1`…), étirée
 //! (`portrait-large-1`…), et les lèvres jointes : closes (`portrait-ferme-1`), closes et arrondies (`-ferme-2`), la
 //! lèvre du bas sous les dents (`-ferme-3`) —, et une pose par émotion (`portrait-emotion-joie`…), avec ses bouches
-//! pour parler (`portrait-emotion-joie-bouche-1`…) et ses lèvres closes (`portrait-emotion-joie-ferme`) ; et son visage
-//! calme (`portrait-calme` : « elle est trop souriante quand elle parle »), le sourire adouci et les lèvres closes, le
-//! bas du visage seul. Chacune devient un calque — ce qui y change par
-//! rapport à la photo, le reste transparent, recadré sur ce qui s'y voit —, et les calques se posent l'un sur l'autre, en
-//! fondu : en grand, elle cligne et regarde de côté de temps en temps, même en parlant ; sa bouche suit sa voix et la
+//! pour parler (`portrait-emotion-joie-bouche-1`…), ses lèvres closes (`portrait-emotion-joie-ferme`) et, si elle
+//! change les yeux de la photo, ses yeux à elle : ses regards (`portrait-emotion-triste-regard-1`…) et ses yeux qui se
+//! ferment (`portrait-emotion-triste-yeux-1`…), et ses sourcils levés (`portrait-emotion-triste-sourcils-1`…) si elle
+//! couvre ceux de la photo ; et son visage calme (`portrait-calme` : « elle est trop souriante
+//! quand elle parle »), le sourire adouci et les lèvres closes, le bas du visage seul. Chacune devient un calque — ce
+//! qui y change par rapport à la photo, le reste transparent, recadré sur ce qui s'y voit —, et les calques se posent
+//! l'un sur l'autre, en fondu : en grand, elle cligne et regarde de côté de temps en temps, même en parlant, même
+//! émue ; sa bouche suit sa voix et la
 //! forme de ses syllabes, un peu en avance sur le son, comme chez une vraie personne ([`crate::voix::bouche_a_venir`]),
 //! et passe d'une forme à l'autre en fondu ; ses sourcils se lèvent sur une syllabe appuyée ; elle respire — sa
 //! poitrine et ses épaules se soulèvent, plus vite avant de parler ; sa tête prend une posture et la garde, puis une
@@ -94,13 +97,28 @@ struct Calque {
 
 /// Une émotion du visage : sa pose (le visage qui la prend) et ses bouches pour parler, de plus en plus ouvertes (s'il
 /// en a), chacune la bouche seule, à poser sur ce visage : elle parle sans quitter son émotion ; et ses lèvres closes
-/// (m, b, p), la bouche seule aussi, si sa pose ne les a pas (la joie, la surprise).
+/// (m, b, p), la bouche seule aussi, si sa pose ne les a pas (la joie, la surprise). Et si sa pose change les yeux de
+/// la photo (plissés, baissés, grands ouverts), ses yeux à elle, les yeux seuls, à poser sur ce visage : ses regards,
+/// dans les directions de ceux de la photo ([`regard`]), et ses yeux qui se ferment — sous l'émotion, ses yeux vivent.
+/// Si elle couvre ses sourcils, ses sourcils levés comme ceux de la photo, le haut du visage seul.
 #[derive(Clone)]
 struct Expression {
     emotion: Emotion,
     visage: Calque,
     bouches: Vec<Calque>,
     levres_closes: Option<Calque>,
+    regards: Vec<Calque>,
+    yeux: Vec<Calque>,
+    sourcils: Vec<Calque>,
+}
+
+impl Expression {
+    /// Tous ses calques : son visage, ses bouches, ses lèvres closes, ses yeux et ses sourcils.
+    fn calques(&self) -> impl Iterator<Item = &Calque> {
+        let bouches = self.bouches.iter().chain(&self.levres_closes);
+        let haut = self.regards.iter().chain(&self.yeux).chain(&self.sourcils);
+        std::iter::once(&self.visage).chain(bouches).chain(haut)
+    }
 }
 
 /// Le portrait prêt à peindre : sa photo (sa texture, ses pixels) et sa taille (en pixels) ; les calques de ses poses
@@ -134,11 +152,12 @@ struct Recadre {
 }
 
 /// Ce que rend le fil de lecture : la photo et les calques de ses poses, ses émotions (leur visage, leurs bouches,
-/// leurs lèvres closes), son visage calme, la souplesse de ses cheveux, détourée ou non, le carré de son disque.
+/// leurs lèvres closes, leurs regards et leurs yeux qui se ferment), son visage calme, la souplesse de ses cheveux,
+/// détourée ou non, le carré de son disque.
 struct Images {
     photo: egui::ColorImage,
     calques: [Vec<Recadre>; 7],
-    expressions: Vec<(Emotion, Recadre, Vec<Recadre>, Option<Recadre>)>,
+    expressions: Vec<(Emotion, Recadre, Vec<Recadre>, Option<Recadre>, [Vec<Recadre>; 3])>,
     calme: Option<Recadre>,
     cheveux: Option<cheveux::Souplesse>,
     detoure: bool,
@@ -367,11 +386,15 @@ impl Portrait {
                     let expressions = i
                         .expressions
                         .into_iter()
-                        .map(|(emotion, visage, bouches, closes)| {
+                        .map(|(emotion, visage, bouches, closes, [regards, yeux, sourcils])| {
                             let nom = format!("portrait-emotion-{}", emotion.nom());
                             let bouches = serie(&format!("{nom}-bouche"), bouches);
                             let levres_closes = closes.map(|r| calque(format!("{nom}-ferme"), r));
-                            Expression { emotion, visage: calque(nom, visage), bouches, levres_closes }
+                            let regards = serie(&format!("{nom}-regard"), regards);
+                            let yeux = serie(&format!("{nom}-yeux"), yeux);
+                            let sourcils = serie(&format!("{nom}-sourcils"), sourcils);
+                            let visage = calque(nom, visage);
+                            Expression { emotion, visage, bouches, levres_closes, regards, yeux, sourcils }
                         })
                         .collect();
                     let calme = i.calme.map(|r| calque("portrait-calme".into(), r));
@@ -489,9 +512,9 @@ fn en_poses(x: f32, n: usize) -> (usize, f32) {
 
 /// Lit le portrait du dossier local, dans un fil : la photo, sa mise en place, et les calques de ses poses de sa taille
 /// (une autre est laissée, et le journal le dit), recadrés, chacun avec sa géométrie ([`rendu::geometrie`]) ; ses
-/// émotions, leurs bouches et leurs lèvres closes ; son visage calme ; détourée, la souplesse de ses cheveux, d'après
-/// leur masque ([`cheveux::Souplesse`]). Les poses se lisent à plusieurs fils à la fois ([`en_parallele`]) : le flot de
-/// chacune prend son temps.
+/// émotions, leurs bouches, leurs lèvres closes et leurs yeux ; son visage calme ; détourée, la souplesse de ses
+/// cheveux, d'après leur masque ([`cheveux::Souplesse`]). Les poses se lisent à plusieurs fils à la fois
+/// ([`en_parallele`]) : le flot de chacune prend son temps.
 fn lire(local: &Path) -> Result<Images, String> {
     let debut = Instant::now();
     let chemin = trouver(local, "portrait").ok_or("le portrait a disparu")?;
@@ -526,15 +549,21 @@ fn lire(local: &Path) -> Result<Images, String> {
     };
     let series = SORTES.map(|sorte| poses(local, "portrait", sorte));
     let calme = trouver(local, "portrait-calme");
-    let emotions: Vec<(Emotion, PathBuf, Vec<PathBuf>, Option<PathBuf>)> = emotions(local, "portrait")
-        .into_iter()
-        .map(|(e, c)| (e, c, bouches_d_emotion(local, "portrait", e), levres_closes_d_emotion(local, "portrait", e)))
-        .collect();
+    let emotions: Vec<(Emotion, PathBuf, Vec<PathBuf>, Option<PathBuf>, [Vec<PathBuf>; 3])> =
+        emotions(local, "portrait")
+            .into_iter()
+            .map(|(e, c)| {
+                let (bouches, closes) =
+                    (bouches_d_emotion(local, "portrait", e), levres_closes_d_emotion(local, "portrait", e));
+                (e, c, bouches, closes, haut_d_emotion(local, "portrait", e))
+            })
+            .collect();
     // Une émotion : son visage, ce qui y change par rapport à la photo ; ses bouches et ses lèvres closes, ce qui y
     // change par rapport à son visage — la bouche seule. Posées sur lui pour parler, elles ne reprennent ni ses yeux ni
     // ses sourcils : le visage ne saute pas à la première syllabe, et un regard de côté, dessous, ne va et vient pas
-    // d'une syllabe à l'autre. Les visages d'abord, donc.
-    let visages: Vec<Option<(egui::ColorImage, Recadre)>> = en_parallele(&emotions, |(_, c, _, _)| {
+    // d'une syllabe à l'autre. Le haut de son visage de même — ses yeux, ses sourcils levés —, au masque étroit, comme
+    // les yeux de la photo. Les visages d'abord, donc.
+    let visages: Vec<Option<(egui::ColorImage, Recadre)>> = en_parallele(&emotions, |(_, c, ..)| {
         let i = lue(c)?;
         let r = pose(&i, &photo, ELARGI);
         Some((i, r))
@@ -543,8 +572,8 @@ fn lire(local: &Path) -> Result<Images, String> {
     .map(Option::flatten)
     .collect();
     // Puis toutes les autres, dans l'ordre, chacune avec l'élargissement de son masque et ce qu'elle recouvre : les
-    // séries de chaque sorte, puis les bouches et les lèvres closes de chaque émotion dont le visage se lit, puis le
-    // visage calme.
+    // séries de chaque sorte, puis les bouches, les lèvres closes et le haut du visage de chaque émotion dont le visage
+    // se lit, puis le visage calme.
     let sur_la_photo = &photo;
     let chemins: Vec<(&PathBuf, usize, &egui::ColorImage)> = SORTES
         .iter()
@@ -553,9 +582,11 @@ fn lire(local: &Path) -> Result<Images, String> {
             let elargi = if ETROITES.contains(sorte) { ELARGI_DES_YEUX } else { ELARGI };
             s.iter().map(move |c| (c, elargi, sur_la_photo))
         })
-        .chain(emotions.iter().zip(&visages).flat_map(|((_, _, bouches, closes), v)| {
+        .chain(emotions.iter().zip(&visages).flat_map(|((_, _, bouches, closes, haut), v)| {
             let dessous = v.as_ref().map(|(i, _)| i);
-            bouches.iter().chain(closes).filter_map(move |b| Some((b, ELARGI, dessous?)))
+            let bouches = bouches.iter().chain(closes).map(|c| (c, ELARGI));
+            let haut = haut.iter().flatten().map(|c| (c, ELARGI_DES_YEUX));
+            bouches.chain(haut).filter_map(move |(c, elargi)| Some((c, elargi, dessous?)))
         }))
         .chain(calme.iter().map(|c| (c, ELARGI, sur_la_photo)))
         .collect();
@@ -572,11 +603,12 @@ fn lire(local: &Path) -> Result<Images, String> {
     let expressions = emotions
         .iter()
         .zip(visages)
-        .filter_map(|((e, _, bouches, closes), v)| {
+        .filter_map(|((e, _, bouches, closes, haut), v)| {
             let (_, visage) = v?;
             let bouches = suite(bouches.len());
             let closes = suite(usize::from(closes.is_some())).pop();
-            Some((*e, visage, bouches, closes))
+            let haut = haut.each_ref().map(|s| suite(s.len()));
+            Some((*e, visage, bouches, closes, haut))
         })
         .collect();
     let calme = suite(usize::from(calme.is_some())).pop();
@@ -647,6 +679,15 @@ const ETROITES: [&str; 2] = ["yeux", "regard"];
 fn levres_closes_d_emotion(dossier: &Path, base: &str, e: Emotion) -> Option<PathBuf> {
     trouver(dossier, &format!("{base}-emotion-{}-ferme", e.nom()))
 }
+
+/// Le haut du visage d'une émotion, posé dans `dossier` à côté de l'image `base`, si elle en a : ses regards
+/// (`base-emotion-triste-regard-1`…, dans les directions de ceux de la photo) et ses yeux qui se ferment
+/// (`base-emotion-triste-yeux-1`…), si sa pose change les yeux de la photo ; ses sourcils levés
+/// (`base-emotion-triste-sourcils-1`…), si elle couvre ses sourcils.
+fn haut_d_emotion(dossier: &Path, base: &str, e: Emotion) -> [Vec<PathBuf>; 3] {
+    HAUT_D_EMOTION.map(|s| poses(dossier, base, &format!("emotion-{}-{s}", e.nom())))
+}
+const HAUT_D_EMOTION: [&str; 3] = ["regard", "yeux", "sourcils"];
 
 /// Le calque d'une pose : ce qui y change par rapport à la photo — plus de 10 sur 255 d'écart —, élargi et adouci sur
 /// la part `elargi` de l'image ([`ELARGI`]) pour que son bord ne se voie pas, le reste transparent ; et ce masque (de 0
@@ -747,9 +788,10 @@ impl Visage {
     /// rang), le visage calme (seul, puis qui parle), deux fondus (une bouche à moitié fondue dans la suivante ; les
     /// lèvres à moitié closes), trois mélanges — les sourcils levés en clignant, cligner en parlant, regarder de côté
     /// en parlant —, chaque émotion (seule, puis qui parle, sa bouche du milieu, puis ses lèvres closes si elle les
-    /// a), des passages à mi-chemin (un clignement, chaque émotion qui vient, le visage calme), la tête penchée,
-    /// tournée, baissée, relevée, le buste, et les cheveux en retard sur la tête. Les calques de chacune se posent dans
-    /// l'ordre où ils sont nommés.
+    /// a), les yeux de chaque émotion qui en a (des regards, ses yeux qui se ferment, un regard de côté à mi-chemin de
+    /// sa venue) et ses sourcils levés, des passages à mi-chemin (un clignement, chaque émotion qui vient, le visage
+    /// calme), la tête penchée, tournée, baissée, relevée, le buste, et les cheveux en retard sur la tête. Les calques
+    /// de chacune se posent dans l'ordre où ils sont nommés.
     pub(crate) fn poses_d_essai(&self) -> Vec<(String, Pose)> {
         let [yeux, regards, ouvertes, _, _, fermees, sourcils] = &self.calques;
         let pose = |calques: &[(&Calque, f32)]| {
@@ -793,6 +835,37 @@ impl Visage {
             }
             if let Some(f) = &x.levres_closes {
                 v.push((format!("{}, lèvres closes", x.emotion.nom()), pose(&[(&x.visage, 1.0), (f, 1.0)])));
+            }
+        }
+        // Les yeux d'une émotion, posés sur son visage : de côté, en bas, vers la personne ; mi-clos, puis fermés ; de
+        // côté en parlant, la bouche grande ouverte dessous (elle change aussi un peu ses yeux) ; et à mi-chemin de sa
+        // venue, les yeux de côté — le regard de la photo dessous, le sien sur son visage.
+        for x in self.expressions.iter().filter(|x| !x.regards.is_empty() || !x.yeux.is_empty()) {
+            let e = x.emotion.nom();
+            for k in [0, 2, 5] {
+                if let Some(r) = x.regards.get(k) {
+                    v.push((format!("{e}, regard {}", k + 1), pose(&[(&x.visage, 1.0), (r, 1.0)])));
+                }
+            }
+            for (k, y) in x.yeux.iter().enumerate().skip(1) {
+                v.push((format!("{e}, yeux {}", k + 1), pose(&[(&x.visage, 1.0), (y, 1.0)])));
+            }
+            if let (Some(b), Some(r)) = (x.bouches.last(), x.regards.first()) {
+                v.push((format!("{e}, de côté en parlant"), pose(&[(&x.visage, 1.0), (b, 1.0), (r, 1.0)])));
+            }
+            if let (Some(r), Some(s)) = (regards.first(), x.regards.first()) {
+                v.push((format!("{e}, de côté, à mi-chemin"), pose(&[(r, 1.0), (&x.visage, 0.5), (s, 0.5)])));
+            }
+        }
+        // Ses sourcils levés, sur son visage : à mi-hauteur, tout en haut ; tout en haut en clignant, ses yeux
+        // par-dessus.
+        for x in self.expressions.iter().filter(|x| !x.sourcils.is_empty()) {
+            let e = x.emotion.nom();
+            for (k, s) in x.sourcils.iter().enumerate().skip(1) {
+                v.push((format!("{e}, sourcils {}", k + 1), pose(&[(&x.visage, 1.0), (s, 1.0)])));
+            }
+            if let (Some(s), Some(y)) = (x.sourcils.last(), x.yeux.last()) {
+                v.push((format!("{e}, sourcils levés, en clignant"), pose(&[(&x.visage, 1.0), (s, 1.0), (y, 1.0)])));
             }
         }
         // À mi-chemin d'un passage, où deux poses se fondent l'une dans l'autre (le rendu les fait tomber l'une sur
@@ -860,7 +933,8 @@ fn fichiers(local: &Path) -> Vec<PathBuf> {
     let Some(photo) = trouver(local, "portrait") else { return Vec::new() };
     let des_emotions = emotions(local, "portrait").into_iter().flat_map(|(e, c)| {
         let closes = levres_closes_d_emotion(local, "portrait", e);
-        std::iter::once(c).chain(bouches_d_emotion(local, "portrait", e)).chain(closes)
+        let haut = haut_d_emotion(local, "portrait", e).into_iter().flatten();
+        std::iter::once(c).chain(bouches_d_emotion(local, "portrait", e)).chain(closes).chain(haut)
     });
     let series = SORTES.iter().flat_map(|s| poses(local, "portrait", s));
     let calme = trouver(local, "portrait-calme");
@@ -900,6 +974,12 @@ pub(crate) fn poser(choisie: &Path, local: &Path) -> Result<PathBuf, String> {
             copier(&f, local, &format!("portrait-emotion-{}-ferme", e.nom()))?;
             n += 1;
         }
+        for (sorte, haut) in HAUT_D_EMOTION.iter().zip(haut_d_emotion(dossier, &base, e)) {
+            for (k, c) in haut.iter().enumerate() {
+                copier(c, local, &format!("portrait-emotion-{}-{sorte}-{}", e.nom(), k + 1))?;
+                n += 1;
+            }
+        }
     }
     if let Some(c) = trouver(dossier, &format!("{base}-calme")) {
         copier(&c, local, "portrait-calme")?;
@@ -929,8 +1009,13 @@ fn retirer(local: &Path) {
     let des_emotions = Emotion::TOUTES.iter().flat_map(|e| {
         let nom = format!("portrait-emotion-{}", e.nom());
         let bouches: Vec<String> = (1..=POSES_MAX).map(|k| format!("{nom}-bouche-{k}")).collect();
+        let haut: Vec<String> = HAUT_D_EMOTION
+            .iter()
+            .flat_map(|s| (1..=POSES_MAX).map(move |k| (s, k)))
+            .map(|(s, k)| format!("{nom}-{s}-{k}"))
+            .collect();
         let closes = format!("{nom}-ferme");
-        std::iter::once(nom).chain(bouches).chain([closes])
+        std::iter::once(nom).chain(bouches).chain([closes]).chain(haut)
     });
     let a_part = ["portrait-calme", "portrait-cheveux"].map(String::from);
     for nom in std::iter::once("portrait".to_string()).chain(noms).chain(des_emotions).chain(a_part) {
@@ -1115,12 +1200,17 @@ mod essais {
             std::fs::write(local.join(nom), b"x").unwrap();
         }
         std::fs::write(local.join("portrait-bouche-3.png"), b"x").unwrap();
-        // Une émotion, sa bouche et ses lèvres closes ; sans sa pose, ni sa bouche ni ses lèvres ne comptent. Le visage
+        // Une émotion, sa bouche, ses lèvres closes, ses yeux (le deuxième de ses yeux qui se ferment manque : le
+        // troisième ne compte pas) et ses sourcils ; sans sa pose, ni sa bouche ni ses lèvres ne comptent. Le visage
         // calme, le masque des cheveux.
         for nom in [
             "portrait-emotion-triste.png",
             "portrait-emotion-triste-bouche-1.png",
             "portrait-emotion-triste-ferme.png",
+            "portrait-emotion-triste-regard-1.png",
+            "portrait-emotion-triste-yeux-1.png",
+            "portrait-emotion-triste-yeux-3.png",
+            "portrait-emotion-triste-sourcils-1.png",
             "portrait-emotion-joie-bouche-1.png",
             "portrait-emotion-joie-ferme.png",
             "portrait-calme.png",
@@ -1135,6 +1225,9 @@ mod essais {
             "portrait-emotion-triste.png",
             "portrait-emotion-triste-bouche-1.png",
             "portrait-emotion-triste-ferme.png",
+            "portrait-emotion-triste-regard-1.png",
+            "portrait-emotion-triste-yeux-1.png",
+            "portrait-emotion-triste-sourcils-1.png",
         ];
         let a_part = ["portrait-calme.png", "portrait-cheveux.png"];
         assert_eq!(noms, [attendus.as_slice(), &emotion, &a_part].concat());
@@ -1146,7 +1239,7 @@ mod essais {
         assert!(poses(&ailleurs, "eve", "yeux").is_empty());
         let copie = copier(&ailleurs.join("eve-bouche-1.webp"), &local, "portrait-bouche-2").unwrap();
         assert_eq!(copie, local.join("portrait-bouche-2.webp"));
-        assert_eq!(fichiers(&local).len(), 11);
+        assert_eq!(fichiers(&local).len(), 14);
         retirer(&local);
         assert!(fichiers(&local).is_empty());
         assert!(

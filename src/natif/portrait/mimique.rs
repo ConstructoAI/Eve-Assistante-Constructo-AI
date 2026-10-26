@@ -113,8 +113,9 @@ impl Mimique {
     /// La pose du visage `v` à l'heure `temps` (celle de la fenêtre), Eve à son `activite`, l'émotion de sa réponse
     /// `emotion` : les émotions d'abord (celle qui domine donne ses bouches et sa tête ; elles couvrent le visage
     /// calme), puis la bouche, les gestes (la tête suit la bouche), le buste, les cheveux (ils suivent la tête), le
-    /// regard. `vivant` : les animations de Windows sont permises — sans elles, ni souffle, ni regard de côté, ni tête
-    /// qui bouge, et la pose dit quand la redessiner (au prochain clignement, une fois tout posé).
+    /// regard (sur le visage d'une émotion, le haut du visage : ses yeux, et ses sourcils levés avec ceux des gestes).
+    /// `vivant` : les animations de Windows sont permises — sans elles, ni souffle, ni regard de côté, ni tête qui
+    /// bouge, et la pose dit quand la redessiner (au prochain clignement, une fois tout posé).
     pub(super) fn pose(
         &mut self,
         v: &Visage,
@@ -133,7 +134,7 @@ impl Mimique {
         self.gestes.avancer(&m, v, self.bouche.ouverture(), &self.emotions, h, &mut pose);
         self.buste.avancer(&m, &self.emotions, &mut pose);
         self.cheveux.avancer(&m, v, &mut pose);
-        self.regard.avancer(&m, v, &self.emotions, h, &mut pose);
+        self.regard.avancer(&m, v, &self.emotions, self.gestes.sourcils(), h, &mut pose);
         if !vivant && !m.parle() && self.emotions.posees() && self.bouche.posee() {
             pose.apres = self.regard.prochain_clin(temps);
         }

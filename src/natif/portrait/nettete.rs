@@ -273,8 +273,7 @@ impl Visage {
     fn sources(&self) -> Vec<(egui::TextureId, Arc<egui::ColorImage>, [usize; 2])> {
         let [l, h] = self.taille;
         let place = |uv: Rect| [(uv.min.x * l as f32).round() as usize, (uv.min.y * h as f32).round() as usize];
-        let des_emotions =
-            self.expressions.iter().flat_map(|x| std::iter::once(&x.visage).chain(&x.bouches).chain(&x.levres_closes));
+        let des_emotions = self.expressions.iter().flat_map(|x| x.calques());
         let calques = self.calques.iter().flatten().chain(des_emotions).chain(&self.calme);
         std::iter::once((self.texture.id(), self.image.clone(), [0, 0]))
             .chain(calques.map(|c| (c.texture.id(), c.image.clone(), place(c.uv))))

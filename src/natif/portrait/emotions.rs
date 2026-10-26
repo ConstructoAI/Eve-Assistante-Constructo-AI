@@ -157,6 +157,12 @@ impl Emotions {
         pensive.then_some(Emotion::Reflexion)
     }
 
+    /// Les visages des émotions, dans l'ordre où ils se peignent — celle qui s'efface, puis celle qui vient —, chacun à
+    /// sa part : les yeux de chacune s'y posent, couche par couche ([`super::regard`]).
+    pub(super) fn couches(&self) -> [(Option<Emotion>, f32); 2] {
+        [(self.avant, self.part_avant.x), (self.emotion, self.part.x)]
+    }
+
     /// L'émotion qui domine : celle qui se voit le plus.
     pub(super) fn dominante(&self) -> Option<Emotion> {
         if self.part.x >= self.part_avant.x { self.emotion } else { self.avant }
@@ -221,6 +227,9 @@ mod essais {
                 visage: calque(emotion.nom()),
                 bouches: Vec::new(),
                 levres_closes: None,
+                regards: Vec::new(),
+                yeux: Vec::new(),
+                sourcils: Vec::new(),
             })
             .into();
         Visage {

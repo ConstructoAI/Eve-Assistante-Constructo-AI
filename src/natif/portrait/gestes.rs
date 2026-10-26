@@ -518,6 +518,12 @@ impl Gestes {
     fn non(&self, temps: f64) -> f32 {
         self.secousses.iter().map(|&(depuis, ampleur, duree)| ampleur * secousse(temps - depuis, duree)).sum()
     }
+
+    /// La hauteur des sourcils à cette image (de 0 à 1 : de la première pose à la dernière) : le visage d'une émotion
+    /// qui couvre ceux de la photo lève les siens d'autant ([`super::regard`]).
+    pub(super) fn sourcils(&self) -> f32 {
+        self.sourcils.x
+    }
 }
 
 #[cfg(test)]
