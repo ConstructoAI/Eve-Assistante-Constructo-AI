@@ -663,7 +663,8 @@ mod essais {
                 (Vec::new(), Vec::new(), Vec::new())
             };
             let (bouches, levres_closes) = (Vec::new(), None);
-            expressions.push(Expression { emotion, visage, bouches, levres_closes, regards, yeux, sourcils });
+            let formes = Default::default();
+            expressions.push(Expression { emotion, visage, bouches, levres_closes, regards, yeux, sourcils, formes });
         }
         let visage = Visage {
             texture: photo.texture.clone(),

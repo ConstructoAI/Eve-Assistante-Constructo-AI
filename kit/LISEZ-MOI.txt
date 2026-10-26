@@ -74,14 +74,15 @@ LUI PARLER
   eve-ferme-1.png… les lèvres jointes pour m, b, p, f et v, eve-calme.png son sourire calme pour t'écouter et te parler,
   les lèvres closes ; et une par émotion : eve-emotion-joie.png, -amusee, -empathie, -triste, -surprise, -reflexion,
   -serieuse, chacune avec ses bouches pour parler, eve-emotion-joie-bouche-1…, et ses lèvres closes,
-  eve-emotion-joie-ferme.png, et ses yeux et ses sourcils pour vivre sous elle, eve-emotion-triste-regard-1…, -yeux-1…,
-  -sourcils-1… ; et le masque de ses cheveux, eve-cheveux.png), viennent avec elle et l'animent : elle cligne, te
-  regarde — ses yeux vivent même sous une émotion —, cherche des yeux quand elle réfléchit, respire — sa poitrine et ses
-  épaules se soulèvent ; sa tête accompagne ses phrases (un hochement à la fin d'un groupe de mots, la tête penchée au
-  bout d'une question, un « non » de la tête), tourne un peu avec son regard et se penche vers toi quand tu lui parles,
-  et ses cheveux la suivent avec un temps de retard ; sa bouche suit sa voix et les mots qu'elle dit, d'un sourire plus
-  calme que celui de sa photo (en sourdine, elle ne bouge pas) ; son visage prend l'émotion de chaque passage de sa
-  réponse, que Claude choisit, au moment où il se dit, et parle sans la quitter.
+  eve-emotion-joie-ferme.png, ses formes pour que ses syllabes la gardent, eve-emotion-joie-rond-1…, -large-1…, -dents,
+  -ferme-rond, et ses yeux et ses sourcils pour vivre sous elle, eve-emotion-triste-regard-1…, -yeux-1…, -sourcils-1… ;
+  et le masque de ses cheveux, eve-cheveux.png), viennent avec elle et l'animent : elle cligne, te regarde — ses yeux
+  vivent même sous une émotion —, cherche des yeux quand elle réfléchit, respire — sa poitrine et ses épaules se
+  soulèvent ; sa tête accompagne ses phrases (un hochement à la fin d'un groupe de mots, la tête penchée au bout d'une
+  question, un « non » de la tête), tourne un peu avec son regard et se penche vers toi quand tu lui parles, et ses
+  cheveux la suivent avec un temps de retard ; sa bouche suit sa voix et les mots qu'elle dit, d'un sourire plus calme
+  que celui de sa photo (en sourdine, elle ne bouge pas) ; son visage prend l'émotion de chaque passage de sa réponse,
+  que Claude choisit, au moment où il se dit, et parle sans la quitter.
 · Ce qui ne se défait pas attend « je confirme », de vive voix ou d'un clic : une suppression demandée à la voix, et
   toute écriture dans Constructo AI (voir plus bas). Un simple « oui » ne suffit pas. Elle ne lit jamais ses propres
   jetons ni tes fichiers de clés (.env).

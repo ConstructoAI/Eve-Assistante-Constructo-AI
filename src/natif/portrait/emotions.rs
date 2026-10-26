@@ -230,6 +230,7 @@ mod essais {
                 regards: Vec::new(),
                 yeux: Vec::new(),
                 sourcils: Vec::new(),
+                formes: Default::default(),
             })
             .into();
         Visage {
