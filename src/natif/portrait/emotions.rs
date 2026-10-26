@@ -170,13 +170,9 @@ impl Emotions {
 
     /// Le penchant que les émotions donnent à la tête, chacune selon sa part.
     pub(super) fn penchant(&self) -> Tete {
-        [(self.emotion, self.part.x), (self.avant, self.part_avant.x)].into_iter().fold(
-            Tete::default(),
-            |t, (e, part)| {
-                let p = penchant(e);
-                Tete { roulis: t.roulis + p.roulis * part, x: t.x + p.x * part, y: t.y + p.y * part }
-            },
-        )
+        [(self.emotion, self.part.x), (self.avant, self.part_avant.x)]
+            .into_iter()
+            .fold(Tete::default(), |t, (e, part)| t + penchant(e) * part)
     }
 
     /// Les émotions posées : plus aucune ne s'efface, celle qui est là est entière (ou aucune).
@@ -185,17 +181,18 @@ impl Emotions {
     }
 }
 
-/// Le penchant de la tête que donne une émotion : penchée par empathie, basse de tristesse, levée de surprise, de côté
-/// en réfléchissant.
+/// Le penchant de la tête que donne une émotion : penchée par empathie, et un peu tournée de ce côté, le menton à peine
+/// baissé ; basse de tristesse, le menton baissé ; levée de surprise, le menton levé, la tête en arrière ; de côté en
+/// réfléchissant, tournée vers où regarde son air pensif (en haut, à droite de l'écran), le menton un peu levé.
 fn penchant(e: Option<Emotion>) -> Tete {
-    let (roulis, x, y) = match e {
-        Some(Emotion::Empathie) => (0.05, 0.008, 0.008),
-        Some(Emotion::Triste) => (-0.02, 0.0, 0.03),
-        Some(Emotion::Surprise) => (0.0, 0.0, -0.015),
-        Some(Emotion::Reflexion) => (-0.03, -0.008, -0.008),
-        _ => (0.0, 0.0, 0.0),
+    let (roulis, lacet, tangage, x, y) = match e {
+        Some(Emotion::Empathie) => (0.05, 0.015, 0.012, 0.008, 0.004),
+        Some(Emotion::Triste) => (-0.02, 0.0, 0.035, 0.0, 0.014),
+        Some(Emotion::Surprise) => (0.0, 0.0, -0.022, 0.0, -0.005),
+        Some(Emotion::Reflexion) => (-0.03, 0.012, -0.008, -0.008, -0.004),
+        _ => (0.0, 0.0, 0.0, 0.0, 0.0),
     };
-    Tete { roulis, x, y }
+    Tete { roulis, lacet, tangage, x, y }
 }
 
 #[cfg(test)]
@@ -233,6 +230,7 @@ mod essais {
             calques: Default::default(),
             expressions,
             calme: None,
+            cheveux: None,
             fond: None,
             cadre: entiere,
             demande: Default::default(),

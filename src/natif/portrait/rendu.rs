@@ -8,13 +8,15 @@
 //! treillis prend la forme du mélange du moment — chaque calque selon sa part visible — et chaque couche s'y peint en
 //! allant chercher dans sa pose le point qui y vient. Les couches tombent l'une sur l'autre : à mi-chemin d'un
 //! clignement, une seule paupière, à mi-hauteur, et non deux, l'une sur l'autre ; un sourcil qui monte, une mâchoire qui
-//! descend. Puis la tête : penchée autour de la base du cou, elle entraîne tout ce qui est au-dessus du menton d'un seul
-//! bloc — le visage ne se tord jamais —, le cou et les cheveux de moins en moins, et rien des épaules ni du bord du
-//! disque ([`poids_de_la_tete`]). Puis le corps ([`deplacement_du_corps`]) : son souffle soulève la poitrine et les
-//! épaules, la tête portée par elles. Le bord du disque ne bouge jamais, et les épaules le touchent : loin de lui, le
-//! corps déplace le treillis ; près de lui, il glisse dessous, comme derrière le cadre d'un médaillon — chaque couche
-//! va chercher dans son image le point qui vient là ([`BORD`]). Un seul maillage par couche, du haut de l'image au bas
-//! du disque : aucune couture.
+//! descend. Puis la tête ([`Mouvement`]) : tournée et hochée en trois dimensions — une tête n'est pas une carte :
+//! chaque point de son visage va d'autant plus loin qu'il est en avant de l'axe de la tête ([`Rangee`]) —, puis
+//! penchée autour de la base du cou, elle entraîne tout ce qui est au-dessus du menton, le cou et les cheveux de moins
+//! en moins, et rien des épaules ni du bord du disque ([`poids_de_la_tete`]). Puis le corps
+//! ([`deplacement_du_corps`]) : son souffle soulève la poitrine et les épaules, la tête portée par elles. Puis les
+//! longueurs des cheveux, qui traînent un peu derrière la tête quand elle bouge ([`super::cheveux`]). Le bord du
+//! disque ne bouge jamais, et les épaules le touchent : loin de lui, le corps déplace le treillis ; près de lui, il
+//! glisse dessous, comme derrière le cadre d'un médaillon — chaque couche va chercher dans son image le point qui vient
+//! là ([`BORD`]). Un seul maillage par couche, du haut de l'image au bas du disque : aucune couture.
 
 use eframe::egui::{self, Color32, Pos2, Rect, Vec2, pos2, vec2};
 
@@ -27,7 +29,7 @@ use crate::natif::theme::erp;
 pub(super) const PAS: usize = 8;
 /// Le pivot de la tête, en parts du rayon depuis le centre du disque (y vers le bas) : la base du cou, où une tête se
 /// penche.
-const PIVOT: Vec2 = vec2(0.0, 0.15);
+pub(super) const PIVOT: Vec2 = vec2(0.0, 0.15);
 /// Le bas du menton, en parts du rayon depuis le centre du disque : au-dessus, tout suit la tête d'un bloc.
 const MENTON: f32 = -0.12;
 /// Ce que la tête entraîne encore sous le menton, en parts du rayon : le cou et les cheveux, jusqu'à la base du cou ; les
@@ -233,6 +235,133 @@ fn poids_de_la_tete(u: f32, v: f32) -> f32 {
     1.0 - lisse((v - MENTON) / portee)
 }
 
+/// La profondeur du portrait — de combien chaque point est en avant de l'axe autour duquel la tête tourne et hoche, le
+/// haut du cou entre les oreilles, en part du rayon du disque —, en deux couches, chacune sur le milieu du visage, tous
+/// les [`ECART`] de hauteur à partir de [`PREMIER`] (v vers le bas, depuis le centre du disque), avec sa demi-largeur
+/// (jusqu'où elle s'arrondit à rien) : la tête et ses cheveux, larges (les cheveux qui encadrent le visage tournent
+/// avec lui) ; et le visage devant elle, plus étroit, qui fait le bas du visage plus rond que les cheveux à côté. Et le
+/// nez ([`nez`]). Mesurée sur LivePortrait — le chemin de chaque point quand il tourne et hoche la tête d'Eve de six
+/// degrés, son flot divisé par l'angle : la tête comme le visage, à un vingtième du rayon près —, sauf sous le menton,
+/// où il cloue l'image (le menton à 9 cm en avant de l'axe, le cou à 5 : un centimètre fait un vingtième du rayon).
+const PREMIER: f32 = -1.3;
+const ECART: f32 = 0.1;
+const TETE: [f32; 17] =
+    [0.0, 0.12, 0.275, 0.39, 0.455, 0.48, 0.49, 0.445, 0.385, 0.345, 0.305, 0.235, 0.19, 0.14, 0.09, 0.055, 0.025];
+const LARGEUR_DE_LA_TETE: [f32; 17] =
+    [0.25, 0.32, 0.39, 0.45, 0.53, 0.58, 0.645, 0.71, 0.75, 0.74, 0.685, 0.7, 0.76, 0.79, 0.8, 0.8, 0.8];
+const VISAGE: [f32; 17] =
+    [0.0, 0.0, 0.03, 0.03, 0.0, 0.0, 0.0, 0.0, 0.045, 0.105, 0.13, 0.195, 0.225, 0.195, 0.155, 0.135, 0.115];
+const LARGEUR_DU_VISAGE: [f32; 17] =
+    [0.58, 0.53, 0.48, 0.435, 0.39, 0.35, 0.32, 0.3, 0.3, 0.305, 0.285, 0.225, 0.255, 0.265, 0.26, 0.255, 0.25];
+/// Le milieu du visage d'Eve, en part du rayon (le portrait le place sous le milieu de sa tête : il penche à peine à
+/// gauche).
+const MILIEU_DU_VISAGE: f32 = -0.015;
+/// Le nez : son bout (en part du rayon depuis le centre du disque), sa demi-largeur, ce qu'il couvre au-dessus de son
+/// bout (son arête, jusqu'entre les sourcils) et au-dessous (jusqu'à la lèvre), et ce qu'il avance devant le visage.
+const NEZ: Vec2 = vec2(-0.025, -0.39);
+const NEZ_DEMI_LARGEUR: f32 = 0.135;
+const NEZ_AU_DESSUS: f32 = 0.3;
+const NEZ_AU_DESSOUS: f32 = 0.08;
+const AVANCE_DU_NEZ: f32 = 0.062;
+
+/// La profondeur du portrait à une hauteur `v` (en part du rayon depuis le centre du disque, vers le bas) : de combien
+/// chacun de ses points est en avant de l'axe de la tête ([`TETE`], [`VISAGE`], [`nez`]) — le bout du nez, le plus ;
+/// rien au-dessus du crâne, ni au bord des cheveux, ni sur les épaules. Ses tables lues une fois pour une rangée du
+/// treillis (ses nœuds sont à la même hauteur) : la profondeur de la tête et du visage sur le milieu, l'inverse de
+/// leurs demi-largeurs.
+#[derive(Clone, Copy)]
+pub(super) struct Rangee {
+    v: f32,
+    tete: f32,
+    par_tete: f32,
+    visage: f32,
+    par_visage: f32,
+}
+
+impl Rangee {
+    pub(super) fn de(v: f32) -> Rangee {
+        let (lire, largeur) =
+            (|t: &[f32]| dans_la_table(t, v).max(0.0), |t: &[f32]| 1.0 / dans_la_table(t, v).max(0.05));
+        Rangee {
+            v,
+            tete: lire(&TETE),
+            par_tete: largeur(&LARGEUR_DE_LA_TETE),
+            visage: lire(&VISAGE),
+            par_visage: largeur(&LARGEUR_DU_VISAGE),
+        }
+    }
+
+    /// La profondeur du point de cette rangée à `u` (en part du rayon depuis le centre du disque) : chaque couche
+    /// s'arrondit de son milieu à rien ([`tour`]), et le nez avance.
+    pub(super) fn profondeur(&self, u: f32) -> f32 {
+        let d = (u - MILIEU_DU_VISAGE).abs();
+        self.tete * tour(d * self.par_tete) + self.visage * tour(d * self.par_visage) + nez(vec2(u, self.v))
+    }
+}
+
+/// Le tour d'une couche de la profondeur, à la part `s` de sa demi-largeur : presque plat au milieu, puis qui fuit de
+/// plus en plus vite, comme une tête vue d'en haut, et s'annule au bout sans pli (sa pente aussi).
+fn tour(s: f32) -> f32 {
+    if s < 1.0 {
+        let f = 1.0 - s * s * s;
+        f * f
+    } else {
+        0.0
+    }
+}
+
+/// Ce que le nez avance au point `p` devant le visage : tout, à son bout ; de moins en moins vers ses ailes, entre les
+/// sourcils et vers la lèvre ; rien au-delà, sans pli.
+fn nez(p: Vec2) -> f32 {
+    let haut = if p.y < NEZ.y { NEZ_AU_DESSUS } else { NEZ_AU_DESSOUS };
+    let q = ((p.x - NEZ.x) / NEZ_DEMI_LARGEUR).powi(2) + ((p.y - NEZ.y) / haut).powi(2);
+    if q < 1.0 { AVANCE_DU_NEZ * (1.0 - q) * (1.0 - q) } else { 0.0 }
+}
+
+/// La valeur d'une table de nœuds réguliers (tous les [`ECART`] à partir de [`PREMIER`]) en `v` : entre deux nœuds, la
+/// courbe douce qui passe par eux (Catmull-Rom : sa pente aussi va d'un nœud au suivant sans à-coup) ; au-delà de la
+/// table, celle de son bout.
+fn dans_la_table(table: &[f32], v: f32) -> f32 {
+    let n = table.len();
+    let x = ((v - PREMIER) / ECART).clamp(0.0, (n - 1) as f32);
+    let k = (x as usize).min(n - 2);
+    let t = x - k as f32;
+    let p = |i: usize| table[i.min(n - 1)];
+    let (p0, p1, p2, p3) = (p(k.saturating_sub(1)), p(k), p(k + 1), p(k + 2));
+    let (t2, t3) = (t * t, t * t * t);
+    0.5 * (2.0 * p1 + (p2 - p0) * t + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 + (3.0 * p1 - p0 - 3.0 * p2 + p3) * t3)
+}
+
+/// La tête à une image, prête à déplacer chaque point du portrait ([`Mouvement::deplacement`]) : ses angles — les
+/// sinus de son lacet et de son tangage, le sinus et le cosinus de son roulis, calculés une fois pour tous les nœuds —
+/// et son déplacement.
+#[derive(Clone, Copy)]
+pub(super) struct Mouvement {
+    lacet: f32,
+    tangage: f32,
+    roulis: (f32, f32),
+    decale: Vec2,
+}
+
+impl Mouvement {
+    pub(super) fn de(t: &Tete) -> Mouvement {
+        Mouvement { lacet: t.lacet.sin(), tangage: t.tangage.sin(), roulis: t.roulis.sin_cos(), decale: vec2(t.x, t.y) }
+    }
+
+    /// Où la tête emmène le point `p` du portrait (en parts du rayon depuis le centre du disque, y vers le bas), qui
+    /// est à la profondeur `z` (celle de ce point sur la photo, avant les poses : [`Rangee::profondeur`]), s'il la
+    /// suivait tout entier — ce qu'elle en entraîne vraiment est à part ([`poids_de_la_tete`]) : tourné et hoché en
+    /// trois dimensions, d'autant plus qu'il est en avant de l'axe de la tête — vu de face, il glisse de côté quand
+    /// elle tourne, vers le bas quand elle baisse le menton, et le reste de son chemin, vers nous ou loin de nous, ne
+    /// se voit pas (ses angles sont petits) ; puis penché autour de la base du cou ([`PIVOT`]), et déplacé. Son chemin,
+    /// en parts du rayon.
+    pub(super) fn deplacement(&self, p: Vec2, z: f32) -> Vec2 {
+        let e = p + vec2(z * self.lacet, z * self.tangage) - PIVOT;
+        let (s, c) = self.roulis;
+        vec2(e.x * c - e.y * s, e.x * s + e.y * c) + PIVOT + self.decale - p
+    }
+}
+
 /// Ce que le corps déplace du point `p` du portrait (en parts du rayon depuis le centre du disque, y vers le bas), que
 /// la tête emporte de `tete` ([`poids_de_la_tete`]) : le souffle soulève le haut du corps — la poitrine, les épaules,
 /// le cou et les cheveux qui y tombent —, la tête portée par lui à moitié, et élargit un peu la poitrine ; les épaules
@@ -300,8 +429,7 @@ impl Treillis {
         let (i1, j1) = (((c.x + r) / pas).ceil() as usize, ((c.y + r) / pas).ceil() as usize);
         let (ni, nj) = (i1 + 1 - i0, j1 + 1 - j0);
         let couches: Vec<&Couche> = pose.couches().filter(|c| c.geometrie.is_some()).collect();
-        let (s, co) = pose.tete.roulis.sin_cos();
-        let Tete { x: tx, y: ty, .. } = pose.tete;
+        let tete = Mouvement::de(&pose.tete);
         let mut t = Treillis {
             i0,
             j0,
@@ -322,6 +450,8 @@ impl Treillis {
             corps: pose.corps,
         };
         for j in j0..=j1 {
+            // La profondeur de la tête à la hauteur de cette rangée (tous ses nœuds sont à la même, dans le portrait).
+            let rangee = Rangee::de((((j * PAS) as f32).clamp(haut, c.y + r) - c.y) / r);
             for i in i0..=i1 {
                 let noeud = pos2((i * PAS) as f32, (j * PAS) as f32);
                 // Dans la forme du portrait : la largeur du disque ; sous son milieu (partout, pour une photo), le
@@ -352,14 +482,15 @@ impl Treillis {
                 if detoure {
                     let poids = poids_de_la_tete(depart.x, depart.y);
                     if poids > 0.0 {
-                        let e = d - PIVOT;
-                        let penche = vec2(e.x * co - e.y * s, e.x * s + e.y * co);
-                        d += (penche - e + vec2(tx, ty)) * poids;
+                        d += tete.deplacement(d, rangee.profondeur(depart.x)) * poids;
                     }
                     let corps = deplacement_du_corps(depart, poids, &pose.corps);
                     let loin = lisse(distance_au_bord(depart) / BORD);
                     d += corps * loin;
                     glisse = corps * ((loin - 1.0) * r);
+                    // Les longueurs des cheveux, en retard sur la tête ([`super::cheveux`]) : autant qu'elle emporte
+                    // le nœud, rien sur le bord.
+                    d += pose.cheveux.ecart(i, j, depart.y) * (poids * loin);
                 }
                 t.place.push(q);
                 t.libre.push(libre);
@@ -635,6 +766,130 @@ mod essais {
         for v in t.maillage(&photo).unwrap().vertices {
             if v.color != Color32::TRANSPARENT && v.pos.y > centre.y {
                 assert!((v.pos - centre).length() <= rayon + 1e-3, "{:?}", v.pos);
+            }
+        }
+    }
+
+    #[test]
+    fn les_cheveux_en_retard_laissent_le_visage_et_le_bord() {
+        // Une image de 400 sur 300, opaque ; le disque : un carré de 200 pixels, centré en (200, 160) ; des cheveux à
+        // gauche (jusqu'à 180), le visage à droite. Les longueurs en retard vers la gauche : à mi-longueur d'un
+        // centième du rayon, aux pointes de deux.
+        let cadre = Rect::from_center_size(pos2(200.0 / 400.0, 160.0 / 300.0), vec2(200.0 / 400.0, 200.0 / 300.0));
+        let (centre, rayon) = (pos2(500.0, 400.0), 50.0);
+        let photo = egui::ColorImage::new([400, 300], vec![Color32::from_rgb(120, 80, 50); 400 * 300]);
+        let masque = egui::ColorImage::new(
+            [400, 300],
+            (0..400 * 300).map(|k| if k % 400 < 180 { Color32::WHITE } else { Color32::BLACK }).collect(),
+        );
+        let souplesse = std::sync::Arc::new(super::super::cheveux::Souplesse::de(&photo, &masque));
+        let cheveux = super::super::cheveux::Retard::d_essai(souplesse, -0.01, -0.02);
+        let calme = Treillis::nouveau([400, 300], cadre, centre, rayon, true, &Pose::default());
+        let t = Treillis::nouveau([400, 300], cadre, centre, rayon, true, &Pose { cheveux, ..Pose::default() });
+        let noeud = |x: usize, y: usize| (y / PAS - t.j0) * t.ni + (x / PAS - t.i0);
+        let bouge = |n: usize| (t.ecran[n] - calme.ecran[n]) / rayon;
+        // Les longueurs, au-dessus du menton : vers la gauche, de côté seulement, entre le retard du milieu et celui
+        // des pointes.
+        let longueur = bouge(noeud(136, 128));
+        assert!(longueur.x < -0.01 && longueur.x > -0.02 && longueur.y == 0.0, "{longueur:?}");
+        // Le visage, les cheveux au-dessus des racines, le bord du disque : rien.
+        assert_eq!(bouge(noeud(232, 128)), Vec2::ZERO, "le visage");
+        assert_eq!(bouge(noeud(136, 72)), Vec2::ZERO, "au-dessus des racines");
+        assert!(t.bord.iter().all(|&n| bouge(n) == Vec2::ZERO), "le bord");
+    }
+
+    #[test]
+    fn la_profondeur_est_celle_d_une_tete() {
+        // Le bout du nez, le plus en avant ; puis le visage (entre les yeux, la bouche, le menton), les pommettes, les
+        // cheveux qui l'encadrent ; le haut du crâne et le cou, moins ; rien au bord des cheveux ni au-dessus du crâne.
+        let z = |u: f32, v: f32| Rangee::de(v).profondeur(u);
+        let (nez, yeux, bouche, menton) = (z(-0.025, -0.39), z(-0.015, -0.58), z(-0.015, -0.27), z(-0.015, -0.08));
+        assert!(nez > yeux + 0.04 && nez > bouche && nez > menton, "{nez} {yeux} {bouche} {menton}");
+        assert!([yeux, bouche, menton].iter().all(|p| (0.38..0.5).contains(p)), "{yeux} {bouche} {menton}");
+        let (pommette, tempe, bord) = (z(0.2, -0.45), z(0.38, -0.6), z(0.62, -0.6));
+        assert!(yeux > pommette && pommette > tempe && tempe > 0.2 && bord < 0.12, "{pommette} {tempe} {bord}");
+        // Le cou, à 5 cm en avant de l'axe, le menton à 9.
+        let (crane, cou) = (z(-0.015, -1.15), z(-0.015, 0.1));
+        assert!(crane < 0.6 * yeux && cou < 0.65 * menton, "{crane} {cou}");
+        assert!(z(-0.015, -1.3) == 0.0 && z(0.9, -0.6) == 0.0);
+        // Douce partout : d'un point au suivant (un deux-centième du rayon), jamais plus d'un soixante-dixième — une
+        // pente de trois au plus : à cinq degrés, l'image se resserre ou s'étire d'un quart au plus, sans pli.
+        for j in 0..=320 {
+            let v = -1.3 + j as f32 * 0.005;
+            for i in 0..=360 {
+                let u = -0.9 + i as f32 * 0.005;
+                let (a, b, c) = (z(u, v), z(u + 0.005, v), z(u, v + 0.005));
+                assert!((a - b).abs() < 0.015 && (a - c).abs() < 0.015, "({u}, {v}) : {a} {b} {c}");
+            }
+        }
+    }
+
+    #[test]
+    fn la_tete_tourne_et_hoche_comme_une_tete() {
+        // Une image de 800 sur 700 ; le disque : un carré de 600 pixels, centré en (400, 430) ; un portrait détouré,
+        // au calme, puis la tête tournée de quatre degrés (le visage vers la droite de l'écran), puis baissée d'autant.
+        let cadre = Rect::from_center_size(pos2(400.0 / 800.0, 430.0 / 700.0), vec2(600.0 / 800.0, 600.0 / 700.0));
+        let (centre, rayon) = (pos2(1000.0, 1000.0), 300.0);
+        let pose = |tete: Tete| Pose { tete, ..Pose::default() };
+        let calme = Treillis::nouveau([800, 700], cadre, centre, rayon, true, &Pose::default());
+        let angle = 4f32.to_radians();
+        let tournee =
+            Treillis::nouveau([800, 700], cadre, centre, rayon, true, &pose(Tete { lacet: angle, ..Tete::default() }));
+        let baissee = Treillis::nouveau(
+            [800, 700],
+            cadre,
+            centre,
+            rayon,
+            true,
+            &pose(Tete { tangage: angle, ..Tete::default() }),
+        );
+        // Le nœud le plus proche d'un point du portrait (en parts du rayon), et son chemin à l'écran (en parts du
+        // rayon).
+        let noeud = |u: f32, v: f32| {
+            let p = calme.c + vec2(u, v) * calme.r;
+            let (i, j) = ((p.x / PAS as f32).round() as usize, (p.y / PAS as f32).round() as usize);
+            (j - calme.j0) * calme.ni + (i - calme.i0)
+        };
+        let chemin = |t: &Treillis, n: usize| (t.ecran[n] - calme.ecran[n]) / rayon;
+        let depart = |n: usize| (calme.place[n] - calme.c) / calme.r;
+        // Tournée : chaque point de côté, de sa profondeur ; le nez plus que les pommettes, plus que les cheveux qui
+        // encadrent le visage ; le bord des cheveux, à peine ; rien en hauteur.
+        let nez = noeud(-0.025, -0.39);
+        let attendu = Rangee::de(depart(nez).y).profondeur(depart(nez).x) * angle.sin();
+        assert!((chemin(&tournee, nez).x - attendu).abs() < 0.05 * attendu && chemin(&tournee, nez).y.abs() < 1e-4);
+        let x = |u: f32, v: f32| chemin(&tournee, noeud(u, v)).x;
+        assert!(x(-0.025, -0.39) > x(0.2, -0.45) && x(0.2, -0.45) > x(0.4, -0.6) && x(0.62, -0.6) < 0.4 * attendu);
+        // Le côté qui s'éloigne (la droite de l'écran) se resserre, l'autre s'élargit.
+        let large = |t: &Treillis, a: usize, b: usize| t.ecran[b].x - t.ecran[a].x;
+        let (droite, gauche) = ((noeud(0.15, -0.45), noeud(0.5, -0.45)), (noeud(-0.5, -0.45), noeud(-0.15, -0.45)));
+        assert!(large(&tournee, droite.0, droite.1) < large(&calme, droite.0, droite.1) - 0.005 * rayon);
+        assert!(large(&tournee, gauche.0, gauche.1) > large(&calme, gauche.0, gauche.1) + 0.005 * rayon);
+        // Baissée : chaque point vers le bas, de sa profondeur ; le visage plus que le haut du crâne ; le menton se
+        // rapproche du cou ; rien de côté.
+        let y = |u: f32, v: f32| chemin(&baissee, noeud(u, v)).y;
+        assert!((y(-0.025, -0.39) - attendu).abs() < 0.05 * attendu && chemin(&baissee, nez).x.abs() < 1e-4);
+        assert!(y(-0.015, -0.6) > 1.8 * y(-0.015, -1.15) && y(-0.015, -0.6) > 2.0 * y(0.6, -0.6));
+        let haut = |t: &Treillis, a: usize, b: usize| t.ecran[b].y - t.ecran[a].y;
+        let (menton, cou) = (noeud(-0.015, -0.06), noeud(-0.015, 0.06));
+        assert!(haut(&baissee, menton, cou) < haut(&calme, menton, cou) - 0.004 * rayon);
+        // Ni l'une ni l'autre ne bouge le bord du disque ; aucune ne plie l'image, même au double de l'angle : d'un
+        // nœud libre au suivant, l'écran avance toujours, de gauche à droite et de haut en bas.
+        for t in [&tournee, &baissee] {
+            assert!(t.bord.iter().all(|&n| chemin(t, n).length() < 1e-6));
+        }
+        for tete in [Tete { lacet: 2.0 * angle, ..Tete::default() }, Tete { tangage: -2.0 * angle, ..Tete::default() }]
+        {
+            let t = Treillis::nouveau([800, 700], cadre, centre, rayon, true, &pose(tete));
+            for j in 0..t.nj {
+                for i in 0..t.ni {
+                    let n = j * t.ni + i;
+                    if i + 1 < t.ni && t.libre[n] && t.libre[n + 1] {
+                        assert!(t.ecran[n + 1].x > t.ecran[n].x + 0.5 * PAS as f32, "{:?}", depart(n));
+                    }
+                    if j + 1 < t.nj && t.libre[n] && t.libre[n + t.ni] {
+                        assert!(t.ecran[n + t.ni].y > t.ecran[n].y + 0.5 * PAS as f32, "{:?}", depart(n));
+                    }
+                }
             }
         }
     }

@@ -134,10 +134,53 @@ impl Piste {
     }
 }
 
-/// Ce qui s'entend en ce moment — depuis quand, et sa piste —, posé par le fil de la voix quand un son s'entend et ôté
-/// quand il finit. La fenêtre le lit à chaque image, sans attendre l'état du chef (dix fois par seconde : trop peu pour
-/// des lèvres) : une seule voix parle, une seule bouche la suit.
+/// Ce qui s'entend — l'instant où le son commence, et sa piste —, posé par le fil de la voix quand il donne le son au
+/// lecteur, recalé dès que l'horloge du lecteur dit quand il a vraiment commencé, ôté quand il finit. La fenêtre le lit
+/// à chaque image, sans attendre l'état du chef (dix fois par seconde : trop peu pour des lèvres) : une seule voix
+/// parle, une seule bouche la suit.
 static S_ENTEND: Mutex<Option<(Instant, Piste)>> = Mutex::new(None);
+
+/// Le retard de l'écran, en microsecondes : le temps qu'une image calculée met à se voir, que la fenêtre déclare
+/// ([`regler_le_retard_de_l_ecran`]). Ce qui se lit de la voix est alors ce qui s'entendra quand l'image se verra. Rien
+/// pour les essais : le film du portrait garde chaque image à l'instant où elle se calcule.
+static RETARD_DE_L_ECRAN: AtomicU64 = AtomicU64::new(0);
+
+/// La fenêtre déclare le temps que ses images mettent à se voir.
+pub fn regler_le_retard_de_l_ecran(retard: Duration) {
+    RETARD_DE_L_ECRAN.store(retard.as_micros() as u64, Ordering::Relaxed);
+}
+
+/// Où en sera le son qui commence à `debut` quand l'image calculée maintenant se verra ([`ecoule_a`]).
+fn ecoule(debut: Instant) -> Option<Duration> {
+    let retard = Duration::from_micros(RETARD_DE_L_ECRAN.load(Ordering::Relaxed));
+    ecoule_a(Instant::now(), debut, retard)
+}
+
+/// Où en sera le son qui commence à `debut` quand l'image calculée à `maintenant` se verra, `retard` plus tard ;
+/// `None` : il n'aura pas encore commencé.
+fn ecoule_a(maintenant: Instant, debut: Instant, retard: Duration) -> Option<Duration> {
+    (maintenant + retard).checked_duration_since(debut)
+}
+
+/// Le début du son qui joue, d'après l'horloge du lecteur : l'heure (`maintenant`) moins sa `position` — le son sort du
+/// poste 0,8 ms après (mesuré le 2026-10-25), là où l'état « joue » de Windows arrive de 13 ms avant lui à 18 ms après.
+/// La plus petite des estimations (`avant` : celle des lectures d'avant) : un fil en retard ne fait que reculer
+/// l'heure lue, jamais la position. Une position nulle ne dit rien (le son n'est pas encore parti), ni une position
+/// plus longue que le temps passé depuis `Play()` (`joue_depuis`) : celle du son d'avant, que le lecteur garderait.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn debut_du_son(
+    maintenant: Instant,
+    joue_depuis: Duration,
+    position: Duration,
+    avant: Option<Instant>,
+) -> Option<Instant> {
+    let possible = !position.is_zero() && position <= joue_depuis + Duration::from_millis(5);
+    let lu = if possible { maintenant.checked_sub(position) } else { None };
+    match (avant, lu) {
+        (Some(a), Some(l)) => Some(a.min(l)),
+        (a, l) => a.or(l),
+    }
+}
 
 /// La bouche à cet instant ([`bouche_a_venir`]) ; `None` : rien ne s'entend.
 pub fn bouche_du_moment() -> Option<Articulation> {
@@ -158,11 +201,12 @@ pub fn forme_a_venir(avance: Duration) -> Option<Forme> {
     lire_la_piste(|ecoule| ecoule + avance).map(|a| a.forme)
 }
 
-/// La piste de ce qui s'entend, lue à l'instant que donne `instant` d'après le temps écoulé depuis le début du son.
+/// La piste de ce qui s'entend, lue à l'instant que donne `instant` d'après le temps écoulé depuis le début du son
+/// ([`ecoule`]).
 fn lire_la_piste(instant: impl Fn(Duration) -> Duration) -> Option<Articulation> {
     let s = S_ENTEND.lock().ok()?;
-    let (depuis, piste) = s.as_ref()?;
-    let t = instant(depuis.elapsed()).as_secs_f32() / PAS_DE_L_ENVELOPPE.as_secs_f32();
+    let (debut, piste) = s.as_ref()?;
+    let t = instant(ecoule(*debut)?).as_secs_f32() / PAS_DE_L_ENVELOPPE.as_secs_f32();
     let forme = *piste.formes.get(t as usize)?;
     let x = (t - 0.5).max(0.0);
     let (i, f) = (x as usize, x.fract());
@@ -174,17 +218,32 @@ fn lire_la_piste(instant: impl Fn(Duration) -> Duration) -> Option<Articulation>
 }
 
 /// Les repères de la phrase qui s'entend ([`Repere`]), et où elle en sera dans `avance` (en secondes depuis son début,
-/// même passé sa fin) : les gestes du visage s'y accrochent. `None` : rien ne s'entend.
+/// même passé sa fin) : les gestes du visage s'y accrochent. `None` : rien ne s'entend, ou pas encore.
 pub fn reperes_a_venir(avance: Duration) -> Option<(f32, Arc<[Repere]>)> {
     let s = S_ENTEND.lock().ok()?;
-    let (depuis, piste) = s.as_ref()?;
-    Some(((depuis.elapsed() + avance).as_secs_f32(), piste.reperes.clone()))
+    let (debut, piste) = s.as_ref()?;
+    Some(((ecoule(*debut)? + avance).as_secs_f32(), piste.reperes.clone()))
 }
 
-/// Fait entendre une piste à partir de maintenant (rien : plus rien ne s'entend) ; le fil de la voix, et les essais.
+/// Fait entendre une piste à partir de maintenant (rien : plus rien ne s'entend) ; les essais.
 pub fn faire_entendre(piste: Option<Piste>) {
+    entendre(piste.map(|p| (Instant::now(), p)));
+}
+
+/// Ce qui s'entend : une piste et l'instant où son son commence, même un peu plus tard (le lecteur vient de le
+/// recevoir), ou rien.
+fn entendre(piste: Option<(Instant, Piste)>) {
     if let Ok(mut s) = S_ENTEND.lock() {
-        *s = piste.map(|p| (Instant::now(), p));
+        *s = piste;
+    }
+}
+
+/// Le son qui s'entend a commencé à `debut` : l'horloge du lecteur le dit plus juste que l'instant où il l'a reçu.
+fn recaler(debut: Instant) {
+    if let Ok(mut s) = S_ENTEND.lock()
+        && let Some((d, _)) = s.as_mut()
+    {
+        *d = debut;
     }
 }
 
@@ -1179,11 +1238,12 @@ enum Panne {
     Illisible(String),
 }
 
-/// Le morceau qui se dit : sa parole, s'il s'entend déjà (le lecteur l'a ouvert et le joue), et la piste de sa bouche.
+/// Le morceau qui se dit : sa parole, s'il s'entend déjà (l'horloge du lecteur a commencé), et l'instant où son son
+/// commence — estimé quand le lecteur le reçoit, puis lu sur son horloge ([`lecture::Lecteur::debut`]).
 struct EnLecture {
     id: u64,
     entendu: bool,
-    piste: Piste,
+    debut: Instant,
 }
 
 /// Ce que dit le lecteur du son en cours.
@@ -1691,12 +1751,19 @@ impl Fil {
     fn jouer(&mut self) {
         if let Some(l) = self.lecture.as_mut() {
             let lu = self.lecteur.sonder();
-            let entendu = !l.entendu && self.lecteur.entendu();
+            // Le début du son, lu sur l'horloge du lecteur : la bouche s'y recale (elle partait de l'estimation).
+            let debut = self.lecteur.debut();
+            if let Some(d) = debut
+                && d != l.debut
+            {
+                l.debut = d;
+                recaler(d);
+            }
+            let entendu = !l.entendu && debut.is_some();
             l.entendu |= entendu;
-            let id = l.id;
+            let (id, depuis) = (l.id, l.debut);
             if entendu {
-                faire_entendre(Some(l.piste.clone()));
-                self.tracer(Trace::Son { id, a: Instant::now() });
+                self.tracer(Trace::Son { id, a: depuis });
                 // Le premier son de cette parole s'entend : le chef en tient le temps de la première parole.
                 if id > self.entendue {
                     self.entendue = id;
@@ -1742,8 +1809,12 @@ impl Fil {
             let Some((numero, id, wav)) = suivant else { return };
             let piste = piste_du_son(&wav, self.file.texte_en_cours());
             match self.lecteur.jouer(numero, wav) {
-                Ok(()) => {
-                    self.lecture = Some(EnLecture { id, entendu: false, piste });
+                Ok(attente) => {
+                    // Le son partira dans un instant : la bouche le sait d'avance — l'écran montre ses images un peu
+                    // après les avoir calculées ([`regler_le_retard_de_l_ecran`]), et le début de la phrase s'y voit.
+                    let debut = Instant::now() + attente;
+                    entendre(Some((debut, piste)));
+                    self.lecture = Some(EnLecture { id, entendu: false, debut });
                     self.tracer(Trace::Debut { id, a: Instant::now() });
                     return;
                 }
@@ -1877,12 +1948,21 @@ mod lecture {
         /// Le morceau donné d'avance à l'autre lecteur, et s'il a pu l'ouvrir.
         precharge: Option<(u64, bool)>,
         depuis: Instant,
-        /// Le son en cours a été vu jouer : la pause qui suit est sa fin.
-        a_joue: bool,
+        /// Le son en cours a été vu jouer (depuis cet instant) : la pause qui suit est sa fin.
+        a_joue: Option<Instant>,
+        /// L'instant où le son en cours a commencé, d'après l'horloge du lecteur ([`super::debut_du_son`]).
+        debut: Option<Instant>,
         duree: Option<Duration>,
         /// Le silence à la fin du son en cours.
         silence: Duration,
     }
+
+    /// Ce que met le son à partir après `Play()`, mesuré dans le son qui sort du poste (le 2026-10-25) : ouvert
+    /// d'avance, 15 ms ; ouvert à l'instant, de 70 à 76 ms. La bouche s'y fie avant que l'horloge du lecteur parle.
+    const ATTENTE_OUVERT_D_AVANCE: Duration = Duration::from_millis(15);
+    const ATTENTE_OUVERT_A_L_INSTANT: Duration = Duration::from_millis(74);
+    /// Un lecteur qui joue sans que sa position avance : le son a commencé quand il a été vu jouer.
+    const SANS_POSITION: Duration = Duration::from_millis(100);
 
     impl Lecteur {
         /// Un lecteur encore fermé : [`Lecteur::prechauffer`] l'ouvre (après le lancement de Piper, dont le modèle se
@@ -1893,7 +1973,8 @@ mod lecture {
                 actif: 0,
                 precharge: None,
                 depuis: Instant::now(),
-                a_joue: false,
+                a_joue: None,
+                debut: None,
                 duree: None,
                 silence: Duration::ZERO,
             }
@@ -1927,24 +2008,27 @@ mod lecture {
         }
 
         /// Joue un WAV sans attendre, dans l'autre lecteur (celui qui vient de jouer peut finir son silence) : ouvert
-        /// d'avance s'il l'est déjà. [`Lecteur::sonder`] dit quand il est fini.
-        pub fn jouer(&mut self, numero: u64, wav: Vec<u8>) -> Result<(), String> {
+        /// d'avance s'il l'est déjà. Rend le temps que le son mettra sans doute à partir ; [`Lecteur::debut`] dit
+        /// quand il est vraiment parti, [`Lecteur::sonder`] quand il est fini.
+        pub fn jouer(&mut self, numero: u64, wav: Vec<u8>) -> Result<Duration, String> {
             self.prechauffer();
             if self.joueurs.is_empty() {
                 return Err("le lecteur audio de Windows ne s'ouvre pas".into());
             }
             let libre = (self.actif + 1) % self.joueurs.len();
-            if self.precharge.take() != Some((numero, true)) {
+            let ouvert = self.precharge.take() == Some((numero, true));
+            if !ouvert {
                 let s = source(&wav)?;
                 self.joueurs[libre].SetSource(&s).map_err(texte)?;
             }
             self.actif = libre;
             self.joueurs[self.actif].Play().map_err(texte)?;
             self.depuis = Instant::now();
-            self.a_joue = false;
+            self.a_joue = None;
+            self.debut = None;
             self.duree = duree_wav(&wav);
             self.silence = silence_final(&wav);
-            Ok(())
+            Ok(if ouvert { ATTENTE_OUVERT_D_AVANCE } else { ATTENTE_OUVERT_A_L_INSTANT })
         }
 
         pub fn sonder(&mut self) -> Lu {
@@ -1961,18 +2045,22 @@ mod lecture {
             };
             let ecoule = self.depuis.elapsed();
             if etat == MediaPlaybackState::Playing {
-                self.a_joue = true;
-                // Dans son silence final, assez près de la fin : le son suivant peut partir.
-                if let (Some(d), Ok(p)) = (self.duree, session.Position()) {
-                    let reste = d.saturating_sub(Duration::from(p));
-                    if reste <= AVANCE.min(self.silence) {
-                        return Lu::Silence(reste);
+                self.a_joue.get_or_insert_with(Instant::now);
+                if let Ok(p) = session.Position().map(Duration::from) {
+                    self.debut = super::debut_du_son(Instant::now(), self.depuis.elapsed(), p, self.debut);
+                    // Dans son silence final, assez près de la fin : le son suivant peut partir.
+                    if let Some(d) = self.duree {
+                        let reste = d.saturating_sub(p);
+                        if reste <= AVANCE.min(self.silence) {
+                            return Lu::Silence(reste);
+                        }
                     }
                 }
-            } else if self.a_joue && (etat == MediaPlaybackState::Paused || etat == MediaPlaybackState::None) {
+            } else if self.a_joue.is_some() && (etat == MediaPlaybackState::Paused || etat == MediaPlaybackState::None)
+            {
                 return Lu::Fini;
             }
-            if !self.a_joue && ecoule > DELAI_DEMARRAGE {
+            if self.a_joue.is_none() && ecoule > DELAI_DEMARRAGE {
                 return Lu::Echec("le son ne démarre pas".into());
             }
             // Un lecteur qui ne rend jamais la main : le temps du son est passé, c'est fini.
@@ -1982,9 +2070,10 @@ mod lecture {
             Lu::EnCours
         }
 
-        /// Le son en cours s'entend : le lecteur l'a ouvert et le joue.
-        pub fn entendu(&self) -> bool {
-            self.a_joue
+        /// L'instant où le son en cours a commencé de s'entendre, lu sur l'horloge du lecteur ; `None` : pas encore.
+        /// Un lecteur dont la position n'avance pas : l'instant où il a été vu jouer.
+        pub fn debut(&self) -> Option<Instant> {
+            self.debut.or_else(|| self.a_joue.filter(|t| t.elapsed() > SANS_POSITION))
         }
 
         /// Coupe le son tout de suite (les deux lecteurs : l'ancien peut finir son silence), et oublie celui qui
@@ -2058,6 +2147,8 @@ mod lecture {
 
 #[cfg(not(windows))]
 mod lecture {
+    use std::time::{Duration, Instant};
+
     use super::{Lu, Synthese};
 
     pub struct Lecteur;
@@ -2068,14 +2159,14 @@ mod lecture {
         }
         pub fn prechauffer(&mut self) {}
         pub fn precharger(&mut self, _numero: u64, _wav: &[u8]) {}
-        pub fn jouer(&mut self, _numero: u64, _wav: Vec<u8>) -> Result<(), String> {
+        pub fn jouer(&mut self, _numero: u64, _wav: Vec<u8>) -> Result<Duration, String> {
             Err("la lecture du son n'existe que sous Windows".into())
         }
         pub fn sonder(&mut self) -> Lu {
             Lu::Fini
         }
-        pub fn entendu(&self) -> bool {
-            false
+        pub fn debut(&self) -> Option<Instant> {
+            None
         }
         pub fn arreter(&mut self) {}
     }
@@ -2343,6 +2434,36 @@ mod essais {
         assert_eq!(bouche_a_venir(Duration::from_millis(300)).map(|a| a.forme), Some(Forme::Fermee));
         assert_eq!(forme_a_venir(Duration::from_millis(300)), Some(Forme::Ronde));
         faire_entendre(None);
+    }
+
+    #[test]
+    fn le_debut_du_son_se_lit_sur_l_horloge_du_lecteur() {
+        // `Play()` à t0 : le son part vers t0 + 18 ms.
+        let (t0, ms) = (Instant::now(), Duration::from_millis);
+        // Une position nulle : le son n'est pas encore parti, rien ne se sait.
+        assert_eq!(debut_du_son(t0, Duration::ZERO, Duration::ZERO, None), None);
+        // La position du son d'avant, que le lecteur n'a pas encore oubliée : plus longue que le temps passé depuis
+        // `Play()`, elle ne compte pas.
+        assert_eq!(debut_du_son(t0 + ms(30), ms(30), ms(3_400), None), None);
+        // L'heure moins la position…
+        let d = debut_du_son(t0 + ms(40), ms(40), ms(20), None);
+        assert_eq!(d, Some(t0 + ms(20)));
+        // … la plus petite des estimations : une lecture où le fil a tardé (30 ms entre la position et l'heure) ne
+        // recule pas le début, une plus juste l'avance, une position nulle ne l'efface pas.
+        assert_eq!(debut_du_son(t0 + ms(90), ms(90), ms(40), d), d);
+        assert_eq!(debut_du_son(t0 + ms(58), ms(58), ms(40), d), Some(t0 + ms(18)));
+        assert_eq!(debut_du_son(t0 + ms(100), ms(100), Duration::ZERO, d), d);
+    }
+
+    #[test]
+    fn l_image_lit_la_voix_au_retard_de_l_ecran() {
+        let (t0, ms) = (Instant::now(), Duration::from_millis);
+        // Un son qui partira dans 30 ms, un écran qui montre ses images 50 ms après les avoir calculées : l'image
+        // calculée maintenant montre déjà ses 20 premières millisecondes.
+        assert_eq!(ecoule_a(t0, t0 + ms(30), ms(50)), Some(ms(20)));
+        // Sans retard (le film de l'essai garde chaque image à l'instant de son calcul), rien avant qu'il parte.
+        assert_eq!(ecoule_a(t0, t0 + ms(30), Duration::ZERO), None);
+        assert_eq!(ecoule_a(t0 + ms(30), t0 + ms(30), Duration::ZERO), Some(Duration::ZERO));
     }
 
     #[test]

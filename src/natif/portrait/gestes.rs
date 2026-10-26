@@ -1,11 +1,14 @@
-//! Les gestes du visage d'Eve : sa tête et ses sourcils, qui accompagnent ce qu'elle dit et ce qu'elle fait. Quand elle
-//! parle, ils suivent sa phrase ([`Repere`]) : un petit hochement sur la dernière syllabe d'un groupe de mots (celle
-//! que le français appuie), un hochement et les sourcils sur une exclamation, la tête penchée et les sourcils levés au
-//! bout d'une question — tenus un instant, elle attend la réponse —, la tête qui se pose à la fin d'une phrase, et une
-//! autre posture quand elle reprend. Quand elle écoute, la tête penchée vers la personne, et un petit hochement quand
-//! celle-ci s'arrête un instant ; quand elle réfléchit, la tête un peu relevée, immobile ; au repos, une posture gardée
-//! longtemps, puis une autre, et les sourcils de loin en loin. Son émotion leur donne leur élan : plus vifs dans la
-//! joie, plus retenus dans la tristesse. Rien ne flotte : chaque mouvement va quelque part et s'y pose.
+//! Les gestes du visage d'Eve : sa tête et ses sourcils, qui accompagnent ce qu'elle dit et ce qu'elle fait. Sa tête
+//! se penche, tourne et hoche en trois dimensions ([`super::rendu::Mouvement`]). Quand elle parle, ils suivent sa
+//! phrase ([`Repere`]) : un petit hochement — le menton qui descend et remonte — sur la dernière syllabe d'un groupe de
+//! mots (celle que le français appuie), un hochement et les sourcils sur une exclamation, la tête penchée et les
+//! sourcils levés au bout d'une question — tenus un instant, elle attend la réponse —, la tête qui se pose à la fin
+//! d'une phrase, un « non » de la tête quand elle nie, et une autre posture quand elle reprend. Quand ses yeux vont
+//! loin de côté, sa tête les suit un peu, un instant après eux. Quand elle écoute, la tête penchée et un peu tournée
+//! vers la personne, et un petit hochement quand celle-ci s'arrête un instant ; quand elle réfléchit, la tête un peu
+//! relevée et tournée, immobile ; au repos, une posture gardée longtemps, puis une autre, et les sourcils de loin en
+//! loin. Son émotion leur donne leur élan : plus vifs dans la joie, plus retenus dans la tristesse. Rien ne flotte :
+//! chaque mouvement va quelque part et s'y pose.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,7 +25,15 @@ use super::{Activite, Pose, Strate, Tete, Visage};
 /// (la tête penchée d'une question, posée d'une fin de phrase) en un peu plus d'une demi-seconde.
 const W_TETE: f32 = 5.0;
 const W_INFLEXION: f32 = 7.0;
-/// Un hochement, en secondes : la tête descend, puis remonte, un peu plus lentement ([`creux`]).
+/// La tête qui suit les yeux : deux ressorts l'un derrière l'autre — elle part un instant après eux, sans à-coup, et
+/// les rejoint en un peu plus d'une demi-seconde, plus lente qu'eux.
+const W_YEUX: [f32; 2] = [14.0, 9.0];
+/// Ce que la tête suit des yeux (en degrés, ceux des poses du regard) : rien d'un regard posé sur la personne (à moins
+/// de 8,5 degrés d'elle : ses yeux, sa bouche), puis un quart de ce qui dépasse — près de trois degrés pour un regard
+/// franchement de côté (vingt degrés), à peine un demi-degré pour un coup d'œil (dix degrés).
+const SANS_LA_TETE: f32 = 8.5;
+const PART_DE_LA_TETE: f32 = 0.25;
+/// Un hochement, en secondes : le menton descend, puis remonte, un peu plus lentement ([`creux`]).
 const DESCENTE: f64 = 0.16;
 const REMONTEE: f64 = 0.26;
 /// L'avance des gestes sur la voix : un hochement part avant la syllabe qu'il souligne, et la touche au plus bas.
@@ -31,12 +42,23 @@ const AVANCE: Duration = Duration::from_millis(160);
 /// la dernière —, et le restent une seconde après elle, tant que la voix ne reprend pas.
 const AVANT_LA_QUESTION: f32 = 0.5;
 const APRES_LA_QUESTION: f64 = 1.0;
-/// Les hochements, en part du rayon du disque (la tête descend d'autant au plus bas) : sur une exclamation, sur la
-/// dernière syllabe d'un groupe, sur une syllabe appuyée au milieu d'une phrase, en écoutant.
-const HOCHEMENT_D_EXCLAMATION: f32 = 0.022;
-const HOCHEMENT_DE_GROUPE: f32 = 0.014;
-const HOCHEMENT_D_ACCENT: f32 = 0.008;
-const HOCHEMENT_D_ECOUTE: f32 = 0.011;
+/// Les hochements : le menton qui descend (le tangage de la tête au plus bas, en radians) sur une exclamation (deux
+/// degrés), sur la dernière syllabe d'un groupe, sur une syllabe appuyée au milieu d'une phrase, en écoutant ; et la
+/// tête qui descend un peu avec lui (en part du rayon, par radian) : le cou fléchit à peine.
+const HOCHEMENT_D_EXCLAMATION: f32 = 0.035;
+const HOCHEMENT_DE_GROUPE: f32 = 0.022;
+const HOCHEMENT_D_ACCENT: f32 = 0.013;
+const HOCHEMENT_D_ECOUTE: f32 = 0.018;
+const DESCENTE_DU_COU: f32 = 0.12;
+/// Le « non » de la tête ([`secousse`]) : son ampleur (le lacet, en radians, de part et d'autre) et sa durée (en
+/// secondes) — franc sur « non », « jamais » (2,4 degrés, en neuf dixièmes de seconde), à peine sur un « ne … pas »
+/// (1,4 degré, en une seconde).
+const NON: (f32, f64) = (0.042, 0.9);
+const NEGATION: (f32, f64) = (0.024, 1.0);
+/// Le moins de temps entre le début d'un « non » et celui d'un « ne … pas » qui le suit, en secondes : une personne ne
+/// secoue pas la tête à chaque négation d'une réponse qui en a plusieurs. Un « non » franc vient toujours (jamais
+/// pendant un autre).
+const ENTRE_DEUX_NEGATIONS: f64 = 4.0;
 /// Une pause qui laisse la tête prendre une autre posture à la reprise, en secondes ; et le moins de temps entre deux
 /// postures, en parlant.
 const LONGUE_PAUSE: f32 = 0.3;
@@ -45,10 +67,12 @@ const ENTRE_DEUX_POSTURES: f64 = 1.5;
 /// le micro à le dire) ; on hoche ainsi entre deux et cinq dixièmes de seconde après que l'autre s'est arrêté.
 const PAUSE_DE_LA_PERSONNE: f64 = 0.25;
 
-/// Trois ressorts, un par mouvement de la tête.
+/// Cinq ressorts, un par mouvement de la tête.
 #[derive(Default)]
 struct Ressorts {
     roulis: Ressort,
+    lacet: Ressort,
+    tangage: Ressort,
     x: Ressort,
     y: Ressort,
 }
@@ -57,14 +81,12 @@ impl Ressorts {
     fn vers(&mut self, cible: Tete, w: f32, dt: f32) -> Tete {
         Tete {
             roulis: self.roulis.vers(cible.roulis, w, dt),
+            lacet: self.lacet.vers(cible.lacet, w, dt),
+            tangage: self.tangage.vers(cible.tangage, w, dt),
             x: self.x.vers(cible.x, w, dt),
             y: self.y.vers(cible.y, w, dt),
         }
     }
-}
-
-fn somme(a: Tete, b: Tete) -> Tete {
-    Tete { roulis: a.roulis + b.roulis, x: a.x + b.x, y: a.y + b.y }
 }
 
 /// L'élan que l'émotion qui domine donne aux gestes : leur ampleur (les postures, les hochements, les sourcils) et
@@ -94,14 +116,30 @@ fn creux(t: f64) -> f32 {
     }
 }
 
+/// Où en est un « non » de la tête parti depuis `t` secondes, qui dure `duree` : de −1 à 1. Un aller franc d'un côté,
+/// le retour franc de l'autre, un petit retour : trois demi-oscillations, que leur enveloppe fait naître et mourir sans
+/// à-coup — elle part doucement, culmine au premier tiers, s'éteint à la fin.
+fn secousse(t: f64, duree: f64) -> f32 {
+    if t <= 0.0 || t >= duree {
+        return 0.0;
+    }
+    let s = t / duree;
+    let enveloppe = 6.75 * s * (1.0 - s) * (1.0 - s);
+    ((3.0 * std::f64::consts::PI * s).sin() * enveloppe / SECOUSSE_MAX) as f32
+}
+
+/// Le plus grand écart de l'oscillation de [`secousse`] avant d'être ramenée à 1.
+const SECOUSSE_MAX: f64 = 0.8606;
+
 /// Les gestes, d'une image à l'autre. Les sourcils : leur hauteur (de 0 à 1), jusqu'à quand et à quelle hauteur ils
 /// restent levés, quand ils se sont levés la dernière fois, quand ils se lèveront au repos. La tête : sa posture et
-/// quand elle en changera, la dernière fois qu'elle en a changé ; l'inflexion de la phrase et jusqu'à quand ; les
-/// hochements en cours (depuis quand, de combien), le dernier, le second d'un « oui, oui » s'il en vient un, et quand.
-/// En écoutant, la voix de la personne : la plus forte entendue, depuis quand elle parle, jusqu'à quand. Ce que fait
-/// Eve, à l'image d'avant, et depuis quand ; l'élan de ses gestes ([`elan`]) ; la phrase qu'elle dit — ses repères,
-/// jusqu'où ils sont lus —, en pause, une posture à prendre à la reprise ; l'ouverture de la bouche à l'image d'avant
-/// (une syllabe qui monte).
+/// quand elle en changera, la dernière fois qu'elle en a changé ; l'inflexion de la phrase et jusqu'à quand ; ce
+/// qu'elle suit des yeux (ses deux ressorts) ; les « non » en cours (depuis quand, de combien et de quel côté, pour
+/// combien de temps), le début du dernier ; les hochements en cours (depuis quand, de combien), le dernier, le second
+/// d'un « oui, oui » s'il en vient un, et quand. En écoutant, la voix de la personne : la plus forte entendue, depuis
+/// quand elle parle, jusqu'à quand. Ce que fait Eve, à l'image d'avant, et depuis quand ; l'élan de ses gestes
+/// ([`elan`]) ; la phrase qu'elle dit — ses repères, jusqu'où ils sont lus —, en pause, une posture à prendre à la
+/// reprise ; l'ouverture de la bouche à l'image d'avant (une syllabe qui monte).
 #[derive(Default)]
 pub(super) struct Gestes {
     sourcils: Ressort,
@@ -116,6 +154,9 @@ pub(super) struct Gestes {
     inflechie: Ressorts,
     inflexion: Tete,
     inflexion_jusqua: f64,
+    suit_les_yeux: [Ressorts; 2],
+    secousses: Vec<(f64, f32, f64)>,
+    dernier_non: Option<f64>,
     hochements: Vec<(f64, f32)>,
     dernier_hochement: f64,
     prochain_hochement: f64,
@@ -156,9 +197,10 @@ impl Gestes {
         }
     }
 
-    /// Les gestes à cette image : la tête — sa posture, et le `penchant` de l'émotion ; l'inflexion de la phrase ; le
-    /// hochement — et la hauteur des sourcils. Eve à son activité, la bouche à son `ouverture`, l'`elan` que l'émotion
-    /// donne à ses gestes ([`elan`]) ; `phrase` : la phrase qu'elle dit, où elle en est et ses repères.
+    /// Les gestes à cette image : la tête — sa posture, et le `penchant` de l'émotion ; l'inflexion de la phrase ; ce
+    /// qu'elle suit des yeux ; le « non » ; le hochement — et la hauteur des sourcils. Eve à son activité, la bouche à
+    /// son `ouverture`, l'`elan` que l'émotion donne à ses gestes ([`elan`]) ; `phrase` : la phrase qu'elle dit, où
+    /// elle en est et ses repères.
     fn bouger(
         &mut self,
         m: &Moment,
@@ -183,33 +225,51 @@ impl Gestes {
         let voulus = if m.temps < self.leves_jusqua { self.hauteur } else { 0.0 };
         let leves = self.sourcils.vers(voulus, if voulus > self.sourcils.x { 16.0 } else { 9.0 }, m.dt);
         let inflexion = if m.temps < self.inflexion_jusqua { self.inflexion } else { Tete::default() };
-        let tete = somme(
-            self.tete.vers(somme(self.posture, penchant), W_TETE * self.vitesse, m.dt),
-            self.inflechie.vers(inflexion, W_INFLEXION * self.vitesse, m.dt),
-        );
+        let tete = self.tete.vers(self.posture + penchant, W_TETE * self.vitesse, m.dt)
+            + self.inflechie.vers(inflexion, W_INFLEXION * self.vitesse, m.dt)
+            + self.suivre_les_yeux(m);
         self.hochements.retain(|&(depuis, _)| m.temps - depuis < DESCENTE + REMONTEE);
-        (Tete { y: tete.y + self.hochement(m.temps), ..tete }, leves)
+        self.secousses.retain(|&(depuis, _, duree)| m.temps - depuis < duree);
+        let (bas, non) = (self.hochement(m.temps), self.non(m.temps));
+        let tete =
+            Tete { tangage: tete.tangage + bas, y: tete.y + DESCENTE_DU_COU * bas, lacet: tete.lacet + non, ..tete };
+        (tete, leves)
+    }
+
+    /// La tête qui suit les yeux quand ils vont loin de la personne ([`SANS_LA_TETE`], [`PART_DE_LA_TETE`]) : tournée
+    /// vers où ils regardent de côté, le menton levé quand ils regardent en haut, baissé en bas ; un instant après eux,
+    /// plus lente qu'eux ([`W_YEUX`]) — comme les yeux et la tête le font ensemble, les yeux d'abord.
+    fn suivre_les_yeux(&mut self, m: &Moment) -> Tete {
+        let [x, y] = m.yeux;
+        let loin = x.hypot(y);
+        let part = if loin > SANS_LA_TETE { (loin - SANS_LA_TETE) * PART_DE_LA_TETE / loin } else { 0.0 };
+        let voulue = Tete { lacet: (part * x).to_radians(), tangage: -(part * y).to_radians(), ..Tete::default() };
+        let [premier, second] = &mut self.suit_les_yeux;
+        let avant = premier.vers(voulue, W_YEUX[0], m.dt);
+        second.vers(avant, W_YEUX[1], m.dt)
     }
 
     /// Eve change d'activité : quand elle écoute, elle se tourne vers la personne — la tête penchée du côté où elle
-    /// l'était, de 2,6 à 3,4 degrés, un peu de ce côté et un peu plus bas, comme on se penche pour mieux entendre — et
-    /// lève les sourcils un instant (« je t'écoute ») ; quand elle réfléchit, elle se redresse et relève un peu la
-    /// tête, sans plus bouger ; quand elle se met à parler, une posture sur sa première syllabe ; au repos, une posture
-    /// bientôt.
+    /// l'était, de 2,6 à 3,4 degrés, un peu tournée de ce côté (une oreille vers elle : le cou tourne et se penche
+    /// ensemble), le menton un peu bas, comme on se penche pour mieux entendre — et lève les sourcils un instant (« je
+    /// t'écoute ») ; quand elle réfléchit, elle se redresse, relève un peu le menton et tourne la tête vers où son air
+    /// pensif regarde (en haut, à droite de l'écran), sans plus bouger ; quand elle se met à parler, une posture sur sa
+    /// première syllabe ; au repos, une posture bientôt.
     fn changer_d_activite(&mut self, m: &Moment, h: &mut Hasard) {
         (self.activite, self.depuis) = (m.activite, m.temps);
         match m.activite {
             Activite::Ecoute => {
                 let cote = if self.posture.roulis == 0.0 { h.signe().signum() } else { self.posture.roulis.signum() };
                 let roulis = cote * (0.045 + 0.015 * h.tirer() as f32);
-                self.posture = Tete { roulis, x: 0.25 * roulis, y: 0.008 };
+                self.posture = Tete { roulis, lacet: 0.45 * roulis, tangage: 0.012, x: 0.25 * roulis, y: 0.004 };
                 self.prochaine_posture = f64::INFINITY;
                 self.lever(0.35, 0.6, m.temps);
                 (self.voix_max, self.voix_depuis, self.voix_jusqua) = (0.0, m.temps, f64::NEG_INFINITY);
                 self.second_hochement = false;
             }
             Activite::Reflechit => {
-                self.posture = Tete { roulis: 0.2 * self.posture.roulis, x: 0.0, y: -0.012 };
+                let roulis = 0.2 * self.posture.roulis;
+                self.posture = Tete { roulis, lacet: 0.025, tangage: -0.016, x: 0.0, y: -0.006 };
                 self.prochaine_posture = f64::INFINITY;
             }
             Activite::Parle => self.prochaine_posture = m.temps,
@@ -240,13 +300,19 @@ impl Gestes {
 
     /// Une autre posture, d'ampleur `ample` : la tête penchée du côté où elle l'est le plus souvent, de l'autre de
     /// temps en temps — jamais pendant qu'une question se défait (les deux mouvements s'ajouteraient : un balancement
-    /// de plus de cinq degrés) —, assez pour que cela se voie (de 40 % à 100 % de 1,6 degré), un peu déplacée.
+    /// de plus de cinq degrés) —, assez pour que cela se voie (de 40 % à 100 % de 1,6 degré) ; un peu tournée, le plus
+    /// souvent du côté où elle se penche (jusqu'à 1,7 degré), le menton un peu plus haut ou plus bas (0,6 degré au
+    /// plus) ; un peu déplacée.
     fn prendre_une_posture(&mut self, ample: f32, temps: f64, h: &mut Hasard) {
         let penchee = self.tete.roulis.x + self.inflechie.roulis.x;
         let avant = if penchee >= 0.0 { 1.0 } else { -1.0 };
         let changer = self.inflechie.roulis.x.abs() < 0.01 && h.tirer() < 0.4;
-        let roulis = if changer { -avant } else { avant } * ample * 0.028 * (0.4 + 0.6 * h.tirer() as f32);
-        self.posture = Tete { roulis, x: 0.3 * roulis + ample * 0.006 * h.signe(), y: ample * 0.005 * h.signe() };
+        let cote = if changer { -avant } else { avant };
+        let roulis = cote * ample * 0.028 * (0.4 + 0.6 * h.tirer() as f32);
+        let lacet = ample * 0.02 * (0.5 * cote + h.signe());
+        let tangage = ample * 0.01 * h.signe();
+        let (x, y) = (0.3 * roulis + ample * 0.006 * h.signe(), ample * 0.004 * h.signe());
+        self.posture = Tete { roulis, lacet, tangage, x, y };
         self.derniere_posture = temps;
     }
 
@@ -290,8 +356,10 @@ impl Gestes {
     fn repere(&mut self, m: &Moment, r: &Repere, suite: &[Repere], h: &mut Hasard) {
         match r.marque {
             Marque::Groupe => {
-                // La dernière syllabe d'un groupe : un petit hochement ; parfois, la voix montant, les sourcils.
-                if m.temps - self.dernier_hochement > 0.35 {
+                // La dernière syllabe d'un groupe : un petit hochement — pas sur un « non » (« Non, … ») : ce serait
+                // dire oui en disant non ; parfois, la voix montant, les sourcils.
+                let nie = suite.iter().any(|s| matches!(s.marque, Marque::Non | Marque::Negation) && s.a - r.a < 0.35);
+                if !nie && m.temps - self.dernier_hochement > 0.35 {
                     self.hocher(HOCHEMENT_DE_GROUPE, m.temps);
                 }
                 if m.temps - self.derniers_sourcils > 2.0 && h.tirer() < 0.35 {
@@ -303,17 +371,21 @@ impl Gestes {
                 self.lever(0.6, 0.45, m.temps);
             }
             Marque::Question => {
-                // Ses dernières syllabes : la tête penchée du côté où elle l'est déjà, un peu relevée, et les sourcils
-                // levés, jusqu'à une seconde après elles.
+                // Ses dernières syllabes : la tête penchée du côté où elle l'est déjà, tournée un peu de ce côté (une
+                // oreille vers la réponse), le menton un peu relevé, et les sourcils levés, jusqu'à une seconde après
+                // elles.
                 let cote = if self.posture.roulis >= 0.0 { 1.0 } else { -1.0 };
                 let duree = f64::from(AVANT_LA_QUESTION) + APRES_LA_QUESTION;
-                self.inflechir(Tete { roulis: cote * 0.03, x: cote * 0.006, y: -0.006 }, m.temps + duree);
+                let penchee =
+                    Tete { roulis: cote * 0.03, lacet: cote * 0.012, tangage: -0.012, x: cote * 0.006, y: -0.003 };
+                self.inflechir(penchee, m.temps + duree);
                 self.lever(0.7, duree, m.temps);
             }
             Marque::Fin => {
-                // La voix descend : la tête se pose un peu plus bas, jusqu'à ce qu'elle reprenne.
-                self.inflechir(Tete { y: 0.008, ..Tete::default() }, m.temps + 1.2);
+                // La voix descend : le menton se pose un peu plus bas, jusqu'à ce qu'elle reprenne.
+                self.inflechir(Tete { tangage: 0.014, y: 0.002, ..Tete::default() }, m.temps + 1.2);
             }
+            Marque::Non | Marque::Negation => self.secouer(r.marque == Marque::Non, m.temps, h),
             Marque::Pause => {
                 // Une longue pause (entre deux phrases, après un deux-points) : une autre posture à la reprise.
                 self.en_pause = true;
@@ -408,16 +480,43 @@ impl Gestes {
         (self.inflexion, self.inflexion_jusqua) = (inflexion, jusqua);
     }
 
-    /// Un hochement : la tête descend de `ampleur` (une part du rayon, à l'ampleur que l'émotion donne aux gestes),
-    /// puis remonte ([`creux`]).
+    /// Un hochement : le menton descend de `ampleur` (le tangage au plus bas, en radians, à l'ampleur que l'émotion
+    /// donne aux gestes), puis remonte ([`creux`]) — pas pendant un « non ».
     fn hocher(&mut self, ampleur: f32, temps: f64) {
+        if self.non_en_cours(temps) {
+            return;
+        }
         self.hochements.push((temps, ampleur * self.ampleur));
         self.dernier_hochement = temps;
     }
 
-    /// Ce dont les hochements en cours font descendre la tête à l'instant `temps` (une part du rayon).
+    /// Ce dont les hochements en cours font descendre le menton à l'instant `temps` (le tangage, en radians).
     fn hochement(&self, temps: f64) -> f32 {
         self.hochements.iter().map(|&(depuis, ampleur)| ampleur * creux(temps - depuis)).sum()
+    }
+
+    /// Un « non » de la tête — `franc` ([`NON`]), sinon à peine ([`NEGATION`] : pas si un autre a commencé il y a moins
+    /// de [`ENTRE_DEUX_NEGATIONS`]) —, à l'élan que l'émotion donne aux gestes (plus petit et plus lent dans la peine),
+    /// parti d'un côté ou de l'autre ; un seul à la fois.
+    fn secouer(&mut self, franc: bool, temps: f64, h: &mut Hasard) {
+        let trop_tot = self.dernier_non.is_some_and(|d| temps - d < ENTRE_DEUX_NEGATIONS);
+        if self.non_en_cours(temps) || (!franc && trop_tot) {
+            return;
+        }
+        let (ampleur, duree) = if franc { NON } else { NEGATION };
+        let cote = if h.tirer() < 0.5 { 1.0 } else { -1.0 };
+        self.secousses.push((temps, cote * ampleur * self.ampleur, duree / f64::from(self.vitesse.max(0.1))));
+        self.dernier_non = Some(temps);
+    }
+
+    /// Un « non » de la tête est en cours à l'instant `temps`.
+    fn non_en_cours(&self, temps: f64) -> bool {
+        self.secousses.iter().any(|&(depuis, _, duree)| temps < depuis + duree)
+    }
+
+    /// Ce dont les « non » en cours tournent la tête à l'instant `temps` (le lacet, en radians).
+    fn non(&self, temps: f64) -> f32 {
+        self.secousses.iter().map(|&(depuis, ampleur, duree)| ampleur * secousse(temps - depuis, duree)).sum()
     }
 }
 
@@ -434,11 +533,24 @@ mod essais {
         activite: Activite,
         phrase: Option<(f64, &Arc<[Repere]>)>,
     ) -> Vec<(f64, Tete, f32)> {
+        filmer_en_regardant(g, h, (debut, duree), activite, phrase, &|_| [0.0, 0.0])
+    }
+
+    /// Comme [`filmer`], les yeux tournés à chaque instant vers où `yeux` le dit.
+    fn filmer_en_regardant(
+        g: &mut Gestes,
+        h: &mut Hasard,
+        (debut, duree): (f64, f64),
+        activite: Activite,
+        phrase: Option<(f64, &Arc<[Repere]>)>,
+        yeux: &dyn Fn(f64) -> [f32; 2],
+    ) -> Vec<(f64, Tete, f32)> {
         let dt = 1.0 / 60.0;
         (0..(duree / dt).round() as usize)
             .map(|k| {
                 let temps = debut + k as f64 * dt;
-                let m = Moment { temps, dt: dt as f32, activite, vivant: true, ..Default::default() };
+                let m =
+                    Moment { temps, dt: dt as f32, activite, vivant: true, yeux: yeux(temps), ..Default::default() };
                 let p = phrase.map(|(depuis, r)| ((temps - depuis) as f32 + AVANCE.as_secs_f32(), r.clone()));
                 // La bouche s'ouvre et se ferme cinq fois par seconde en parlant : des syllabes qui montent.
                 let ouverture = if activite == Activite::Parle && (temps * 5.0).fract() < 0.5 { 0.9 } else { 0.1 };
@@ -452,7 +564,8 @@ mod essais {
     fn sans_saut(images: &[(f64, Tete, f32)]) {
         for w in images.windows(2) {
             let ((_, a, sa), (t, b, sb)) = (w[0], w[1]);
-            let saut = (a.roulis - b.roulis).abs().max((a.x - b.x).abs()).max((a.y - b.y).abs());
+            let angles = (a.roulis - b.roulis).abs().max((a.lacet - b.lacet).abs()).max((a.tangage - b.tangage).abs());
+            let saut = angles.max((a.x - b.x).abs()).max((a.y - b.y).abs());
             assert!(saut < 0.01 && (sa - sb).abs() < 0.08, "à {t:.2} s : {saut} {sa} {sb}");
         }
     }
@@ -463,7 +576,11 @@ mod essais {
 
     /// Une image, pour les messages : son instant, la tête, les sourcils.
     fn ecrire((t, tete, sourcils): (f64, Tete, f32)) -> String {
-        format!("à {t:.2} s : roulis {:.4}, x {:.4}, y {:.4} ; sourcils {sourcils:.3}", tete.roulis, tete.x, tete.y)
+        let Tete { roulis, lacet, tangage, x, y } = tete;
+        format!(
+            "à {t:.2} s : roulis {roulis:.4}, lacet {lacet:.4}, tangage {tangage:.4}, x {x:.4}, y {y:.4} ; sourcils \
+             {sourcils:.3}"
+        )
     }
 
     #[test]
@@ -561,8 +678,8 @@ mod essais {
         let dt = 1.0 / 60.0;
         for k in 0..480 {
             let (temps, avant) = (5.0 + k as f64 * dt, g.dernier_hochement);
-            let m =
-                Moment { temps, dt: dt as f32, activite: Activite::Ecoute, vivant: true, entendu: voix(temps - 5.0) };
+            let (activite, entendu) = (Activite::Ecoute, voix(temps - 5.0));
+            let m = Moment { temps, dt: dt as f32, activite, vivant: true, entendu, ..Default::default() };
             let (tete, sourcils) = g.bouger(&m, 0.0, Tete::default(), (1.0, 1.0), None, &mut h);
             if g.dernier_hochement != avant {
                 hochements.push(temps - 5.0);
@@ -570,9 +687,11 @@ mod essais {
             images.push((temps, tete, sourcils));
         }
         sans_saut(&images);
-        // La tête penchée (plus de 2,5 degrés) et un peu plus bas, tenue ; les sourcils levés un instant, au début.
+        // La tête penchée (plus de 2,5 degrés), un peu tournée du même côté (une oreille vers la personne), le menton
+        // un peu bas, tenue ; les sourcils levés un instant, au début.
         let fin = images.last().unwrap().1;
-        assert!(fin.roulis.abs() > 0.044 && fin.y > 0.0, "{}", ecrire(*images.last().unwrap()));
+        let tournee = fin.lacet * fin.roulis.signum() > 0.018;
+        assert!(fin.roulis.abs() > 0.044 && tournee && fin.tangage > 0.01, "{}", ecrire(*images.last().unwrap()));
         assert!(images.iter().take(30).any(|i| i.2 > 0.15) && images.last().unwrap().2 < 0.01);
         // Ses hochements : chacun de deux à sept dixièmes de seconde après qu'elle s'est arrêtée (ou le second d'un
         // « oui, oui ») ; aucun pendant qu'elle parle, ni dans le silence qui suit.
@@ -594,17 +713,131 @@ mod essais {
     }
 
     #[test]
-    fn elle_reflechit_la_tete_relevee_sans_bouger() {
+    fn elle_reflechit_la_tete_relevee_et_tournee_sans_bouger() {
         let (mut g, mut h) = (Gestes::default(), Hasard::default());
         filmer(&mut g, &mut h, (0.0, 4.0), Activite::Ecoute, None);
         let images = filmer(&mut g, &mut h, (4.0, 8.0), Activite::Reflechit, None);
         sans_saut(&images);
-        // Relevée et redressée en une seconde et demie, puis immobile.
+        // Le menton relevé, la tête tournée vers où regarde son air pensif et redressée, en une seconde et demie, puis
+        // immobile.
         let posee = &images[90..];
-        assert!(posee.iter().all(|i| i.1.y < -0.009 && i.1.roulis.abs() < 0.02), "{}", ecrire(posee[0]));
-        let bouge = posee.windows(2).map(|w| (w[1].1.y - w[0].1.y).abs() + (w[1].1.roulis - w[0].1.roulis).abs());
-        assert!(posee[60..].windows(2).all(|w| (w[1].1.y - w[0].1.y).abs() < 1e-4), "elle bouge encore");
-        assert!(bouge.fold(0.0f32, f32::max) < 0.002);
+        let relevee = |t: &Tete| t.tangage < -0.012 && t.lacet > 0.02 && t.y < -0.004 && t.roulis.abs() < 0.02;
+        assert!(posee.iter().all(|i| relevee(&i.1)), "{}", ecrire(posee[0]));
+        let ecart = |a: &Tete, b: &Tete| {
+            (a.y - b.y).abs() + (a.roulis - b.roulis).abs() + (a.lacet - b.lacet).abs() + (a.tangage - b.tangage).abs()
+        };
+        assert!(posee[60..].windows(2).all(|w| ecart(&w[0].1, &w[1].1) < 1e-4), "elle bouge encore");
+        assert!(posee.windows(2).map(|w| ecart(&w[0].1, &w[1].1)).fold(0.0f32, f32::max) < 0.002);
+    }
+
+    #[test]
+    fn un_non_va_d_un_cote_a_l_autre_sans_a_coup() {
+        // Parti doucement, un aller franc, un retour franc de l'autre côté, un petit retour ; à sa place au début et à
+        // la fin.
+        let duree = NON.1;
+        let pas: Vec<f32> = (0..=540).map(|k| secousse(k as f64 / 600.0, duree)).collect();
+        assert!(secousse(0.0, duree) == 0.0 && secousse(duree, duree) == 0.0 && secousse(1.0 / 60.0, duree) < 0.05);
+        let (haut, bas) = (pas.iter().copied().fold(f32::MIN, f32::max), pas.iter().copied().fold(f32::MAX, f32::min));
+        assert!(bas < -0.99 && bas >= -1.0 && (0.9..1.0).contains(&haut), "{haut} {bas}");
+        let changements = pas.windows(2).filter(|w| w[0] * w[1] < 0.0).count();
+        assert_eq!(changements, 2, "trois demi-oscillations");
+        // D'un soixantième de seconde au suivant, jamais plus d'un quart de son ampleur.
+        assert!(
+            (0..54).all(|k| (secousse((k + 1) as f64 / 60.0, duree) - secousse(k as f64 / 60.0, duree)).abs() < 0.25)
+        );
+    }
+
+    #[test]
+    fn elle_dit_non_de_la_tete() {
+        // « Non, pas cette semaine. » : un « non » sur la dernière syllabe du premier groupe (« Non, ») — la tête va
+        // d'un côté à l'autre, sans hocher (ce serait dire oui) —, puis se pose. Un « ne … pas » : à peine.
+        let ampleur = |marque: Marque| {
+            let (mut g, mut h) = (Gestes::default(), Hasard::default());
+            filmer(&mut g, &mut h, (0.0, 6.0), Activite::Repos, None);
+            let reperes: Arc<[Repere]> = [repere(0.4, Marque::Groupe), repere(0.4, marque)].into();
+            let (mut images, mut non) = (Vec::new(), Vec::new());
+            let dt = 1.0 / 60.0;
+            for k in 0..180 {
+                let temps = 6.0 + k as f64 * dt;
+                let parle = temps < 7.1;
+                let activite = if parle { Activite::Parle } else { Activite::Repos };
+                let m = Moment { temps, dt: dt as f32, activite, vivant: true, ..Default::default() };
+                let p = parle.then(|| ((temps - 6.0) as f32 + AVANCE.as_secs_f32(), reperes.clone()));
+                let ouverture = if parle && (temps * 5.0).fract() < 0.5 { 0.9 } else { 0.1 };
+                let (tete, sourcils) = g.bouger(&m, ouverture, Tete::default(), (1.0, 1.0), p, &mut h);
+                images.push((temps, tete, sourcils));
+                non.push((temps, g.non(temps)));
+            }
+            sans_saut(&images);
+            assert!(g.dernier_hochement < 6.0, "pas de oui pendant un non : {}", g.dernier_hochement);
+            // Il part un peu avant sa syllabe, va des deux côtés, et s'est posé une seconde après.
+            let debut = non.iter().find(|n| n.1 != 0.0).unwrap().0;
+            assert!((6.2..6.3).contains(&debut), "{debut}");
+            let (haut, bas) = non.iter().fold((0.0f32, 0.0f32), |(a, b), n| (a.max(n.1), b.min(n.1)));
+            assert!(haut > 0.0 && bas < 0.0, "des deux côtés : {haut} {bas}");
+            assert!(non.iter().filter(|n| n.0 > 7.3).all(|n| n.1 == 0.0));
+            haut.max(-bas)
+        };
+        let (non, negation) = (ampleur(Marque::Non), ampleur(Marque::Negation));
+        assert!((non - NON.0).abs() < 0.15 * NON.0, "{non}");
+        assert!((negation - NEGATION.0).abs() < 0.15 * NEGATION.0 && negation < 0.65 * non, "{negation} {non}");
+    }
+
+    #[test]
+    fn pas_un_non_a_chaque_negation() {
+        // « Non, je n'ai rien trouvé. Il n'y a pas de facture en retard, et rien n'est prévu demain. Non, pas cette
+        // semaine… » : le « non » franc ; les « ne … pas » qui le suivent de près, non — on ne secoue pas la tête à
+        // chaque négation — ; un autre « non » franc, toujours ; plus loin, un « ne … pas » de nouveau.
+        let (mut g, mut h) = (Gestes::default(), Hasard::default());
+        let reperes: Arc<[Repere]> = [(0.3, Marque::Non), (1.6, Marque::Negation), (3.0, Marque::Negation)]
+            .into_iter()
+            .chain([(3.6, Marque::Non), (5.0, Marque::Negation), (8.2, Marque::Negation)])
+            .map(|(a, marque)| repere(a, marque))
+            .collect();
+        let mut debuts: Vec<f64> = Vec::new();
+        let dt = 1.0 / 60.0;
+        for k in 0..600 {
+            let temps = 2.0 + k as f64 * dt;
+            let m = Moment { temps, dt: dt as f32, activite: Activite::Parle, vivant: true, ..Default::default() };
+            let p = Some(((temps - 2.0) as f32 + AVANCE.as_secs_f32(), reperes.clone()));
+            g.bouger(&m, 0.1, Tete::default(), (1.0, 1.0), p, &mut h);
+            if let Some(&(depuis, _, _)) = g.secousses.last()
+                && debuts.last() != Some(&depuis)
+            {
+                debuts.push(depuis);
+            }
+        }
+        let attendus: Vec<f64> = [0.3, 3.6, 8.2].iter().map(|a| 2.0 + a - AVANCE.as_secs_f64()).collect();
+        assert_eq!(debuts.len(), 3, "{debuts:?}");
+        assert!(debuts.iter().zip(&attendus).all(|(d, a)| (d - a).abs() < 0.02), "{debuts:?} {attendus:?}");
+    }
+
+    #[test]
+    fn la_tete_suit_les_yeux_un_instant_apres() {
+        // Les yeux vont franchement à gauche de l'écran (vingt degrés) à 2 s, y restent une seconde et demie, puis
+        // reviennent à la personne ; puis ils regardent sa bouche (huit degrés plus bas) : la tête n'en bouge pas.
+        let yeux = |t: f64| match t {
+            t if (2.0..3.5).contains(&t) => [-20.0, 0.0],
+            t if t >= 5.5 => [0.0, -8.0],
+            _ => [0.0, 0.0],
+        };
+        let filmer_avec = |regard: &dyn Fn(f64) -> [f32; 2]| {
+            let (mut g, mut h) = (Gestes::default(), Hasard::default());
+            filmer_en_regardant(&mut g, &mut h, (0.0, 8.0), Activite::Repos, None, regard)
+        };
+        let (images, sans) = (filmer_avec(&yeux), filmer_avec(&|_| [0.0, 0.0]));
+        sans_saut(&images);
+        // Ce que les yeux ajoutent à la tête (le reste, la posture du repos, est le même avec ou sans eux).
+        let suivi = |t: f64| {
+            let k = images.iter().position(|i| i.0 >= t).unwrap();
+            (images[k].1.lacet - sans[k].1.lacet, images[k].1.tangage - sans[k].1.tangage)
+        };
+        let voulu = -((20.0 - SANS_LA_TETE) * PART_DE_LA_TETE).to_radians();
+        assert!(suivi(2.05).0.abs() < 0.05 * voulu.abs(), "un instant après les yeux : {:?}", suivi(2.05));
+        assert!(suivi(2.7).0 < 0.75 * voulu && suivi(3.45).0 < 0.95 * voulu, "{:?} {:?}", suivi(2.7), suivi(3.45));
+        assert!(suivi(3.45).0 > 1.001 * voulu && suivi(3.45).1.abs() < 1e-6, "sans dépasser : {:?}", suivi(3.45));
+        assert!(suivi(5.4).0.abs() < 0.05 * voulu.abs(), "revenue : {:?}", suivi(5.4));
+        assert!(suivi(7.9).0.abs() < 1e-4 && suivi(7.9).1.abs() < 1e-4, "sa bouche : {:?}", suivi(7.9));
     }
 
     #[test]

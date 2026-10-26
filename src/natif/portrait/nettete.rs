@@ -341,6 +341,7 @@ mod essais {
             calques: [vec![calque.clone()], vec![], vec![], vec![], vec![], vec![], vec![]],
             expressions: Vec::new(),
             calme: None,
+            cheveux: None,
             fond: None,
             cadre: Rect::from_min_max(pos2(0.0, 0.0), pos2(0.75, 1.0)),
             demande: Arc::default(),

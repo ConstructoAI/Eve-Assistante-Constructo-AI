@@ -1,11 +1,12 @@
 //! La mimique du portrait d'Eve : ce que fait son visage d'une image à l'autre, partie par partie — ses émotions
 //! ([`super::emotions`]), sa bouche ([`super::bouche`]), les gestes de sa tête et de ses sourcils ([`super::gestes`]), son
-//! buste et son souffle ([`super::corps`]), son regard ([`super::regard`]) —, chacune sur ses ressorts ([`Ressort`]),
-//! assemblées en une pose ([`super::Pose`]).
+//! buste et son souffle ([`super::corps`]), ses cheveux ([`super::cheveux`]), son regard ([`super::regard`]) —, chacune
+//! sur ses ressorts ([`Ressort`]), assemblées en une pose ([`super::Pose`]).
 
 use eve::parole::Emotion;
 
 use super::bouche::Bouche;
+use super::cheveux::Cheveux;
 use super::corps::Buste;
 use super::emotions::Emotions;
 use super::gestes::Gestes;
@@ -14,7 +15,8 @@ use super::{Activite, Pose, Visage};
 
 /// Ce que sait le visage à cette image : l'heure (celle de la fenêtre, en secondes) et le temps depuis la précédente ;
 /// ce que fait Eve ; si les animations de Windows sont permises ; la voix de la personne que le micro entend (de 0 à 1 ;
-/// 0 quand Eve n'écoute pas).
+/// 0 quand Eve n'écoute pas) ; où regardent ses yeux, à l'image d'avant (sa tête les suit :
+/// [`super::regard::Regard::direction`]).
 #[derive(Clone, Copy, Default)]
 pub(super) struct Moment {
     pub(super) temps: f64,
@@ -22,6 +24,7 @@ pub(super) struct Moment {
     pub(super) activite: Activite,
     pub(super) vivant: bool,
     pub(super) entendu: f32,
+    pub(super) yeux: [f32; 2],
 }
 
 impl Moment {
@@ -93,6 +96,7 @@ pub(super) struct Mimique {
     bouche: Bouche,
     gestes: Gestes,
     buste: Buste,
+    cheveux: Cheveux,
     regard: Regard,
     hasard: Hasard,
     vu_a: f64,
@@ -108,9 +112,9 @@ impl Mimique {
 
     /// La pose du visage `v` à l'heure `temps` (celle de la fenêtre), Eve à son `activite`, l'émotion de sa réponse
     /// `emotion` : les émotions d'abord (celle qui domine donne ses bouches et sa tête ; elles couvrent le visage
-    /// calme), puis la bouche, les gestes (la tête suit la bouche), le buste, le regard. `vivant` : les animations de
-    /// Windows sont permises — sans elles, ni souffle, ni regard de côté, ni tête qui bouge, et la pose dit quand la
-    /// redessiner (au prochain clignement, une fois tout posé).
+    /// calme), puis la bouche, les gestes (la tête suit la bouche), le buste, les cheveux (ils suivent la tête), le
+    /// regard. `vivant` : les animations de Windows sont permises — sans elles, ni souffle, ni regard de côté, ni tête
+    /// qui bouge, et la pose dit quand la redessiner (au prochain clignement, une fois tout posé).
     pub(super) fn pose(
         &mut self,
         v: &Visage,
@@ -121,13 +125,14 @@ impl Mimique {
     ) -> Pose {
         let dt = (temps - self.vu_a).clamp(0.0, 0.1) as f32;
         self.vu_a = temps;
-        let m = Moment { temps, dt, activite, vivant, entendu: self.entendu };
+        let m = Moment { temps, dt, activite, vivant, entendu: self.entendu, yeux: self.regard.direction() };
         let mut pose = Pose::default();
         let h = &mut self.hasard;
         self.emotions.avancer(&m, v, emotion, &mut pose);
         self.bouche.avancer(&m, v, &self.emotions, &mut pose);
         self.gestes.avancer(&m, v, self.bouche.ouverture(), &self.emotions, h, &mut pose);
         self.buste.avancer(&m, &self.emotions, &mut pose);
+        self.cheveux.avancer(&m, v, &mut pose);
         self.regard.avancer(&m, v, &self.emotions, h, &mut pose);
         if !vivant && !m.parle() && self.emotions.posees() && self.bouche.posee() {
             pose.apres = self.regard.prochain_clin(temps);

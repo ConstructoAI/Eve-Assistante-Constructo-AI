@@ -188,6 +188,29 @@ pub fn lancer(abonnement: Abonnement, rapport: Sender<Evt>, titre: &str, dossier
     }
 }
 
+/// Le temps qu'une image de la fenêtre met à se voir : trois trames de l'écran. Mesuré le 2026-10-25 dans la vraie
+/// fenêtre, à 60 Hz, avec la cadence de `ui` : 32 ms de son calcul à la trame où le bureau la montre (deux trames, à la
+/// milliseconde près) ; puis l'écran la balaie jusqu'au visage et la traite, ce qu'aucune capture ne voit. La voix
+/// d'Eve s'y lit d'autant plus loin ([`crate::voix::regler_le_retard_de_l_ecran`]) : mesurée de bout en bout (l'image
+/// capturée contre le son qui sort du poste), la bouche vue suivait le son de 5 ms ; avec trois trames, elle le précède
+/// de 45 ms (de 40 à 55 selon la phrase ; 38 avec deux trames) — comme une vraie bouche, qui se place avant le son. La
+/// trame est celle de l'écran (un écran à 144 Hz montre ses images plus vite) ; sans elle, celle d'un écran à 60 Hz.
+fn retard_de_l_ecran() -> Duration {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Graphics::Dwm::{DWM_TIMING_INFO, DwmGetCompositionTimingInfo};
+        let mut t = DWM_TIMING_INFO { cbSize: size_of::<DWM_TIMING_INFO>() as u32, ..Default::default() };
+        // SAFETY : la structure est à nous, sa taille dite ; la fenêtre nulle : la composition de tout le bureau.
+        let lue = unsafe { DwmGetCompositionTimingInfo(windows::Win32::Foundation::HWND::default(), &mut t) };
+        let frequence = { t.rateRefresh };
+        if lue.is_ok() && frequence.uiNumerator > 0 && frequence.uiDenominator > 0 {
+            let trame = f64::from(frequence.uiDenominator) / f64::from(frequence.uiNumerator);
+            return Duration::from_secs_f64(3.0 * trame.clamp(1.0 / 360.0, 1.0 / 24.0));
+        }
+    }
+    Duration::from_secs_f64(3.0 / 60.0)
+}
+
 /// Eve s'arrête d'elle-même : sa fenêtre se ferme avec elle.
 pub fn fermer() {
     if let Some(ctx) = CONTEXTE.get() {
@@ -292,6 +315,7 @@ impl Fenetre {
     ) -> Fenetre {
         let ctx = &cc.egui_ctx;
         let _ = CONTEXTE.set(ctx.clone());
+        crate::voix::regler_le_retard_de_l_ecran(retard_de_l_ecran());
         #[cfg(windows)]
         let cadre = barre_de_titre(cc);
         #[cfg(not(windows))]
@@ -1435,7 +1459,19 @@ impl Fenetre {
 }
 
 impl eframe::App for Fenetre {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // La cadence : la carte graphique finit l'image d'avant avant que la suivante se prépare, une fois par image
+        // (sa première passe). Sans cela, le pilote en préparait d'avance et le bureau, qui compose l'écran à chaque
+        // trame, en montrait deux à la même trame : une image sur cinq se voyait deux fois et sa voisine jamais (mesuré
+        // le 2026-10-25 dans la vraie fenêtre, 21 % des compositions) — le visage d'Eve avançait par à-coups. Ainsi,
+        // chaque image se voit une fois, deux trames après son calcul, à la milliseconde près ([`retard_de_l_ecran`]).
+        if ui.ctx().current_pass_index() == 0
+            && let Some(gl) = frame.gl()
+        {
+            use eframe::glow::HasContext;
+            // SAFETY : le contexte d'OpenGL de la fenêtre est le contexte courant pendant `ui` (eframe l'y met).
+            unsafe { gl.finish() };
+        }
         let ctx = ui.ctx().clone();
         if let Some(s) = self.dernier.lock().ok().and_then(|mut x| x.take())
             && let Ok(v) = serde_json::from_str::<Value>(&s)

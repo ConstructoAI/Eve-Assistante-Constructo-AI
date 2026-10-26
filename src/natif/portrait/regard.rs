@@ -389,6 +389,14 @@ impl Regard {
             pose.serie(Strate::Dessus, serie, fermes, 1.0);
         }
     }
+
+    /// Où regardent les yeux à cette image, en unités de LivePortrait (à peu près des degrés ; x vers la droite de
+    /// l'écran, y vers le haut ; la personne : droit devant) — d'où ils bondissent vers où ils vont : la tête les suit
+    /// ([`super::gestes`]).
+    pub(super) fn direction(&self) -> [f32; 2] {
+        let ([x0, y0], [x1, y1], e) = (direction(self.vu), direction(self.cible), lisse(self.bond));
+        [x0 + (x1 - x0) * e, y0 + (y1 - y0) * e]
+    }
 }
 
 /// Combien de temps les yeux restent posés sur `cible`, en secondes, selon ce que fait Eve : sur la personne, plus

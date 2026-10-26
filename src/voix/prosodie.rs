@@ -1,17 +1,19 @@
-//! La prosodie d'une phrase dite, pour les gestes du visage d'Eve : ses repères ([`Repere`]) — ses pauses, et la fin
-//! de chaque groupe de mots que le texte ponctue (la virgule, le deux-points, le point, la question, l'exclamation),
-//! posée sur la voix. Une personne qui parle accompagne ces moments de la tête et des sourcils : un petit hochement sur
-//! la dernière syllabe d'un groupe (celle que le français appuie), la tête penchée et les sourcils levés au bout d'une
-//! question, un hochement et les sourcils sur une exclamation, la tête qui se pose à la fin d'une phrase.
+//! La prosodie d'une phrase dite, pour les gestes du visage d'Eve : ses repères ([`Repere`]) — ses pauses, la fin de
+//! chaque groupe de mots que le texte ponctue (la virgule, le deux-points, le point, la question, l'exclamation), et
+//! les mots qui nient, posés sur la voix. Une personne qui parle accompagne ces moments de la tête et des sourcils : un
+//! petit hochement sur la dernière syllabe d'un groupe (celle que le français appuie), la tête penchée et les sourcils
+//! levés au bout d'une question, un hochement et les sourcils sur une exclamation, la tête qui se pose à la fin d'une
+//! phrase, un « non » de la tête quand elle nie.
 //!
 //! Le texte dit où sont les fins de groupes, en syllabes ([`parole::syllabes`]) ; la voix dit où elle se tait. Les deux
 //! s'accordent dans l'ordre ([`accorder`]) : la part de la phrase dite à chaque fin de groupe, d'après ses syllabes,
 //! et la part dite à chaque pause, d'après le temps de voix — la voix enchaîne parfois deux groupes sans pause, et
-//! respire parfois où le texte ne ponctue pas.
+//! respire parfois où le texte ne ponctue pas. Un mot qui nie tombe sur la syllabe même que dit la bouche
+//! ([`super::syllabes_des_cretes`]).
 
 use eve::parole;
 
-use super::{PAS_DE_L_ENVELOPPE, cretes};
+use super::{PAS_DE_L_ENVELOPPE, cretes, syllabes_des_cretes};
 
 /// Ce que marque un repère de la phrase.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,6 +31,10 @@ pub enum Marque {
     Pause,
     /// … et reprend.
     Reprise,
+    /// La syllabe appuyée d'un mot qui refuse : « non », « jamais ».
+    Non,
+    /// La syllabe appuyée d'un mot qui nie après un « ne » : « ce n'est pas facile », « je ne sais plus ».
+    Negation,
 }
 
 /// Un repère de la phrase : ce qu'il marque, et quand (en secondes depuis le début de sa piste).
@@ -111,8 +117,63 @@ pub(super) fn reperes_de(niveaux: &[f32], texte: &str) -> Vec<Repere> {
         reperes.push(Repere { a: seconde(a as f32), marque: Marque::Pause });
         reperes.push(Repere { a: seconde(b as f32), marque: Marque::Reprise });
     }
+    // Les mots qui nient : sur la crête de leur syllabe appuyée (la même que la bouche), ou la première d'après.
+    let de_la_crete = syllabes_des_cretes(niveaux, &cretes, &parole::syllabes(texte));
+    for (k, marque) in negations(texte) {
+        let crete = cretes.iter().zip(&de_la_crete).find(|(_, s)| s.is_some_and(|s| s >= k)).map(|(&c, _)| c);
+        if let Some(c) = crete {
+            reperes.push(Repere { a: seconde(c as f32 + 0.5), marque });
+        }
+    }
     reperes.sort_by(|a, b| a.a.total_cmp(&b.a));
     reperes
+}
+
+/// Les mots qui nient, dans l'ordre : le rang de leur syllabe appuyée — leur dernière — parmi celles du texte
+/// ([`parole::syllabes`]), et ce qu'ils marquent. « Non » et « jamais » refusent d'eux-mêmes ([`Marque::Non`]) — pas
+/// « non seulement », ni « si jamais », ni « à jamais » ; « pas », « plus », « personne », « guère », « ni » nient
+/// après un « ne » du même groupe de mots ([`Marque::Negation`]) — pas « n'est-ce pas », qui demande un oui ; « rien »,
+/// « aucun », « aucune » nient même sans lui — pas « de rien ». Un seul par groupe : « je n'ai jamais rien vu » ne
+/// secoue la tête qu'une fois.
+fn negations(texte: &str) -> Vec<(usize, Marque)> {
+    let mut sortie = Vec::new();
+    let (mut ne, mut nie) = (false, false);
+    let mut avant: Vec<String> = Vec::new();
+    let mut i = 0;
+    while let Some(debut) = texte[i..].find(char::is_alphabetic).map(|d| i + d) {
+        // Une ponctuation depuis le mot d'avant : un autre groupe de mots.
+        if texte[i..debut].chars().any(|c| force(c) > 0) {
+            (ne, nie) = (false, false);
+            avant.clear();
+        }
+        let fin = texte[debut..].find(|c: char| !c.is_alphabetic()).map_or(texte.len(), |f| debut + f);
+        let mot = texte[debut..fin].to_lowercase();
+        let suivant = texte[fin..].split(|c: char| !c.is_alphabetic()).find(|m| !m.is_empty()).unwrap_or("");
+        let precedent = avant.last().map_or("", String::as_str);
+        let question = avant.len() >= 3 && avant[avant.len() - 3..] == ["n", "est", "ce"];
+        let marque = match mot.as_str() {
+            "ne" | "n" => {
+                ne = true;
+                None
+            }
+            "non" if !suivant.eq_ignore_ascii_case("seulement") => Some(Marque::Non),
+            "jamais" if precedent != "si" && precedent != "à" => Some(Marque::Non),
+            "pas" if ne && !question => Some(Marque::Negation),
+            "plus" | "personne" | "guère" | "ni" if ne => Some(Marque::Negation),
+            "rien" if precedent != "de" => Some(Marque::Negation),
+            "aucun" | "aucune" => Some(Marque::Negation),
+            _ => None,
+        };
+        if let Some(marque) = marque.filter(|_| !nie) {
+            nie = true;
+            if let Some(k) = parole::syllabes(&texte[..fin]).len().checked_sub(1) {
+                sortie.push((k, marque));
+            }
+        }
+        avant.push(mot);
+        i = fin;
+    }
+    sortie
 }
 
 /// Les pauses de la voix — au moins [`PAUSE_MIN`] pas sous [`SILENCE`] ; un pas plus fort, seul, ne les coupe pas —, de
@@ -311,5 +372,27 @@ mod essais {
         assert!(reperes_de(&[0.0; 10], "Bonjour").is_empty());
         let fin = reperes_de(&n[..10], "Bonjour");
         assert_eq!(fin.iter().map(|r| r.marque).collect::<Vec<_>>(), [Marque::Fin]);
+        // « Non, je ne sais pas. Bien ! » sur la même voix : « Non » sur les deux crêtes du premier élan — son repère
+        // sur la première, la tête dit non dès le mot —, « pas » sur la dernière du deuxième, comme la bouche les dit.
+        let r = reperes_de(&n, "Non, je ne sais pas. Bien !");
+        let a = |m: Marque| -> Vec<f32> {
+            r.iter().filter(|r| r.marque == m).map(|r| (r.a / 0.04 * 10.0).round() / 10.0).collect()
+        };
+        assert_eq!((a(Marque::Non), a(Marque::Negation)), (vec![3.5], vec![21.5]));
+    }
+
+    #[test]
+    fn les_mots_qui_nient() {
+        use Marque::{Negation, Non};
+        // « Non » refuse ; un « ne … pas » nie, à peine — pas « ou pas ? » sans « ne », ni « n'est-ce pas ? » ;
+        // « jamais » refuse, pas « si jamais » ; « non seulement » ne refuse rien ; « rien », « aucun » nient, pas « de
+        // rien » ; un seul par groupe de mots ; chacun sur sa dernière syllabe (son rang parmi celles du texte).
+        assert_eq!(negations("Non, pas cette semaine : le fournisseur est en retard."), [(0, Non)]);
+        assert_eq!(negations("Je comprends, ce n'est pas facile."), [(5, Negation)]);
+        assert!(negations("Tu viens, ou pas ? C'est bien, n'est-ce pas ?").is_empty());
+        assert_eq!(negations("Je ne sais plus. Jamais !"), [(3, Negation), (5, Non)]);
+        assert!(negations("Si jamais tu le vois, non seulement dis-le, mais écris-le.").is_empty());
+        assert_eq!(negations("Il n'y a aucun problème. De rien !"), [(4, Negation)]);
+        assert_eq!(negations("Je n'ai jamais rien vu."), [(3, Non)]);
     }
 }
