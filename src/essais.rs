@@ -30,7 +30,12 @@
 //! - `eve --essai-profils [--captures DOSSIER]` : le menu des profils de la barre et la rubrique « Profil » des
 //!   réglages, cliqués sans la souris de la personne, sur des profils inventés ;
 //! - `eve --essai-portrait <dossier> [--captures DOSSIER]` : le portrait d'Eve d'un dossier local dans toutes ses
-//!   poses, côte à côte.
+//!   poses, côte à côte ;
+//! - `eve --essai-services [--nombres] [--suivre SECONDES]` : une lecture des services en ligne du tableau de bord —
+//!   les pages d'état de Claude, de GitHub et de Render, les erreurs des ressources de Render —, imprimée ; le suivi
+//!   qui continue, une clé retirée ou posée en marche.
+//! - `eve --essai-stripe` : une lecture du compte Stripe, avec la clé du dossier local, imprimée comme le tableau de
+//!   bord la montrerait ; les routes lues et les droits d'une clé restreinte.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -5505,10 +5510,12 @@ struct SceneDuTheme {
 /// (la conversation seule) pendant qu'Eve écoute, et le tableau de bord de nouveau ; puis ses vues (l'entreprise, la
 /// famille), une grande fenêtre (et le bas de sa page, défilée : « suite », « entreprise-suite ») et une moyenne, et
 /// les états de l'entreprise : pas reliée, la page de connexion ouverte, la première lecture, une lecture qui n'a pas
-/// abouti (avec des chiffres d'avant, puis sans), la liaison perdue (des chiffres d'hier). Puis la vitrine
-/// (`--vitrine`), les moments d'une même journée ([`MOMENTS_DE_LA_VITRINE`]) : la première attend le portrait et ses
-/// poses.
-static SCENES_DU_THEME: [SceneDuTheme; 25] = [
+/// abouti (avec des chiffres d'avant, puis sans), la liaison perdue (des chiffres d'hier) ; les cartes en ligne
+/// ([`EnLigne`]) : l'ordinaire (le haut de la page, puis son bas), un incident (et des erreurs dans la dernière heure,
+/// un paiement échoué : leurs cartes montent ; puis dans une fenêtre moyenne), des lectures manquées (pendant la
+/// première lecture de l'entreprise : ses cartes n'y sont pas encore). Puis la vitrine (`--vitrine`), les moments
+/// d'une même journée ([`MOMENTS_DE_LA_VITRINE`]) : la première attend le portrait et ses poses.
+static SCENES_DU_THEME: [SceneDuTheme; 30] = [
     SceneDuTheme { nom: "tableau", duree: 6.0, taille: Some([1560.0, 900.0]) },
     SceneDuTheme { nom: "reflexion", duree: 4.0, taille: None },
     SceneDuTheme { nom: "reponse", duree: 5.0, taille: None },
@@ -5528,6 +5535,11 @@ static SCENES_DU_THEME: [SceneDuTheme; 25] = [
     SceneDuTheme { nom: "erreur", duree: 5.0, taille: None },
     SceneDuTheme { nom: "erreur-sans-chiffres", duree: 4.0, taille: None },
     SceneDuTheme { nom: "perdue", duree: 5.0, taille: None },
+    SceneDuTheme { nom: "en-ligne", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "en-ligne-suite", duree: 4.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "en-ligne-incident", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "en-ligne-etroite", duree: 5.0, taille: Some([1180.0, 880.0]) },
+    SceneDuTheme { nom: "en-ligne-manquee", duree: 5.0, taille: Some([2100.0, 1180.0]) },
     SceneDuTheme { nom: "vitrine-joie", duree: 14.0, taille: Some([2100.0, 1180.0]) },
     SceneDuTheme { nom: "vitrine-serieuse", duree: 7.0, taille: Some([2100.0, 1180.0]) },
     SceneDuTheme { nom: "vitrine-entreprise-suite", duree: 6.0, taille: Some([2100.0, 1180.0]) },
@@ -5544,10 +5556,12 @@ const MARQUE_DE_L_ENTREPRISE: &str = "essai-theme-entreprise.txt";
 /// fenêtre native, dans le thème « Constructo AI », sur un état inventé que l'essai lui publie comme le chef le
 /// ferait — une conversation, une réponse en tableau, une demande d'accord, Eve qui réfléchit puis écoute, la liaison
 /// à Constructo AI et la vue du tableau de bord — et ses panneaux sur les données inventées de l'essai des panneaux
-/// (`activite\*.js`), sans `famille.js` : ni météo ni aucune requête. `--meteo` y met la famille inventée de l'essai
-/// des panneaux, et sa ville : la météo se lit alors pour de vrai chez open-meteo. Ses scènes défilent d'elles-mêmes
-/// (`--scenes` : seulement celles-là), puis la fenêtre reste au tableau de bord. `--vitrine` : la journée de la vitrine
-/// ([`Vitrine`]), ses captures nommées d'après ses moments.
+/// (`activite\*.js`), sans `famille.js` : ni météo ni aucune requête. Les services en ligne et Stripe aussi sont
+/// inventés, imposés à la fenêtre ([`en_ligne_inventes`]) : ses suivis ne lisent rien. `--meteo` y met la famille
+/// inventée de l'essai des panneaux, et sa ville : la météo se lit alors pour de vrai chez open-meteo. Ses scènes
+/// défilent d'elles-mêmes (`--scenes` : seulement celles-là), puis la fenêtre reste au tableau de bord. `--vitrine` :
+/// la journée de la vitrine ([`Vitrine`]), ses captures nommées d'après ses moments ; ni services en ligne ni Stripe
+/// (son entreprise n'en a pas).
 ///
 /// L'entreprise inventée (« Construction Exemple inc. », ses projets, ses factures, son pipeline) s'écrit dans
 /// l'`entreprise.json` du dossier local que nomme `EVE_DOSSIER_LOCAL`, scène après scène, comme Eve l'écrirait en
@@ -5836,6 +5850,177 @@ fn entreprise_inventee(etat: &str, il_y_a: i64, erreur: Option<&str>, chiffres: 
         ]
     });
     v
+}
+
+/// Ce que montrent les cartes en ligne de l'essai du thème : l'ordinaire (tout va, rien en erreur ; de vieilles
+/// factures ouvertes, toutes échues, comme sur un vrai compte), un incident (chez GitHub, une maintenance chez Render,
+/// des erreurs de Render dans la dernière heure, des réponses HTTP 502, un paiement échoué), des lectures manquées ; ou
+/// rien (la vitrine : son entreprise n'a ni Render ni Stripe).
+#[derive(Clone, Copy, PartialEq)]
+enum EnLigne {
+    Ordinaire,
+    Incident,
+    Manquee,
+    Aucun,
+}
+
+/// Impose à la fenêtre de l'essai des services en ligne et un compte Stripe inventés (personne de vrai : les
+/// ressources « app-exemple », « api-exemple », « base-exemple », des clients d'exemple, des dollars canadiens), lus
+/// il y a deux et trois minutes : ses suivis ne lisent alors rien pour de vrai, dans aucune scène.
+fn en_ligne_inventes(cas: EnLigne) {
+    use crate::services::{self, Erreurs, Etat, Incident, Ligne, Niveau, PAGES, Releve, Reponses5xx, Sorte, Statut};
+    use crate::stripe::{self, Abonnements, Issue, Montants, Ouvertes, Paiement, Somme, Virement};
+    let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+    let il_y_a = |minutes: i64| unix - minutes * 60;
+    let somme = |montant: f64, nombre: usize| Somme { montant, nombre, plus: false };
+    if cas == EnLigne::Aucun {
+        services::imposer(Releve { lu_a: unix, statuts: Vec::new(), render: Ok(Vec::new()) });
+        stripe::imposer(Ok(Montants {
+            lu_a: unix,
+            devise: "cad".into(),
+            disponible: 0.0,
+            en_attente: 0.0,
+            aujourdhui: Somme::default(),
+            ce_mois: Somme::default(),
+            abonnements: None,
+            virement: None,
+            ouvertes: None,
+            paiements: Vec::new(),
+        }));
+        return;
+    }
+    let incident = |nom: &str, impact, statut: &str, depuis, composants: &[(&str, Niveau)]| {
+        Ok(Etat {
+            niveau: impact,
+            incidents: vec![Incident {
+                nom: nom.into(),
+                impact,
+                statut: statut.into(),
+                depuis,
+                lien: "https://stspg.io/exemple".into(),
+            }],
+            composants: composants.iter().map(|(c, n)| (c.to_string(), *n)).collect(),
+        })
+    };
+    let statuts = PAGES
+        .iter()
+        .map(|(nom, page, _)| {
+            let etat = match (cas, *nom) {
+                (EnLigne::Incident, "GitHub") => incident(
+                    "Degraded performance for Actions",
+                    Niveau::Mineur,
+                    "identified",
+                    il_y_a(38),
+                    &[("Actions", Niveau::Mineur), ("Pages", Niveau::Mineur)],
+                ),
+                (EnLigne::Incident, "Render") => incident(
+                    "Scheduled maintenance of Postgres databases",
+                    Niveau::Maintenance,
+                    "in_progress",
+                    il_y_a(25),
+                    &[("Postgres", Niveau::Maintenance)],
+                ),
+                (EnLigne::Manquee, "Claude") => Err("la page d'état ne répond pas (délai dépassé)".into()),
+                _ => Ok(Etat { niveau: Niveau::Operationnel, incidents: Vec::new(), composants: Vec::new() }),
+            };
+            Statut { nom: nom.to_string(), page: page.to_string(), etat }
+        })
+        .collect();
+    let ressource = |nom: &str, sorte, nombre, derniere_heure, derniere: Option<(i64, &str)>| Erreurs {
+        nom: nom.into(),
+        sorte,
+        nombre,
+        plus: false,
+        derniere_heure,
+        derniere: derniere.map(|(quand, message)| Ligne { quand, message: message.into() }),
+        reponses_5xx: Reponses5xx::default(),
+    };
+    // Deux réponses HTTP 502 d'un service web, que Render n'a pas mises au niveau « error ».
+    let mut app = ressource("app-exemple", Sorte::Web, 0, 0, None);
+    app.reponses_5xx = Reponses5xx {
+        nombre: 2,
+        plus: false,
+        derniere_heure: 0,
+        derniere: Some(Ligne { quand: il_y_a(3 * 60 + 5), message: "HTTP 502 · GET /api/devis".into() }),
+    };
+    let render = match cas {
+        EnLigne::Manquee => Err("la clé de Render est refusée (HTTP 401) — reposer la clé : eve --cle render".into()),
+        EnLigne::Incident => Ok(vec![
+            app,
+            ressource(
+                "api-exemple",
+                Sorte::Web,
+                14,
+                3,
+                Some((
+                    il_y_a(4),
+                    "Error: connect ETIMEDOUT 10.0.0.12:5432 at TCPConnectWrap.afterConnect [as oncomplete] \
+                     (node:net:1555:16) — GET /api/factures 500 in 30012 ms",
+                )),
+            ),
+            ressource(
+                "base-exemple",
+                Sorte::Base,
+                2,
+                0,
+                Some((il_y_a(7 * 60 + 12), "ERROR:  canceling statement due to statement timeout")),
+            ),
+        ]),
+        _ => Ok(vec![
+            ressource("app-exemple", Sorte::Web, 0, 0, None),
+            ressource("api-exemple", Sorte::Web, 0, 0, None),
+            ressource("base-exemple", Sorte::Base, 0, 0, None),
+        ]),
+    };
+    services::imposer(Releve { lu_a: il_y_a(2), statuts, render });
+    if cas == EnLigne::Manquee {
+        stripe::imposer(Err(
+            "la clé d'API est refusée (invalide, expirée ou révoquée) : la reposer par « eve --cle stripe »".into(),
+        ));
+        return;
+    }
+    let paiement = |montant: f64, minutes: i64, qui: &str, issue| Paiement {
+        montant,
+        quand: il_y_a(minutes),
+        qui: qui.into(),
+        issue,
+    };
+    let mut paiements = vec![
+        paiement(199.0, 26, "Construction Exemple inc.", Issue::Reussi),
+        paiement(149.0, 95, "Rénovations Démo", Issue::Reussi),
+        paiement(249.0, 26 * 60, "Toitures Fictives ltée", Issue::Reussi),
+        paiement(49.99, 30 * 60, "sam@exemple.ca", Issue::Rembourse),
+        paiement(99.0, 50 * 60, "Gestion Exemple", Issue::Reussi),
+    ];
+    // Les factures ouvertes, de la forme de celles d'un vrai compte : des dizaines, toutes échues (de vieilles factures
+    // que Stripe ne relance plus) ; un paiement d'office qui échoue en ajoute une.
+    let mut ouvertes = Ouvertes { nombre: 23, plus: false, du: 4_870.0, echues: 23 };
+    if cas == EnLigne::Incident {
+        paiements.insert(0, paiement(249.0, 12, "Toitures Fictives ltée", Issue::Echoue));
+        paiements.truncate(5);
+        ouvertes = Ouvertes { nombre: 24, plus: false, du: 5_119.0, echues: 24 };
+    }
+    // Ce qui est entré aujourd'hui : les paiements réussis du jour, à l'heure du poste (un essai lancé après minuit
+    // n'en a qu'un, ou aucun).
+    let jour = crate::centre::numero_du_jour(&crate::journal::date()).unwrap_or(0);
+    let local = jour * 86_400 + seconde_du_jour(&crate::journal::heure()).unwrap_or(12 * 3600);
+    let du_jour: Vec<f64> = paiements
+        .iter()
+        .filter(|p| p.issue == Issue::Reussi && (p.quand + local - unix).div_euclid(86_400) == jour)
+        .map(|p| p.montant)
+        .collect();
+    stripe::imposer(Ok(Montants {
+        lu_a: il_y_a(3),
+        devise: "cad".into(),
+        disponible: 3_410.27,
+        en_attente: 1_256.4,
+        aujourdhui: somme(du_jour.iter().sum(), du_jour.len()),
+        ce_mois: somme(8_921.5, 41),
+        abonnements: Some(Abonnements { actifs: 27, mensuel: 4_263.0 }),
+        virement: Some(Virement { montant: 2_184.6, arrivee: crate::centre::date_du_numero(jour + 2), fait: false }),
+        ouvertes: Some(ouvertes),
+        paiements,
+    }));
 }
 
 // ---- La vitrine de l'essai du thème ------------------------------------------------------------------------------
@@ -6653,6 +6838,7 @@ impl EtatDuTheme {
     fn moment_de_la_vitrine(&mut self, m: &MomentDeLaVitrine) {
         let Some(v) = &self.vitrine else { return };
         crate::journal::regler_l_horloge(Some(v.jour * 86_400 + m.heure));
+        en_ligne_inventes(EnLigne::Aucun);
         if let Some(b) = v.bulletin(m.meteo) {
             crate::meteo::imposer(b);
         }
@@ -6706,6 +6892,13 @@ impl EtatDuTheme {
             return;
         }
         crate::journal::regler_l_horloge(None);
+        // Les services en ligne et Stripe de l'essai, imposés dès la première scène : ceux des scènes des cartes en
+        // ligne, l'ordinaire dans les autres.
+        en_ligne_inventes(match nom {
+            "en-ligne-incident" | "en-ligne-etroite" => EnLigne::Incident,
+            "en-ligne-manquee" => EnLigne::Manquee,
+            _ => EnLigne::Ordinaire,
+        });
         // Le rappel qu'aurait laissé une vitrine d'avant ne sonne pas dans les autres scènes.
         self.ecrire_les_rappels(None);
         // L'émotion de chaque scène : la joie d'une réponse, l'empathie en la disant, le sérieux d'un accord.
@@ -6733,6 +6926,12 @@ impl EtatDuTheme {
                 Some(("tout", "connectee", Some(entreprise_inventee("erreur", 0, Some(panne), false))))
             }
             "perdue" => Some(("entreprise", "deconnectee", Some(entreprise_inventee("a_jour", 22 * 3600, None, true)))),
+            // Les lectures manquées des cartes en ligne, pendant la première lecture de l'entreprise : ses cartes n'y
+            // sont pas encore, celles en ligne se voient toutes en haut de la page.
+            "en-ligne-manquee" => {
+                Some(("entreprise", "connectee", Some(entreprise_inventee("en_cours", 0, None, false))))
+            }
+            n if n.starts_with("en-ligne") => Some(("entreprise", "connectee", a_jour())),
             _ => None,
         };
         if let Some((vue, liaison, contenu)) = entreprise {
@@ -6997,9 +7196,12 @@ fn mener_l_essai_du_theme(
                 }
                 t
             });
-            // Le bas de la page, jusqu'à la capture : la vue et la taille de la scène se prennent entre-temps.
-            if s.nom.ends_with("suite") && !capturee {
-                crate::natif::theme::defiler_le_tableau(&ctx, 820.0);
+            // Le bas de la page, jusqu'à une demi-seconde de la capture : la vue et la taille de la scène se prennent
+            // entre-temps. Celui des cartes en ligne, tout en bas : egui ramène un défilement trop long au bout de la
+            // page à la fin d'une image, et l'image suivante s'y dessine — encore faut-il ne plus le redemander.
+            if s.nom.ends_with("suite") && t - depuis < s.duree - 1.5 {
+                let y = if s.nom.starts_with("en-ligne") { 10_000.0 } else { 820.0 };
+                crate::natif::theme::defiler_le_tableau(&ctx, y);
             }
             if let Some(dossier) = &captures
                 && !capturee
@@ -8922,6 +9124,243 @@ fn oreille_d_un_dossier(r: &Reglages, dossier: &Path, modele: Option<&String>) -
             }
             Err(e) => println!("{nom} : illisible ({e})"),
         }
+    }
+    0
+}
+
+// ---- Les services en ligne du tableau de bord -------------------------------------------------------------------
+
+/// `eve --essai-services [--nombres] [--suivre SECONDES]` : une lecture des services en ligne par leur fil, comme dans
+/// la fenêtre — les trois pages d'état, puis les erreurs des ressources de Render avec la clé du dossier local
+/// (`EVE_DOSSIER_LOCAL` ; `eve --cle render` la pose). Elle imprime le relevé ; `--nombres` : ses nombres et ses états
+/// seulement, sans le nom d'une ressource ni une ligne de son journal (une sortie à montrer). Une lecture, une dizaine
+/// de requêtes. `--suivre` : le suivi tourne encore tant de secondes, et chaque relevé nouveau, ou disparu, se dit en
+/// une ligne — une clé retirée ou posée en marche se voit ainsi (une lecture toutes les 5 min).
+pub fn services(args: &[String]) -> i32 {
+    use crate::cles::{self, Service};
+    use crate::services::{Services, Sorte};
+    let usage = "eve --essai-services [--nombres] [--suivre SECONDES]";
+    let (mut nombres, mut suivre) = (false, None);
+    let mut mots = args.iter();
+    while let Some(a) = mots.next() {
+        match a.as_str() {
+            "--nombres" => nombres = true,
+            "--suivre" => match mots.next().and_then(|s| s.parse::<u64>().ok()) {
+                Some(s) => suivre = Some(s),
+                None => {
+                    eprintln!("{usage} : --suivre veut un nombre de secondes");
+                    return 2;
+                }
+            },
+            _ => {
+                eprintln!("{usage} : « {a} » ?");
+                return 2;
+            }
+        }
+    }
+    let dossier = crate::reglages::dossier_local();
+    if cles::lire(Service::Render).is_none() {
+        eprintln!(
+            "Aucune clé de Render ne se lit dans {} : sans elle, rien ne se lit (eve --cle render la pose).",
+            dossier.display()
+        );
+        return 1;
+    }
+    let t0 = Instant::now();
+    let suivi = Services::lancer();
+    let r = loop {
+        if let Some(r) = suivi.releve() {
+            break r;
+        }
+        if t0.elapsed() > Duration::from_secs(120) {
+            eprintln!("pas de relevé en deux minutes");
+            return 1;
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+    let heure = |unix: i64| {
+        crate::rappels::heure_locale(unix).and_then(|h| h.get(..16).map(str::to_string)).unwrap_or_else(|| "?".into())
+    };
+    println!("clé de Render : posée (dans {})", dossier.display());
+    println!("lu en         : {}, à {}", crate::entreprise::secondes(t0.elapsed()), heure(r.lu_a));
+    println!("pages d'état  :");
+    for s in &r.statuts {
+        match &s.etat {
+            Err(e) => println!("  {:<7}: illisible — {e}", s.nom),
+            Ok(e) => {
+                println!(
+                    "  {:<7}: {} · {} incident(s) en cours · {} composant(s) touché(s)",
+                    s.nom,
+                    e.niveau.libelle(),
+                    e.incidents.len(),
+                    e.composants.len()
+                );
+                if nombres {
+                    continue;
+                }
+                for i in &e.incidents {
+                    let depuis = heure(i.depuis);
+                    println!(
+                        "           incident : {} ({}, {}, depuis {depuis}) {}",
+                        i.nom,
+                        i.impact.libelle(),
+                        i.statut,
+                        i.lien
+                    );
+                }
+                for (nom, n) in &e.composants {
+                    println!("           composant : {nom} ({})", n.libelle());
+                }
+            }
+        }
+    }
+    match &r.render {
+        Err(e) => println!("Render        : ne se lit pas — {e}"),
+        Ok(liste) => {
+            println!("Render        : {} ressource(s)", liste.len());
+            for (k, e) in liste.iter().enumerate() {
+                let sorte = match e.sorte {
+                    Sorte::Web => "service web",
+                    Sorte::Base => "base",
+                    Sorte::Autre => "autre service",
+                };
+                let nom = if nombres { format!("ressource {}", k + 1) } else { format!("« {} »", e.nom) };
+                let plus = |p: bool| if p { " (au moins : il y en a davantage)" } else { "" };
+                let derniere = |l: &crate::services::Ligne| match nombres {
+                    true => format!("     la plus récente : {}", heure(l.quand)),
+                    false => format!("     la plus récente : {} — {}", heure(l.quand), l.message),
+                };
+                println!(
+                    "  {nom} ({sorte}) : {} erreur(s) en 24 h{}, {} dans la dernière heure",
+                    e.nombre,
+                    plus(e.plus),
+                    e.derniere_heure
+                );
+                if let Some(l) = &e.derniere {
+                    println!("{}", derniere(l));
+                }
+                if e.sorte == Sorte::Web {
+                    let r5 = &e.reponses_5xx;
+                    println!(
+                        "     réponses HTTP 5xx hors du niveau « error » : {} en 24 h{}, {} dans la dernière heure",
+                        r5.nombre,
+                        plus(r5.plus),
+                        r5.derniere_heure
+                    );
+                    if let Some(l) = &r5.derniere {
+                        println!("{}", derniere(l));
+                    }
+                }
+            }
+        }
+    }
+    println!("résumé        : {}", r.resume());
+    if let Some(secondes) = suivre {
+        // Le suivi continue : un relevé nouveau (une autre heure de lecture), ou plus de relevé, se dit.
+        let fin = Instant::now() + Duration::from_secs(secondes);
+        let mut vu = Some(r.lu_a);
+        while Instant::now() < fin {
+            let maintenant = suivi.releve();
+            if maintenant.as_ref().map(|r| r.lu_a) != vu {
+                vu = maintenant.as_ref().map(|r| r.lu_a);
+                let quand = crate::journal::date_et_heure();
+                match &maintenant {
+                    Some(r) => println!("{quand} : un relevé de {} — {}", heure(r.lu_a), r.resume()),
+                    None => println!("{quand} : plus de relevé (la clé de Render est retirée, ou ne se lit plus)"),
+                }
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
+    }
+    0
+}
+
+// ---- Stripe, pour le tableau de bord -------------------------------------------------------------------------------
+
+/// `eve --essai-stripe` : une lecture du compte Stripe par son fil, comme dans la fenêtre, avec la clé du dossier
+/// local (`EVE_DOSSIER_LOCAL` ; `eve --cle stripe` la pose). Elle imprime d'abord la sorte de la clé (jamais la clé),
+/// les routes lues — toutes en GET — et les droits qu'elles demandent à une clé restreinte ; puis ce que le tableau de
+/// bord en montrerait. Une lecture : sept requêtes, d'ordinaire.
+pub fn stripe(args: &[String]) -> i32 {
+    use crate::cles::{self, Service};
+    use crate::stripe::{self, Issue, Route, Somme, Stripe};
+    if !args.is_empty() {
+        eprintln!("eve --essai-stripe : sans argument (la clé est celle du dossier local, EVE_DOSSIER_LOCAL)");
+        return 2;
+    }
+    println!("dossier     : {}", crate::reglages::dossier_local().display());
+    // La sorte de la clé, d'après son début seulement.
+    let Some(sorte) = cles::lire(Service::Stripe).map(|c| {
+        let sorte = match c.starts_with("rk_") {
+            true => "restreinte",
+            false => "secrète (tous les droits ; une clé restreinte suffit)",
+        };
+        format!("{sorte}, en mode {}", if c.contains("_live_") { "réel" } else { "d'essai" })
+    }) else {
+        eprintln!("aucune clé de Stripe ne se lit dans ce dossier local : eve --cle stripe la pose");
+        return 1;
+    };
+    println!("clé         : {sorte}");
+    for r in Route::TOUTES {
+        let droits: Vec<&str> = r.droits().iter().map(|d| d.nom).collect();
+        println!("route       : GET {} ({})", r.chemin(), droits.join(", "));
+    }
+    let droits: Vec<String> = stripe::DROITS.iter().map(|d| format!("{} ({})", d.nom, d.code)).collect();
+    println!("droits      : {}, en lecture (« Read »)", droits.join(", "));
+    println!("version     : Stripe-Version {}", stripe::VERSION);
+    let t0 = Instant::now();
+    let suivi = Stripe::lancer();
+    let m = loop {
+        match suivi.montants() {
+            Some(Ok(m)) => break m,
+            Some(Err(e)) => {
+                eprintln!("pas de montants : {e}");
+                return 1;
+            }
+            None if t0.elapsed() > Duration::from_secs(180) => {
+                eprintln!("pas de montants en trois minutes");
+                return 1;
+            }
+            None => thread::sleep(Duration::from_millis(50)),
+        }
+    };
+    let argent = |x: f64| format!("{x:.2} {}", m.devise);
+    let somme = |s: &Somme| {
+        let pluriel = if s.nombre > 1 { "s" } else { "" };
+        let plus = if s.plus { ", au moins" } else { "" };
+        format!("{} ({} paiement{pluriel}{plus})", argent(s.montant), s.nombre)
+    };
+    println!("lu en       : {:.2} s", t0.elapsed().as_secs_f64());
+    println!("disponible  : {}", argent(m.disponible));
+    println!("en attente  : {}", argent(m.en_attente));
+    println!("aujourd'hui : {}", somme(&m.aujourdhui));
+    println!("ce mois-ci  : {}", somme(&m.ce_mois));
+    match &m.abonnements {
+        Some(a) => println!("abonnements : {} actifs, {} par mois", a.actifs, argent(a.mensuel)),
+        None => println!("abonnements : non lus"),
+    }
+    match &m.virement {
+        Some(v) if v.fait => println!("virement    : {}, arrivé le {}", argent(v.montant), v.arrivee),
+        Some(v) => println!("virement    : {}, en route, attendu le {}", argent(v.montant), v.arrivee),
+        None => println!("virement    : aucun"),
+    }
+    match &m.ouvertes {
+        Some(o) => {
+            let plus = if o.plus { " ou plus" } else { "" };
+            println!("factures    : {}{plus} ouvertes, {} dus, {} échues", o.nombre, argent(o.du), o.echues);
+        }
+        None => println!("factures    : non lues"),
+    }
+    println!("paiements   : les {} derniers", m.paiements.len());
+    for p in &m.paiements {
+        let issue = match p.issue {
+            Issue::Reussi => "réussi",
+            Issue::Echoue => "échoué",
+            Issue::Rembourse => "remboursé",
+            Issue::EnAttente => "en attente",
+        };
+        let quand = crate::rappels::heure_locale(p.quand).unwrap_or_default();
+        println!("  {quand}  {:>14}  {issue:<10}  {}", argent(p.montant), p.qui);
     }
     0
 }

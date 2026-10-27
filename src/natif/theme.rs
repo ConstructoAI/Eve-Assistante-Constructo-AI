@@ -172,6 +172,11 @@ pub(crate) mod pictos {
     pub const COMMANDES: char = '\u{E7BF}';
     pub const HEURES: char = '\u{E121}';
     pub const FACTURES_RECUES: char = '\u{E9F9}';
+    /// Les services en ligne (l'écran qui bat), les erreurs de leurs journaux (l'insecte), Stripe (la carte de
+    /// paiement).
+    pub const SERVICES: char = '\u{E9D9}';
+    pub const ERREURS: char = '\u{EBE8}';
+    pub const PAIEMENTS: char = '\u{E8C7}';
 }
 
 // ---- Le fond qui respire --------------------------------------------------------------------------------------------
@@ -722,14 +727,17 @@ pub(crate) enum Mesure {
 
 /// Une rangée d'une carte en liste : un carré de couleur devant (celui d'une légende), ses morceaux (d'ordinaire le mot
 /// de tête en couleur, puis le texte), une valeur contre le bord droit (un montant), une ligne de détail grise (ses
-/// morceaux séparés par « · »), une mesure.
+/// morceaux séparés par « · »), un extrait à chasse fixe (une ligne d'un journal), une mesure ; et la page qu'elle
+/// ouvre d'un clic (`https://` seulement : le chef n'ouvre rien d'autre).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Rangee {
     pub(crate) carre: Option<Color32>,
     pub(crate) bouts: Vec<Bout>,
     pub(crate) droite: String,
     pub(crate) detail: String,
+    pub(crate) extrait: String,
     pub(crate) mesure: Option<Mesure>,
+    pub(crate) lien: Option<String>,
 }
 
 impl Rangee {
@@ -797,9 +805,10 @@ impl Liste {
     }
 }
 
-/// Une carte en liste ([`Liste`]) dans toute la largeur donnée ; rend la hauteur qu'il lui faut.
-pub(crate) fn carte_liste(ui: &mut egui::Ui, l: &Liste) -> f32 {
+/// Une carte en liste ([`Liste`]) dans toute la largeur donnée ; rend la page d'une rangée cliquée (son `lien`).
+pub(crate) fn carte_liste(ui: &mut egui::Ui, l: &Liste) -> Option<String> {
     let lavis = if l.alerte { erp::ROUGE.pastel } else { l.teinte.pastel };
+    let mut cliquee = None;
     carte(ui, Some(lavis), 0.0, |ui| {
         let pilule = l.pilule.as_ref().map(|(t, x)| (t.as_str(), *x));
         tete_de_carte(ui, &l.titre, l.icone, l.teinte, l.alerte, pilule);
@@ -819,24 +828,32 @@ pub(crate) fn carte_liste(ui: &mut egui::Ui, l: &Liste) -> f32 {
                 let (f, _) = ui.allocate_exact_size(vec2(ui.available_width(), 11.0), Sense::hover());
                 ui.painter().hline(f.x_range(), f.center().y, Stroke::new(1.0, erp::FILET_DE_CARTE));
             }
-            rangee_de_liste(ui, r, (&l.titre, k));
+            if let Some(lien) = rangee_de_liste(ui, r, (&l.titre, k)) {
+                cliquee = Some(lien);
+            }
         }
         if !l.pied.is_empty() {
             ui.add_space(4.0);
             let pied = RichText::new(&l.pied).size(12.5).color(erp::TEXTE_2);
             ui.add(egui::Label::new(pied).wrap().selectable(false));
         }
-    })
+    });
+    cliquee
 }
 
-/// La taille du texte des rangées, et celle de leur détail.
+/// La taille du texte des rangées, de leur détail et de leur extrait.
 const TEXTE_DE_RANGEE: f32 = 14.0;
 const DETAIL_DE_RANGEE: f32 = 12.5;
+const EXTRAIT_DE_RANGEE: f32 = 12.0;
 
 /// Une rangée d'une carte en liste : son carré de légende, ses morceaux mis en page sur la largeur (moins la valeur à
-/// droite, alignée sur leur première ligne), son détail gris dessous, sa mesure. `cle` : de quoi nommer sa bulle.
-fn rangee_de_liste(ui: &mut egui::Ui, r: &Rangee, cle: (&str, usize)) {
+/// droite, alignée sur leur première ligne), son détail gris dessous, son extrait, sa mesure. `cle` : de quoi nommer sa
+/// bulle. Une rangée qui ouvre une page se lave de gris au survol, la main et l'adresse avec ; rend sa page cliquée.
+fn rangee_de_liste(ui: &mut egui::Ui, r: &Rangee, cle: (&str, usize)) -> Option<String> {
     let largeur = ui.available_width();
+    let debut = ui.cursor().min;
+    // Le lavis du survol, sous la rangée : sa place se garde avant elle, sa forme vient après (sa hauteur connue).
+    let lavis = ui.painter().add(Shape::Noop);
     let p = ui.painter().clone();
     let retrait = if r.carre.is_some() { 18.0 } else { 0.0 };
     let droite = (!r.droite.is_empty()).then(|| {
@@ -880,6 +897,27 @@ fn rangee_de_liste(ui: &mut egui::Ui, r: &Rangee, cle: (&str, usize)) {
         let (place, _) = ui.allocate_exact_size(vec2(largeur, detail.size().y), Sense::hover());
         p.galley(pos2(place.left() + retrait, place.top()), detail, erp::TEXTE_2);
     }
+    if !r.extrait.is_empty() {
+        // Une ligne d'un journal se lit à chasse fixe, sur l'ardoise pâle des `code` de l'assistant : deux lignes au
+        // plus, coupée entre deux mots, sinon à un tiret ou une ponctuation (un chemin, une pile d'appels), et n'importe
+        // où en dernier (egui) — coupée n'importe où d'office, « statement » se lisait « statemen » puis « t » ; tout
+        // entière au survol.
+        let (marge_x, marge_y) = (8.0, 5.0);
+        let police = FontId::monospace(EXTRAIT_DE_RANGEE);
+        let place_du_texte = (largeur - retrait - 2.0 * marge_x).max(40.0);
+        let mut job = egui::text::LayoutJob::simple(r.extrait.clone(), police, erp::ARDOISE_2, place_du_texte);
+        job.wrap.max_rows = 2;
+        let g = p.layout_job(job);
+        let coupe = g.elided;
+        ui.add_space(1.0);
+        let (place, rep) = ui.allocate_exact_size(vec2(largeur, g.size().y + 2.0 * marge_y), Sense::hover());
+        let boite = Rect::from_min_max(pos2(place.left() + retrait, place.top()), place.max);
+        p.rect(boite, 6.0, erp::CODE, Stroke::new(1.0, erp::FILET_FROID), StrokeKind::Inside);
+        p.galley(boite.min + vec2(marge_x, marge_y), g, erp::ARDOISE_2);
+        if coupe {
+            rep.on_hover_text(&r.extrait);
+        }
+    }
     match &r.mesure {
         Some(Mesure::Part { part, marques }) => {
             ui.add_space(5.0);
@@ -911,6 +949,14 @@ fn rangee_de_liste(ui: &mut egui::Ui, r: &Rangee, cle: (&str, usize)) {
         }
         None => {}
     }
+    let lien = r.lien.as_ref()?;
+    let rangee = Rect::from_min_max(debut, pos2(debut.x + largeur, ui.min_rect().bottom()));
+    let rep = ui.interact(rangee, egui::Id::unique(("lien-de-rangee", cle.0, cle.1)), Sense::click());
+    if rep.hovered() {
+        ui.painter().set(lavis, Shape::rect_filled(rangee.expand2(vec2(8.0, 4.0)), 8.0, erp::SURVOL));
+    }
+    let rep = rep.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(lien);
+    rep.clicked().then(|| lien.clone())
 }
 
 /// Une barre empilée dans `r` : ses parts (leur valeur, leur couleur) côte à côte en proportion, deux points de blanc
@@ -2136,6 +2182,49 @@ pub(crate) fn defiler_le_tableau(ctx: &egui::Context, y: f32) {
 #[cfg(test)]
 mod essais {
     use super::*;
+
+    /// Une rangée qui ouvre une page : cliquée (le bouton pressé puis relâché sur elle), sa carte rend sa page ; une
+    /// rangée sans page (ici, avec un long extrait d'un journal au-dessus d'elle) ne répond pas au clic.
+    #[test]
+    fn une_rangee_ouvre_sa_page_d_un_clic() {
+        let ctx = egui::Context::default();
+        crate::natif::polices(&ctx);
+        let mut l = Liste::nouvelle("Essai des liens", pictos::SERVICES, erp::VERT);
+        let mut journal = Rangee::nouvelle("api-exemple", erp::TEXTE, "Service web");
+        journal.extrait = "Error: une ligne de journal bien trop longue pour tenir sur deux lignes ".repeat(8);
+        l.rangees.push(journal);
+        let mut page = Rangee::nouvelle("Claude", erp::TEXTE, "Opérationnel");
+        page.lien = Some("https://status.exemple".into());
+        l.rangees.push(page);
+        let mut t = 0.0;
+        let mut image = |evenements: Vec<egui::Event>| {
+            t += 0.1;
+            let entree = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(420.0, 500.0))),
+                time: Some(t),
+                events: evenements,
+                ..Default::default()
+            };
+            let mut cliquee = None;
+            let _ = ctx.run_ui(entree, |ui| cliquee = carte_liste(ui, &l));
+            cliquee
+        };
+        assert_eq!(image(Vec::new()), None);
+        let rangee = |k: usize| ctx.read_response(egui::Id::unique(("lien-de-rangee", "Essai des liens", k)));
+        assert!(rangee(0).is_none(), "une rangée sans page ne se clique pas");
+        let place = rangee(1).expect("la rangée qui ouvre une page").rect;
+        assert!(place.height() > 10.0 && place.width() > 300.0, "{place:?}");
+        let bouton = |pressed| egui::Event::PointerButton {
+            pos: place.center(),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        assert_eq!(image(vec![egui::Event::PointerMoved(place.center())]), None);
+        assert_eq!(image(vec![bouton(true)]), None);
+        assert_eq!(image(vec![bouton(false)]).as_deref(), Some("https://status.exemple"));
+        assert_eq!(image(Vec::new()), None, "un clic, une page");
+    }
 
     #[test]
     fn la_courbe_ease_est_celle_de_css() {

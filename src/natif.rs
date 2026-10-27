@@ -44,6 +44,8 @@ use crate::meteo::{self, Bulletin, Meteo};
 use crate::musique::Musique;
 use crate::orbe::Orbe;
 use crate::reseau::{CURSEUR, Evenement, Reseau};
+use crate::services::{Releve, Services};
+use crate::stripe::{Montants, Stripe};
 
 /// Les couleurs de l'Eve de Constructo AI, thème sombre (sa page, `jarvis.html`, ses variables CSS).
 pub mod couleurs {
@@ -274,6 +276,12 @@ pub(crate) struct Fenetre {
     ambiance: Ambiance,
     meteo: Option<Meteo>,
     bulletin: Option<Bulletin>,
+    /// Les services en ligne et Stripe (leurs suivis, dans le thème « Constructo AI » seulement : son tableau de bord
+    /// est le seul à les montrer), et leurs derniers relevés, relus une fois par seconde.
+    services: Option<Services>,
+    releve: Option<Releve>,
+    stripe: Option<Stripe>,
+    montants: Option<Result<Montants, String>>,
     personnes_vues: Vec<crate::reseau::Personne>,
     motifs_vus: Vec<String>,
     cueillette: bool,
@@ -363,6 +371,10 @@ impl Fenetre {
             ambiance: Ambiance::nouvelle(),
             meteo: None,
             bulletin: None,
+            services: None,
+            releve: None,
+            stripe: None,
+            montants: None,
             personnes_vues: Vec::new(),
             motifs_vus: Vec::new(),
             cueillette: false,
@@ -1576,6 +1588,15 @@ impl eframe::App for Fenetre {
             }
             self.bulletin = self.meteo.as_ref().and_then(Meteo::bulletin);
             self.centre.tempete(self.bulletin.as_ref().map(|b| (b.neige_cm, b.rafales_kmh)));
+            // Les services en ligne et Stripe vivent avec le thème « Constructo AI », le seul qui les montre : lancés
+            // quand il vient, lâchés quand il s'en va (leurs fils s'arrêtent) ; leurs relevés relus ici, pas à chaque
+            // image.
+            if constructo != self.services.is_some() {
+                self.services = constructo.then(Services::lancer);
+                self.stripe = constructo.then(Stripe::lancer);
+            }
+            self.releve = self.services.as_ref().and_then(Services::releve);
+            self.montants = self.stripe.as_ref().and_then(Stripe::montants);
             // La cueillette qui commence : les deux notes qui montent, comme la page (cdc:717).
             let cueillette = self.centre.cueillette(&journal::date(), &journal::heure());
             if cueillette

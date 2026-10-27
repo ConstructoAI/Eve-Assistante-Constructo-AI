@@ -946,13 +946,16 @@ fn analyser(cmd: &str, sh: Shell, profondeur: u8) -> Verdict {
     Verdict::Libre
 }
 
-/// La commande vise-t-elle le jeton d'Adjointe ou un fichier de clés (`.env`) ?
+/// La commande vise-t-elle le jeton d'Adjointe ou un fichier de clés : un `.env`, ou une clé d'API qu'Eve garde pour son
+/// tableau de bord (`render.cle`, `stripe.cle` du dossier local : chiffrées pour la session de Windows, comme
+/// `connexion.bin` — tout fichier `*.cle`) ?
 fn touche_un_secret(bas: &str) -> bool {
     SECRETS.iter().any(|s| bas.contains(s))
         || bas.split(|c: char| c.is_whitespace() || "\"'`;|&<>(){}=,".contains(c)).any(|m| {
             let m = m.trim_end_matches(['\\', '/']);
             let dernier = m.rsplit(['\\', '/']).next().unwrap_or(m);
-            dernier == ".env" || (dernier.len() > 4 && dernier.ends_with(".env") && !dernier.contains('*'))
+            let fichier_de = |ext: &str| dernier.len() > ext.len() && dernier.ends_with(ext) && !dernier.contains('*');
+            dernier == ".env" || fichier_de(".env") || fichier_de(".cle")
         })
 }
 
@@ -2618,5 +2621,19 @@ mod essais {
             lire(r"C:\Users\x\AppData\Local\Eve\specialistes\assistante\pieces\2026-10-24\facture.pdf"),
             Decision::Libre
         );
+    }
+
+    #[test]
+    fn les_cles_du_tableau_de_bord_ne_se_lisent_pas() {
+        let dossier = r"C:\Users\x\AppData\Local\Eve\specialistes\assistante";
+        for cle in ["render.cle", "stripe.cle"] {
+            let fichier = format!(r"{dossier}\{cle}");
+            assert!(refuse(&evaluer("Read", &json!({ "file_path": fichier }))));
+            assert!(refuse(&evaluer("PowerShell", &json!({ "command": format!("Get-Content \"{fichier}\"") }))));
+            assert!(refuse(&evaluer("Bash", &json!({ "command": format!("cp '{fichier}' /tmp/") }))));
+        }
+        // Un mot qui finit comme elles n'est pas une clé, ni une liste qui les nomme toutes.
+        assert_eq!(evaluer("Read", &json!({ "file_path": r"C:\x\spectacle.txt" })), Decision::Libre);
+        assert_eq!(evaluer("Bash", &json!({ "command": "ls *.cle" })), Decision::Libre);
     }
 }

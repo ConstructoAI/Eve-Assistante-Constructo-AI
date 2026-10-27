@@ -9,6 +9,7 @@ mod cartes;
 mod centre;
 mod cerveau;
 mod chef;
+mod cles;
 mod connexion;
 mod ecran;
 mod entreprise;
@@ -31,7 +32,9 @@ mod profils;
 mod rappels;
 mod reglages;
 mod reseau;
+mod services;
 mod sons;
+mod stripe;
 mod touche;
 mod veilleur;
 mod voix;
@@ -62,8 +65,9 @@ fn main() {
     }
     // Les profils (`--profils`, `--profil-ajouter`, `--profil`, `--profil-retirer`) et le cerveau (`--modele`,
     // `--effort`) : sur reglages.json du dossier local, que l'Eve en marche relit — lancés par Claude au milieu d'un
-    // tour, ni le journal ni la vitrine ne s'ouvrent.
-    if let Some(code) = profils::commande(&args).or_else(|| reglages::commande(&args)) {
+    // tour, ni le journal ni la vitrine ne s'ouvrent. Les clés d'API du tableau de bord (`--cle`) non plus.
+    if let Some(code) = profils::commande(&args).or_else(|| reglages::commande(&args)).or_else(|| cles::commande(&args))
+    {
         std::process::exit(code);
     }
     let reglages = reglages::charger();
@@ -94,6 +98,8 @@ fn main() {
         Some("--essai-pieces") => essais::pieces(&args[1..]),
         Some("--essai-profils") => essais::profils(&args[1..]),
         Some("--essai-portrait") => essais::portrait(&args[1..]),
+        Some("--essai-services") => essais::services(&args[1..]),
+        Some("--essai-stripe") => essais::stripe(&args[1..]),
         Some("--aide" | "-h" | "--help") => {
             aide();
             0
@@ -294,6 +300,12 @@ fn aide() {
          \x20                            cliqués sans la souris, sur des profils inventés\n\
          eve --essai-portrait <dossier> [--captures DOSSIER]  le portrait d'Eve d'un dossier local dans toutes ses\n\
          \x20                            poses : les clignements, les regards, les bouches, et leurs mélanges\n\
+         eve --essai-services [--nombres] [--suivre s]  une lecture des services en ligne du tableau de bord : les\n\
+         \x20                            pages d'état de Claude, de GitHub et de Render, les erreurs de Render (la\n\
+         \x20                            clé : eve --cle render) ; --nombres : sans nom de ressource ni ligne de\n\
+         \x20                            journal ; --suivre : le suivi tourne encore tant de secondes\n\
+         eve --essai-stripe           une lecture du compte Stripe (la clé du dossier local : eve --cle stripe),\n\
+         \x20                            ce que le tableau de bord en montre ; les droits d'une clé restreinte\n\
          eve --mesures [dossier…]     le temps de chaque étape des demandes et le coût des tours, lus au journal\n\
          eve --profils                les profils de cette Eve (EVE_DOSSIER_LOCAL), le profil choisi marqué\n\
          eve --profil-ajouter \"nom\" \"dossier\"  un profil de plus : un dossier qui porte son CLAUDE.md\n\
@@ -304,6 +316,8 @@ fn aide() {
          eve --effort moyen|max       l'effort seul\n\
          eve --prononcer [\"mot\" [\"ce que la voix lit\"]]  une prononciation à soi (« Granby » : « Granbi ») ;\n\
          \x20                            rien : celles de cette Eve ; le mot seul : la retire\n\
+         eve --cle [render|stripe [--retirer]]  la clé d'API d'un service que montre le tableau de bord, collée\n\
+         \x20                            sur l'entrée standard (chiffrée dans le dossier local) ; rien : ce qui est posé\n\
          eve --version                la version de ce programme et l'empreinte de sa source (son commit)\n\
          eve --mettre-a-jour eve.exe  installe ce programme-là (une version commitée, construite par Compiler.bat) :\n\
          \x20                            l'Eve qui tourne (EVE_DOSSIER_LOCAL) redémarre dedans à la fin de sa\n\

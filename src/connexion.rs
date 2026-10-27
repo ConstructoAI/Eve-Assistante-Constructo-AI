@@ -479,11 +479,18 @@ fn aleatoire(o: &mut [u8]) -> Result<(), String> {
 }
 
 fn chiffrer(o: &[u8]) -> Result<Vec<u8>, String> {
-    imp::proteger(o, true)
+    imp::proteger(o, true, ENTROPIE, "Eve - connexion Constructo AI")
 }
 
 fn dechiffrer(o: &[u8]) -> Result<Vec<u8>, String> {
-    imp::proteger(o, false)
+    imp::proteger(o, false, ENTROPIE, "")
+}
+
+/// DPAPI pour la session de la personne, sous cette entropie : `chiffrer` (vrai) ou déchiffrer. La connexion, et les
+/// clés d'API du tableau de bord (`cles.rs`), chacune sous la sienne ; `description` ne sert qu'au chiffrement (Windows
+/// la garde dans le bloc).
+pub(crate) fn proteger(o: &[u8], chiffrer: bool, entropie: &[u8], description: &str) -> Result<Vec<u8>, String> {
+    imp::proteger(o, chiffrer, entropie, description)
 }
 
 #[cfg(windows)]
@@ -496,8 +503,6 @@ mod imp {
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
     use windows::core::{PCWSTR, w};
-
-    use super::ENTROPIE;
 
     pub fn sha256(o: &[u8]) -> Result<[u8; 32], String> {
         let mut h = [0u8; 32];
@@ -513,19 +518,22 @@ mod imp {
         if s.is_ok() { Ok(()) } else { Err(format!("le générateur du système a échoué ({:#x})", s.0)) }
     }
 
-    /// DPAPI, pour la session de l'utilisateur : `chiffrer` (vrai) ou déchiffrer.
-    pub fn proteger(o: &[u8], chiffrer: bool) -> Result<Vec<u8>, String> {
+    /// DPAPI, pour la session de l'utilisateur, sous cette entropie : `chiffrer` (vrai) ou déchiffrer.
+    pub fn proteger(o: &[u8], chiffrer: bool, entropie: &[u8], description: &str) -> Result<Vec<u8>, String> {
         let n = u32::try_from(o.len()).map_err(|_| "trop gros".to_string())?;
         let entree = CRYPT_INTEGER_BLOB { cbData: n, pbData: o.as_ptr().cast_mut() };
-        let entropie = CRYPT_INTEGER_BLOB { cbData: ENTROPIE.len() as u32, pbData: ENTROPIE.as_ptr().cast_mut() };
+        let m = u32::try_from(entropie.len()).map_err(|_| "trop gros".to_string())?;
+        let entropie = CRYPT_INTEGER_BLOB { cbData: m, pbData: entropie.as_ptr().cast_mut() };
+        let description: Vec<u16> = description.encode_utf16().chain(std::iter::once(0)).collect();
         let mut sortie = CRYPT_INTEGER_BLOB::default();
-        // SAFETY : les blocs d'entrée et d'entropie pointent sur des tranches valides pendant l'appel, que DPAPI ne fait
-        // que lire ; la sortie est allouée par DPAPI (LocalAlloc), copiée puis libérée ci-dessous ; aucune interface.
+        // SAFETY : les blocs d'entrée et d'entropie, et la description (terminée par un zéro), pointent sur des tranches
+        // valides pendant l'appel, que DPAPI ne fait que lire ; la sortie est allouée par DPAPI (LocalAlloc), copiée
+        // puis libérée ci-dessous ; aucune interface.
         let r = unsafe {
             if chiffrer {
                 CryptProtectData(
                     &entree,
-                    w!("Eve - connexion Constructo AI"),
+                    PCWSTR(description.as_ptr()),
                     Some(&entropie),
                     None,
                     None,
@@ -566,7 +574,7 @@ mod imp {
     pub fn aleatoire(_o: &mut [u8]) -> Result<(), String> {
         Err("Windows seulement".into())
     }
-    pub fn proteger(_o: &[u8], _chiffrer: bool) -> Result<Vec<u8>, String> {
+    pub fn proteger(_o: &[u8], _chiffrer: bool, _entropie: &[u8], _description: &str) -> Result<Vec<u8>, String> {
         Err("Windows seulement".into())
     }
     pub fn ouvrir(_url: &str) -> Result<(), String> {

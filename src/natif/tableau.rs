@@ -14,6 +14,13 @@
 //! change : [`crate::centre::Centre::entreprise`]), chaque champ facultatif — ses alertes, l'agenda de l'ERP, les
 //! factures en retard, les projets en cours, les devis en attente, la balance âgée, le pipeline, la banque.
 //!
+//! Avec l'entreprise (et avec la maison seule quand Constructo AI n'est pas permis à cette Eve), les cartes en ligne :
+//! l'état de Claude, de GitHub et de Render d'après leurs pages d'état, les erreurs des journaux de Render
+//! ([`crate::services`]), les montants de Stripe et ses derniers paiements ([`crate::stripe`]) — que lisent les suivis
+//! de la fenêtre, chez qui a posé leurs clés : sans clé, pas de carte. Ce qui presse monte (un incident, des erreurs
+//! dans la dernière heure, un paiement échoué) ; une lecture manquée se dit dans sa carte ; un clic sur un service
+//! ouvre sa page d'état.
+//!
 //! Les états de l'entreprise : Constructo AI pas permis à cette Eve (ni le choix ni l'entreprise : la famille seule,
 //! comme avant), pas reliée (une carte invite à se relier, le geste `constructo_connecter`), la page de connexion
 //! ouverte, la première lecture (une roue : le serveur endormi se réveille en une trentaine de secondes), une relecture
@@ -40,6 +47,8 @@ use super::theme::{self, BoutonErp, Chiffre, ECART, Liste, Rangee, erp, pictos};
 use super::{Fenetre, ICONES, SEMI, TENUE};
 use crate::meteo::{self, Bulletin};
 use crate::reglages::VUES_DU_TABLEAU;
+use crate::services::{Erreurs, Etat, Niveau, Releve, Sorte};
+use crate::stripe::{Issue, Montants, Paiement};
 use crate::{ambiance, centre};
 
 /// Les rangs des cartes du tableau de bord, une seule échelle pour l'entreprise et la maison : la plus petite d'abord,
@@ -50,30 +59,40 @@ pub(crate) mod rang {
     pub const ALERTES_DE_LA_MAISON: u8 = 0;
     /// Les alertes de l'entreprise, quand l'une est haute ; et l'invitation à relier Constructo AI.
     pub const ALERTES_HAUTES: u8 = 1;
-    pub const DECISION: u8 = 2;
-    pub const JOURNEE: u8 = 3;
-    pub const METEO: u8 = 4;
-    pub const AGENDA_DE_L_ENTREPRISE: u8 = 5;
-    pub const FACTURES_EN_RETARD: u8 = 6;
-    pub const CHANTIERS: u8 = 7;
-    pub const ECHEANCES: u8 = 8;
+    /// Ce qui presse en ligne : un incident chez Claude, GitHub ou Render, des erreurs de Render dans la dernière
+    /// heure, un paiement de Stripe échoué depuis un jour.
+    pub const EN_LIGNE_QUI_PRESSE: u8 = 2;
+    pub const DECISION: u8 = 3;
+    pub const JOURNEE: u8 = 4;
+    pub const METEO: u8 = 5;
+    pub const AGENDA_DE_L_ENTREPRISE: u8 = 6;
+    pub const FACTURES_EN_RETARD: u8 = 7;
+    /// Stripe : ses montants, puis ses derniers paiements.
+    pub const STRIPE: u8 = 8;
+    pub const CHANTIERS: u8 = 9;
+    pub const ECHEANCES: u8 = 10;
     /// Les soumissions aux clients (ou, sans elles, les devis en attente).
-    pub const SOUMISSIONS: u8 = 9;
-    pub const COMMANDES: u8 = 10;
-    pub const HEURES: u8 = 11;
-    pub const COURRIELS: u8 = 12;
-    pub const EQUIPE: u8 = 13;
-    pub const FACTURES_RECUES: u8 = 14;
+    pub const SOUMISSIONS: u8 = 11;
+    pub const COMMANDES: u8 = 12;
+    pub const HEURES: u8 = 13;
+    pub const COURRIELS: u8 = 14;
+    pub const EQUIPE: u8 = 15;
+    pub const FACTURES_RECUES: u8 = 16;
     /// Les alertes de l'entreprise, aucune haute (ou aucune).
-    pub const ALERTES: u8 = 15;
-    pub const BALANCE: u8 = 16;
-    pub const PIPELINE: u8 = 17;
-    pub const BANQUE: u8 = 18;
-    pub const EPICERIE: u8 = 19;
-    pub const QUESTIONS: u8 = 20;
-    pub const ENCAISSE: u8 = 21;
-    pub const COMPTE: u8 = 22;
-    pub const CHIFFRES: u8 = 23;
+    pub const ALERTES: u8 = 17;
+    /// En ligne, à surveiller : des erreurs de Render dans la journée (aucune dans la dernière heure), une maintenance
+    /// en cours, une lecture de Render manquée.
+    pub const EN_LIGNE_A_SURVEILLER: u8 = 18;
+    pub const BALANCE: u8 = 19;
+    pub const PIPELINE: u8 = 20;
+    pub const BANQUE: u8 = 21;
+    /// Les services en ligne quand tout va, et Render sans erreur : sous l'entreprise.
+    pub const EN_LIGNE: u8 = 22;
+    pub const EPICERIE: u8 = 23;
+    pub const QUESTIONS: u8 = 24;
+    pub const ENCAISSE: u8 = 25;
+    pub const COMPTE: u8 = 26;
+    pub const CHIFFRES: u8 = 27;
 }
 
 // ---- La vue -----------------------------------------------------------------------------------------------------
@@ -168,6 +187,17 @@ impl Maintenant {
     /// Le jour de l'image, « 2026-10-26 ».
     fn aujourdhui(&self) -> String {
         centre::date_du_numero(self.jour)
+    }
+
+    /// Quand a eu lieu un instant Unix (au fuseau du poste à cette image), dit comme une lecture ([`quand_dit`]) :
+    /// « à 9 h 38 », « hier à 22 h 10 », « le 24 oct. à 9 h » — l'heure d'un seul tenant, qu'un bout de ligne ne coupe
+    /// pas entre « 9 h » et « 38 ».
+    fn quand(&self, unix: i64) -> String {
+        let q = quand_dit(unix + (self.local - self.unix), self).replace(" h ", "\u{a0}h\u{a0}");
+        match q.strip_suffix(" h") {
+            Some(debut) => format!("{debut}\u{a0}h"),
+            None => q,
+        }
     }
 
     /// L'âge d'une lecture faite à `lu_a` (« 2026-10-26T13:45:00-04:00 », « …Z », ou l'heure du poste sans fuseau), en
@@ -1031,6 +1061,476 @@ fn liste_de_la_meteo(b: &Bulletin, ville: &str, m: &Maintenant) -> Option<Liste>
     Some(l)
 }
 
+// ---- En ligne : les services, les erreurs de Render, Stripe -------------------------------------------------------
+
+/// Un relevé des services de plus de 15 minutes (ils se relisent toutes les cinq) et des montants de Stripe de plus de
+/// 25 minutes (toutes les dix) disent qu'une lecture a été manquée.
+const SERVICES_PERIMES: i64 = 15 * 60;
+const STRIPE_PERIMES: i64 = 25 * 60;
+/// Les composants touchés qu'une rangée nomme ; au-delà, « et 2 autres ».
+const COMPOSANTS: usize = 3;
+/// Un paiement échoué depuis un jour fait monter sa carte.
+const ECHEC_RECENT: i64 = 24 * 3600;
+
+/// Les cartes en ligne, chacune avec son rang : l'état des services et les erreurs de Render (le dernier relevé des
+/// services), les montants et les paiements de Stripe. Rien de ce qui n'a pas de relevé : pas de clé, pas encore lu.
+fn listes_en_ligne(
+    releve: Option<&Releve>,
+    stripe: Option<&Result<Montants, String>>,
+    m: &Maintenant,
+) -> Vec<(u8, Liste)> {
+    let mut listes = Vec::new();
+    if let Some(r) = releve {
+        listes.extend(liste_des_services(r, m));
+        listes.extend(liste_des_erreurs(&r.render, r.lu_a, m));
+    }
+    if let Some(s) = stripe {
+        listes.extend(listes_de_stripe(s, m));
+    }
+    listes
+}
+
+/// Un niveau de service, dit ; ses mots courts, ceux d'une pilule (« Tout fonctionne », « Perturbation »).
+fn niveau_dit(n: Niveau) -> &'static str {
+    match n {
+        Niveau::Operationnel => "Opérationnel",
+        Niveau::Maintenance => "Maintenance en cours",
+        Niveau::Mineur => "Perturbation mineure",
+        Niveau::Majeur => "Panne partielle",
+        Niveau::Critique => "Panne majeure",
+    }
+}
+
+fn niveau_court(n: Niveau) -> &'static str {
+    match n {
+        Niveau::Operationnel => "Tout fonctionne",
+        Niveau::Maintenance => "Maintenance",
+        Niveau::Mineur => "Perturbation",
+        autre => niveau_dit(autre),
+    }
+}
+
+/// La teinte d'un niveau : le vert de ce qui va, le bleu d'une maintenance, puis l'ambre, l'orange et le rouge.
+fn teinte_du_niveau(n: Niveau) -> erp::Teinte {
+    match n {
+        Niveau::Operationnel => erp::VERT,
+        Niveau::Maintenance => erp::BLEU,
+        Niveau::Mineur => erp::AMBRE,
+        Niveau::Majeur => erp::ORANGE,
+        Niveau::Critique => erp::ROUGE,
+    }
+}
+
+/// Le mot de tête d'un niveau, lisible sur le blanc ; une panne majeure, le rouge foncé de ce qui presse.
+fn couleur_du_niveau(n: Niveau) -> Color32 {
+    if n == Niveau::Critique { erp::DANGER_ENCRE } else { tete(teinte_du_niveau(n)) }
+}
+
+/// Où en est un incident, d'après le mot de sa page : « en cours d'analyse », « cause identifiée », « sous
+/// surveillance » ; une maintenance : « prévue », « en cours », « en vérification ». Un mot inconnu passe tel quel.
+fn statut_d_incident(statut: &str) -> String {
+    let dit = match statut.trim().to_lowercase().as_str() {
+        "investigating" => "en cours d'analyse",
+        "identified" => "cause identifiée",
+        "monitoring" => "sous surveillance",
+        "resolved" | "postmortem" => "résolu",
+        "scheduled" => "prévue",
+        "in_progress" | "in progress" => "en cours",
+        "verifying" => "en vérification",
+        "completed" => "terminée",
+        _ => return statut.trim().replace('_', " "),
+    };
+    dit.to_string()
+}
+
+/// Les composants touchés, chacun nommé une fois : « Actions et Pages ». Ceux d'une même sorte dans plusieurs groupes
+/// d'une page (ses régions : « Web Services (Oregon) », « Web Services (Ohio) ») se disent ensemble — « Web Services
+/// (Oregon et Ohio) ».
+fn composants_dits(composants: &[(String, Niveau)]) -> String {
+    let mut sortes: Vec<(&str, Vec<&str>)> = Vec::new();
+    for nom in composants.iter().map(|(nom, _)| nom.trim()).filter(|nom| !nom.is_empty()) {
+        let (sorte, groupe) = match nom.strip_suffix(')').and_then(|n| n.rsplit_once(" (")) {
+            Some((sorte, groupe)) => (sorte.trim(), Some(groupe.trim())),
+            None => (nom, None),
+        };
+        match sortes.iter_mut().find(|(s, _)| *s == sorte) {
+            Some((_, groupes)) => {
+                if let Some(g) = groupe
+                    && !groupes.contains(&g)
+                {
+                    groupes.push(g);
+                }
+            }
+            None => sortes.push((sorte, groupe.into_iter().collect())),
+        }
+    }
+    let noms: Vec<String> = sortes
+        .into_iter()
+        .map(|(sorte, groupes)| {
+            let groupes: Vec<String> = groupes.into_iter().map(str::to_string).collect();
+            if groupes.is_empty() { sorte.to_string() } else { format!("{sorte} ({})", liste_coupee(&groupes)) }
+        })
+        .collect();
+    liste_coupee(&noms)
+}
+
+/// Une liste dite, trois au plus : « a », « a et b », « a, b et c », « a, b, c et 2 autres ».
+fn liste_coupee(noms: &[String]) -> String {
+    if noms.len() <= COMPOSANTS {
+        return centre::en_liste(noms);
+    }
+    let reste = noms.len() - COMPOSANTS;
+    format!("{} et {reste} {}", noms[..COMPOSANTS].join(", "), if reste == 1 { "autre" } else { "autres" })
+}
+
+/// Depuis quand dure ce qui a commencé à cet instant Unix : « depuis 9 h 12 », « depuis hier à 22 h 10 », « depuis le
+/// 24 oct. à 9 h ».
+fn depuis_dit(unix: i64, m: &Maintenant) -> String {
+    let q = m.quand(unix);
+    format!("depuis\u{a0}{}", q.strip_prefix("à ").unwrap_or(&q))
+}
+
+/// Le pied d'une carte en ligne : quand elle a été lue (« Mis à jour à 9 h 40 »), après ce qu'elle compte (`quoi`) ;
+/// lue il y a plus de `perimes` secondes, qu'une lecture a été manquée.
+fn pied_en_ligne(quoi: &str, lu_a: i64, perimes: i64, m: &Maintenant) -> String {
+    let q = m.quand(lu_a);
+    let lue = if m.unix - lu_a > perimes {
+        format!("lecture manquée · mis à jour {q}")
+    } else {
+        format!("mis à jour {q}")
+    };
+    if quoi.is_empty() { capitale(&lue) } else { format!("{quoi} · {lue}") }
+}
+
+/// Les services en ligne (Claude, GitHub, Render : leurs pages d'état), un par rangée, dans l'ordre de leurs pages :
+/// son nom en mot de tête, de la couleur de son niveau ; « Opérationnel », son incident en cours (son nom tel que la
+/// page l'écrit, d'ordinaire en anglais) ou ce qui ne va pas ; en détail, la gravité, où en est l'incident, depuis
+/// quand, les composants touchés ; une page qui ne se lit plus le dit. Un clic sur une rangée ouvre la page d'état.
+/// Dans la pilule, « Tout fonctionne » en vert, sinon les incidents (ou la maintenance), de la teinte du pire. En haut
+/// de la page pour un incident, plus bas pendant une maintenance, sous l'entreprise quand tout va. Rien sans page.
+fn liste_des_services(r: &Releve, m: &Maintenant) -> Option<(u8, Liste)> {
+    if r.statuts.is_empty() {
+        return None;
+    }
+    let lus: Vec<&Etat> = r.statuts.iter().filter_map(|s| s.etat.as_ref().ok()).collect();
+    let pire = lus
+        .iter()
+        .flat_map(|e| e.incidents.iter().map(|i| i.impact).chain([e.niveau]))
+        .max()
+        .unwrap_or(Niveau::Operationnel);
+    let incidents = lus.iter().flat_map(|e| &e.incidents).filter(|i| i.impact != Niveau::Maintenance).count();
+    let manquees = r.statuts.len() - lus.len();
+    let (pilule, teinte) = if pire >= Niveau::Mineur && incidents > 0 {
+        (compte(incidents as f64, "incident", "incidents"), teinte_du_niveau(pire))
+    } else if pire > Niveau::Operationnel {
+        (niveau_court(pire).to_string(), teinte_du_niveau(pire))
+    } else if incidents > 0 {
+        // Un incident sans gravité dite (la page enquête encore) : pour information, en bleu.
+        (compte(incidents as f64, "incident", "incidents"), erp::BLEU)
+    } else if manquees > 0 {
+        ("Lecture manquée".to_string(), erp::GRIS)
+    } else {
+        (niveau_court(Niveau::Operationnel).to_string(), erp::VERT)
+    };
+    let mut l = Liste::nouvelle("Services en ligne", pictos::SERVICES, teinte).pilule(pilule, teinte);
+    for s in &r.statuts {
+        let mut rangee = match &s.etat {
+            Ok(e) => rangee_d_un_service(&s.nom, e, m),
+            Err(raison) => {
+                Rangee::nouvelle(&s.nom, erp::TEXTE_2, "Lecture manquée").detail(&[commande_d_un_tenant(raison.trim())])
+            }
+        };
+        rangee.lien = s.page.starts_with("https://").then(|| s.page.clone());
+        l.rangees.push(rangee);
+    }
+    l.pied = pied_en_ligne("", r.lu_a, SERVICES_PERIMES, m);
+    let rang = if pire >= Niveau::Mineur {
+        rang::EN_LIGNE_QUI_PRESSE
+    } else if pire == Niveau::Maintenance || incidents > 0 {
+        rang::EN_LIGNE_A_SURVEILLER
+    } else {
+        rang::EN_LIGNE
+    };
+    Some((rang, l))
+}
+
+/// La rangée d'un service lu : son nom de la couleur du pire (son niveau, l'impact de ses incidents) ; son incident le
+/// plus grave (sa page les range ainsi), sa gravité, où il en est, depuis quand, les composants touchés et les autres
+/// incidents ; sans incident, ce qui ne va pas, ou « Opérationnel ».
+fn rangee_d_un_service(nom: &str, e: &Etat, m: &Maintenant) -> Rangee {
+    let pire = e.incidents.iter().map(|i| i.impact).fold(e.niveau, Niveau::max);
+    let couleur = couleur_du_niveau(pire);
+    let touches = composants_dits(&e.composants);
+    let Some(i) = e.incidents.first() else {
+        if pire == Niveau::Operationnel {
+            return Rangee::nouvelle(nom, couleur, niveau_dit(pire));
+        }
+        return Rangee::nouvelle(nom, couleur, niveau_dit(pire)).detail(&[touches]);
+    };
+    let titre = if i.nom.trim().is_empty() { niveau_dit(pire) } else { i.nom.trim() };
+    let gravite = match i.impact {
+        Niveau::Operationnel => "",
+        Niveau::Maintenance => niveau_court(Niveau::Maintenance),
+        autre => niveau_dit(autre),
+    };
+    let depuis = if i.depuis > 0 { depuis_dit(i.depuis, m) } else { String::new() };
+    let autres = match e.incidents.len() - 1 {
+        0 => String::new(),
+        n => format!("{} en cours", compte(n as f64, "autre incident", "autres incidents")),
+    };
+    let detail = [gravite.to_string(), statut_d_incident(&i.statut), depuis, touches, autres];
+    Rangee::nouvelle(nom, couleur, titre).detail(&detail)
+}
+
+/// Un compte : « 1 erreur », « 14 erreurs », « 100+ erreurs » (`plus` : davantage que la lecture n'en a compté).
+fn compte_lu(n: usize, plus: bool, un: &str, plusieurs: &str) -> String {
+    let (nombre, plus) = (centre::milliers(n as f64), if plus { "+" } else { "" });
+    format!("{nombre}{plus}\u{a0}{}", if n >= 2 { plusieurs } else { un })
+}
+
+/// Les erreurs des journaux de Render sur 24 heures (leurs lignes au niveau « error »), une rangée par service web puis
+/// par base, dans l'ordre de Render : son nom en mot de tête — rouge s'il en a eu dans la dernière heure, ambre dans la
+/// journée, vert sans erreur —, sa sorte, leur nombre à droite ; en détail, celles de la dernière heure, l'heure de la
+/// plus récente et, à part, les réponses HTTP 5xx d'un service web que Render n'a pas mises au niveau « error » (elles
+/// colorent aussi son nom) ; puis la ligne de la plus récente erreur (sinon de la plus récente réponse 5xx), à chasse
+/// fixe. Dans la pilule, toutes les erreurs (sans erreur, les réponses 5xx), rouges si la dernière heure en a, ambres
+/// sinon ; « Aucune » en vert. En haut de la page pour la dernière heure. Une lecture de Render manquée le dit, avec sa
+/// raison ; rien sans service ni base sur Render.
+fn liste_des_erreurs(render: &Result<Vec<Erreurs>, String>, lu_a: i64, m: &Maintenant) -> Option<(u8, Liste)> {
+    let titre = "Erreurs de Render";
+    let ressources = match render {
+        Ok(r) if r.is_empty() => return None,
+        Ok(r) => r,
+        Err(raison) => return Some((rang::EN_LIGNE_A_SURVEILLER, lecture_manquee(titre, pictos::ERREURS, raison))),
+    };
+    let total: usize = ressources.iter().map(|e| e.nombre).sum();
+    let reponses: usize = ressources.iter().map(|e| e.reponses_5xx.nombre).sum();
+    let recentes: usize = ressources.iter().map(|e| e.derniere_heure + e.reponses_5xx.derniere_heure).sum();
+    let (teinte, rang) = match (recentes, total + reponses) {
+        (1.., _) => (erp::ROUGE, rang::EN_LIGNE_QUI_PRESSE),
+        (0, 1..) => (erp::AMBRE, rang::EN_LIGNE_A_SURVEILLER),
+        _ => (erp::VERT, rang::EN_LIGNE),
+    };
+    let pilule = match (total, reponses) {
+        (0, 0) => "Aucune".to_string(),
+        (0, r) => compte_lu(r, ressources.iter().any(|e| e.reponses_5xx.plus), "réponse 5xx", "réponses 5xx"),
+        (n, _) => compte_lu(n, ressources.iter().any(|e| e.plus), "erreur", "erreurs"),
+    };
+    let mut l = Liste::nouvelle(titre, pictos::ERREURS, teinte).pilule(pilule, teinte);
+    for e in ressources {
+        let r5 = &e.reponses_5xx;
+        let couleur = match (e.derniere_heure + r5.derniere_heure, e.nombre + r5.nombre) {
+            (1.., _) => erp::DANGER_ENCRE,
+            (0, 1..) => tete(erp::AMBRE),
+            _ => tete(erp::VERT),
+        };
+        let sorte = match e.sorte {
+            Sorte::Web => "Service web",
+            Sorte::Base => "Base de données",
+            Sorte::Autre => "Service",
+        };
+        let nombre = format!("{}{}", centre::milliers(e.nombre as f64), if e.plus { "+" } else { "" });
+        let recentes = match e.derniere_heure {
+            0 => String::new(),
+            n => format!("{} dans la dernière heure", centre::milliers(n as f64)),
+        };
+        let derniere = e.derniere.as_ref().map_or(String::new(), |d| format!("la dernière {}", m.quand(d.quand)));
+        let reponses = match (r5.nombre, r5.derniere_heure) {
+            (0, _) => String::new(),
+            (n, 0) => compte_lu(n, r5.plus, "réponse HTTP 5xx", "réponses HTTP 5xx"),
+            (n, h) => format!(
+                "{}, dont {h} dans la dernière heure",
+                compte_lu(n, r5.plus, "réponse HTTP 5xx", "réponses HTTP 5xx")
+            ),
+        };
+        let mut r =
+            Rangee::nouvelle(e.nom.trim(), couleur, sorte).a_droite(nombre).detail(&[recentes, derniere, reponses]);
+        let ligne = e.derniere.as_ref().or(r5.derniere.as_ref());
+        r.extrait = ligne.map_or(String::new(), |d| d.message.trim().to_string());
+        l.rangees.push(r);
+    }
+    l.pied = pied_en_ligne("Les dernières 24 heures", lu_a, SERVICES_PERIMES, m);
+    Some((rang, l))
+}
+
+/// Une carte en ligne dont la lecture a été manquée, sans rien d'avant à montrer : sa raison, et qu'Eve réessaiera.
+fn lecture_manquee(titre: &str, icone: char, raison: &str) -> Liste {
+    let mut l = Liste::nouvelle(titre, icone, erp::AMBRE).pilule("Lecture manquée", erp::AMBRE);
+    l.rangees.push(Rangee::nouvelle("", erp::TEXTE, &commande_d_un_tenant(&phrase(raison))));
+    l.pied = "Eve réessaiera d'elle-même".to_string();
+    l
+}
+
+/// Une raison qui donne une commande (« reposer la clé : eve --cle render ») : la commande d'un seul tenant, qu'un bout
+/// de ligne ne coupe pas — l'espace devant une option et celle qui la suit deviennent insécables, comme celles qui
+/// collent des guillemets à ce qu'ils entourent.
+fn commande_d_un_tenant(texte: &str) -> String {
+    let mots: Vec<&str> = texte.split(' ').collect();
+    let mut lie = String::with_capacity(texte.len());
+    for (k, mot) in mots.iter().enumerate() {
+        if k > 0 {
+            let avant = mots[k - 1];
+            let insecable = mot.starts_with("--") || avant.starts_with("--") || avant == "«" || mot.starts_with('»');
+            lie.push(if insecable { '\u{a0}' } else { ' ' });
+        }
+        lie.push_str(mot);
+    }
+    lie
+}
+
+/// Les cartes de Stripe : ses montants ([`liste_de_stripe`]) puis ses derniers paiements ([`liste_des_paiements`]) ;
+/// une lecture manquée (sans montants d'une heure au plus), sa raison, à la place des montants. Un compte qui n'a rien
+/// à montrer n'a pas de carte.
+fn listes_de_stripe(lecture: &Result<Montants, String>, m: &Maintenant) -> Vec<(u8, Liste)> {
+    match lecture {
+        Err(raison) => vec![(rang::STRIPE, lecture_manquee("Stripe", pictos::PAIEMENTS, raison))],
+        Ok(s) if !a_des_montants(s) => Vec::new(),
+        Ok(s) => {
+            let mut listes = vec![(rang::STRIPE, liste_de_stripe(s, m))];
+            listes.extend(liste_des_paiements(&s.paiements, &s.devise, m));
+            listes
+        }
+    }
+}
+
+/// Le compte Stripe a-t-il quelque chose à montrer : un paiement, un solde, un abonnement actif, un virement, une
+/// facture ouverte ?
+fn a_des_montants(s: &Montants) -> bool {
+    s.ce_mois.nombre + s.aujourdhui.nombre > 0
+        || !s.paiements.is_empty()
+        || s.disponible.abs() >= 0.5
+        || s.en_attente.abs() >= 0.5
+        || s.abonnements.as_ref().is_some_and(|a| a.actifs > 0)
+        || s.virement.is_some()
+        || s.ouvertes.as_ref().is_some_and(|o| o.nombre > 0)
+}
+
+/// Un montant de Stripe, dans la devise du compte : « 8 921 $ » (le dollar canadien, comme le reste du tableau),
+/// « 120 $ US », « 75 € », sinon son code (« 300 CHF ») ; arrondi au dollar comme les autres cartes, sauf avec `cents`
+/// (un paiement : « 49,99 $ », mais « 50 $ » quand il est rond).
+fn montant_stripe(v: f64, devise: &str, cents: bool) -> String {
+    let symbole = match devise.trim().to_uppercase().as_str() {
+        "" | "CAD" => "$".to_string(),
+        "USD" => "$\u{a0}US".to_string(),
+        "EUR" => "€".to_string(),
+        "GBP" => "£".to_string(),
+        autre => autre.to_string(),
+    };
+    let centimes = (v * 100.0).round() as i64;
+    let nombre = if cents && centimes % 100 != 0 {
+        let signe = if centimes < 0 { "-" } else { "" };
+        format!("{signe}{},{:02}", centre::milliers((centimes.abs() / 100) as f64), centimes.abs() % 100)
+    } else {
+        centre::milliers(v)
+    };
+    format!("{nombre}\u{a0}{symbole}")
+}
+
+/// Combien de paiements une somme de Stripe compte : « 3 paiements », « aucun paiement », « au moins 100 paiements »
+/// (une lecture arrêtée avant la fin).
+fn paiements_dits(nombre: usize, plus: bool) -> String {
+    match (nombre, plus) {
+        (0, false) => "aucun paiement".to_string(),
+        (n, false) => compte(n as f64, "paiement", "paiements"),
+        (n, true) => format!("au moins {}", compte(n as f64, "paiement", "paiements")),
+    }
+}
+
+/// Un jour (« 2026-10-29 ») tel qu'on le dit : « aujourd'hui », « demain », « hier », sinon « le jeu. 29 oct. ».
+fn jour_dit(date: &str, m: &Maintenant) -> String {
+    match centre::jours_entre(&m.aujourdhui(), date) {
+        Some(0) => "aujourd'hui".to_string(),
+        Some(1) => "demain".to_string(),
+        Some(-1) => "hier".to_string(),
+        _ => format!("le {}", centre::jour_court(date)),
+    }
+}
+
+/// Les montants de Stripe : ce qui est entré aujourd'hui et ce mois-ci (les paiements réussis, remboursements ôtés,
+/// avant les frais de Stripe), les abonnements actifs et ce qu'ils rapportent par mois, le solde (disponible, et en
+/// attente), le prochain virement (sinon le dernier fait), les factures ouvertes et leur dû (en ambre quand elles ont
+/// passé leur échéance) ; ce mois-ci dans la pilule ; au pied, quand ils ont été lus. La carte reste à son rang : ce
+/// qui doit la faire monter est neuf (un paiement échoué), pas de vieilles factures. Ce qu'une lecture n'a pas pu lire
+/// manque.
+fn liste_de_stripe(s: &Montants, m: &Maintenant) -> Liste {
+    let argent = |v: f64| montant_stripe(v, &s.devise, false);
+    let encre = tete(erp::INDIGO);
+    let ce_mois = format!("{} ce mois-ci", argent(s.ce_mois.montant));
+    let mut l = Liste::nouvelle("Stripe", pictos::PAIEMENTS, erp::INDIGO).pilule(ce_mois, erp::INDIGO);
+    for (mot, somme) in [("Aujourd'hui", &s.aujourdhui), ("Ce mois-ci", &s.ce_mois)] {
+        let texte = paiements_dits(somme.nombre, somme.plus);
+        l.rangees.push(Rangee::nouvelle(mot, encre, &texte).a_droite(argent(somme.montant)));
+    }
+    if let Some(a) = &s.abonnements {
+        let texte = compte(a.actifs as f64, "actif", "actifs");
+        l.rangees.push(Rangee::nouvelle("Abonnements", encre, &texte).a_droite(format!("{}/mois", argent(a.mensuel))));
+    }
+    let attente =
+        if s.en_attente.abs() >= 0.5 { format!("{} en attente", argent(s.en_attente)) } else { String::new() };
+    l.rangees.push(Rangee::nouvelle("Solde", encre, "disponible").a_droite(argent(s.disponible)).detail(&[attente]));
+    if let Some(v) = &s.virement {
+        let texte = format!("{} {}", if v.fait { "arrivé" } else { "arrive" }, jour_dit(&v.arrivee, m));
+        l.rangees.push(Rangee::nouvelle("Virement", encre, &texte).a_droite(argent(v.montant)));
+    }
+    if let Some(o) = &s.ouvertes {
+        let ouvertes = compte(o.nombre as f64, "ouverte", "ouvertes");
+        let ouvertes = if o.plus { format!("au moins {ouvertes}") } else { ouvertes };
+        let texte = match (o.nombre, o.echues) {
+            (0, _) => "aucune à payer".to_string(),
+            (_, 0) => ouvertes,
+            (1, _) => format!("{ouvertes}, échue"),
+            (n, e) if e >= n => format!("{ouvertes}, toutes échues"),
+            (_, e) => format!("{ouvertes}, dont {}", compte(e as f64, "échue", "échues")),
+        };
+        // Des factures échues, en ambre : souvent de vieilles factures que Stripe ne relance plus (celles dont le
+        // paiement d'office a échoué en sont) ; elles se lisent sans alarmer, et ne font pas monter la carte.
+        let couleur = if o.echues > 0 { tete(erp::AMBRE) } else { encre };
+        let mut r = Rangee::nouvelle("Factures", couleur, &texte);
+        if o.nombre > 0 {
+            r = r.a_droite(argent(o.du));
+        }
+        l.rangees.push(r);
+    }
+    l.pied = pied_en_ligne("Avant les frais de Stripe", s.lu_a, STRIPE_PERIMES, m);
+    l
+}
+
+/// Les derniers paiements de Stripe, le plus récent d'abord : leur issue en mot de tête (réussi en vert, échoué en
+/// rouge, remboursé en gris, en attente en ambre), qui a payé, le montant à droite (avec ses cents), quand en détail.
+/// Dans la pilule, les échecs en rouge, sinon « Tous réussis » en vert. Un échec depuis un jour fait monter la carte en
+/// haut de la page, rouge. Rien sans paiement.
+fn liste_des_paiements(paiements: &[Paiement], devise: &str, m: &Maintenant) -> Option<(u8, Liste)> {
+    if paiements.is_empty() {
+        return None;
+    }
+    let echecs = paiements.iter().filter(|p| p.issue == Issue::Echoue).count();
+    let recent = paiements.iter().any(|p| p.issue == Issue::Echoue && m.unix - p.quand <= ECHEC_RECENT);
+    let (pilule, teinte) = if echecs > 0 {
+        (compte(echecs as f64, "échoué", "échoués"), erp::ROUGE)
+    } else if paiements.iter().all(|p| p.issue == Issue::Reussi) {
+        ("Tous réussis".to_string(), erp::VERT)
+    } else {
+        (compte(paiements.len() as f64, "paiement", "paiements"), erp::INDIGO)
+    };
+    let carte = if recent { erp::ROUGE } else { erp::INDIGO };
+    let mut l = Liste::nouvelle("Paiements Stripe", pictos::PAIEMENTS, carte).pilule(pilule, teinte);
+    for p in paiements.iter().take(RANGEES) {
+        let (mot, couleur) = match p.issue {
+            Issue::Reussi => ("Réussi", tete(erp::VERT)),
+            Issue::Echoue => ("Échoué", erp::DANGER_ENCRE),
+            Issue::Rembourse => ("Remboursé", erp::TEXTE_2),
+            Issue::EnAttente => ("En attente", tete(erp::AMBRE)),
+        };
+        let qui = Some(p.qui.trim()).filter(|q| !q.is_empty()).unwrap_or("Client");
+        let quand = m.quand(p.quand);
+        let quand = if quand.starts_with("à ") { format!("aujourd'hui {quand}") } else { quand };
+        let montant = montant_stripe(p.montant, devise, true);
+        l.rangees.push(Rangee::nouvelle(mot, couleur, qui).a_droite(montant).detail(&[quand]));
+    }
+    let rang = if recent { rang::EN_LIGNE_QUI_PRESSE } else { rang::STRIPE };
+    Some((rang, l))
+}
+
 // ---- La page ------------------------------------------------------------------------------------------------------
 
 /// Une carte de la maçonnerie : une liste, ou une carte d'un état de l'entreprise (l'invitation à se relier, la
@@ -1152,6 +1652,12 @@ impl Fenetre {
                 }
             }
         }
+        // En ligne (les services, les erreurs de Render, Stripe) : avec l'entreprise, ou avec la maison seule quand
+        // Constructo AI n'est pas permis ; jamais pâlies, elles ne viennent pas de l'ERP.
+        if entreprise || liaison == Liaison::Absente {
+            let en_ligne = listes_en_ligne(self.releve.as_ref(), self.montants.as_ref(), &m);
+            cartes.extend(en_ligne.into_iter().map(|(r, l)| (r, false, Carte::Liste(l))));
+        }
         cartes.sort_by_key(|(r, _, _)| *r);
         let colonnes = theme::colonnes_pour(ui.available_width());
         theme::maconnerie(ui, colonnes, cartes.len(), |ui, k| {
@@ -1160,8 +1666,11 @@ impl Fenetre {
                 ui.multiply_opacity(0.55);
             }
             match carte {
+                // Une rangée qui ouvre une page (un service et sa page d'état) : le chef l'ouvre, `https://` seulement.
                 Carte::Liste(l) => {
-                    theme::carte_liste(ui, l);
+                    if let Some(page) = theme::carte_liste(ui, l) {
+                        self.geste("ouvrir_lien", Value::String(page));
+                    }
                 }
                 Carte::Invitation => self.invitation(ui, liaison),
                 Carte::PremiereLecture => premiere_lecture(ui),
@@ -1289,10 +1798,14 @@ fn de_quand(q: &str) -> String {
 
 /// Une raison en phrase : la première lettre en capitale, un point au bout s'il n'a pas sa ponctuation.
 fn phrase(t: &str) -> String {
-    let t = t.trim();
-    let mut c = t.chars();
-    let p = c.next().map_or_else(String::new, |p| p.to_uppercase().collect::<String>() + c.as_str());
+    let p = capitale(t);
     if p.is_empty() || p.ends_with(['.', '!', '?', '…']) { p } else { format!("{p}.") }
+}
+
+/// Un texte qui commence par une capitale : « mis à jour à 9 h » → « Mis à jour à 9 h ».
+fn capitale(t: &str) -> String {
+    let mut c = t.trim().chars();
+    c.next().map_or_else(String::new, |p| p.to_uppercase().collect::<String>() + c.as_str())
 }
 
 /// Le choix de la vue, en segments sur une piste blanche en pilule : chacun son icône et son nom ; celui qui est choisi
@@ -1705,5 +2218,282 @@ mod essais {
         assert_eq!(heures_dites(45.0), "45\u{a0}h");
         assert_eq!(heures_dites(1_204.5), "1\u{202f}204,5\u{a0}h", "les milliers");
         assert_eq!(heures_dites(0.0), "0\u{a0}h");
+    }
+
+    use crate::services::{Incident, Ligne, Reponses5xx, Statut};
+    use crate::stripe::{Abonnements, Ouvertes, Somme, Virement};
+
+    /// Un service et sa page d'état (inventée).
+    fn service(nom: &str, etat: Result<Etat, String>) -> Statut {
+        Statut { nom: nom.into(), page: format!("https://status.{}.exemple", nom.to_lowercase()), etat }
+    }
+
+    fn va() -> Result<Etat, String> {
+        Ok(Etat { niveau: Niveau::Operationnel, incidents: Vec::new(), composants: Vec::new() })
+    }
+
+    /// Un service à ce niveau, son incident de cet impact commencé il y a 38 minutes, et ces composants touchés.
+    fn en_incident(m: &Maintenant, niveau: Niveau, impact: Niveau, composants: &[&str]) -> Result<Etat, String> {
+        let incident = Incident {
+            nom: " Elevated errors ".into(),
+            impact,
+            statut: "identified".into(),
+            depuis: m.unix - 38 * 60,
+            lien: String::new(),
+        };
+        let composants = composants.iter().map(|c| (c.to_string(), impact)).collect();
+        Ok(Etat { niveau, incidents: vec![incident], composants })
+    }
+
+    #[test]
+    fn les_services_en_ligne() {
+        let m = maintenant();
+        let releve = |lu: i64, statuts: Vec<Statut>| Releve { lu_a: m.unix - lu, statuts, render: Ok(Vec::new()) };
+        let carte = |r: &Releve| liste_des_services(r, &m).unwrap();
+        assert!(liste_des_services(&releve(0, Vec::new()), &m).is_none(), "sans page : pas de carte");
+        // Tout va : sous l'entreprise, la pilule verte ; chaque rangée ouvre sa page d'état.
+        let (r, l) = carte(&releve(120, vec![service("Claude", va()), service("GitHub", va())]));
+        assert_eq!(r, rang::EN_LIGNE);
+        assert_eq!(l.pilule, Some(("Tout fonctionne".to_string(), erp::VERT)));
+        assert_eq!(
+            l.rangees[0].bouts,
+            [theme::Bout::tete("Claude", tete(erp::VERT)), theme::Bout::texte(" Opérationnel")]
+        );
+        assert_eq!(l.rangees[1].lien.as_deref(), Some("https://status.github.exemple"));
+        assert_eq!(l.pied, "Mis à jour à 15\u{a0}h\u{a0}08", "l'heure d'un seul tenant");
+        // Un incident : en haut de la page ; sa gravité, où il en est, depuis quand, ses composants (une fois chacun).
+        let incident = en_incident(&m, Niveau::Majeur, Niveau::Majeur, &["API", "API", "Console"]);
+        let (r, l) = carte(&releve(120, vec![service("Claude", incident), service("GitHub", va())]));
+        assert_eq!(r, rang::EN_LIGNE_QUI_PRESSE);
+        assert_eq!(l.pilule, Some(("1\u{a0}incident".to_string(), erp::ORANGE)));
+        assert_eq!(l.teinte, erp::ORANGE);
+        assert_eq!(l.rangees[0].bouts[0], theme::Bout::tete("Claude", tete(erp::ORANGE)));
+        assert_eq!(l.rangees[0].bouts[1].texte, " Elevated errors", "le nom de l'incident, ébarbé");
+        let detail = "Panne partielle · cause identifiée · depuis\u{a0}14\u{a0}h\u{a0}32 · API et Console";
+        assert_eq!(l.rangees[0].detail, detail);
+        // Une panne majeure : le rouge foncé de ce qui presse.
+        let critique = en_incident(&m, Niveau::Critique, Niveau::Critique, &[]);
+        let (_, l) = carte(&releve(120, vec![service("Render", critique)]));
+        assert_eq!(l.rangees[0].bouts[0].couleur, Some(erp::DANGER_ENCRE));
+        assert_eq!(l.pilule.map(|p| p.1), Some(erp::ROUGE));
+        // Une maintenance : plus bas, en bleu ; un service qui va mal sans incident le dit.
+        let maintenance = en_incident(&m, Niveau::Maintenance, Niveau::Maintenance, &["Postgres"]);
+        let (r, l) = carte(&releve(120, vec![service("Render", maintenance)]));
+        assert_eq!((r, l.pilule), (rang::EN_LIGNE_A_SURVEILLER, Some(("Maintenance".to_string(), erp::BLEU))));
+        assert_eq!(l.rangees[0].detail, "Maintenance · cause identifiée · depuis\u{a0}14\u{a0}h\u{a0}32 · Postgres");
+        let ralenti = Ok(Etat {
+            niveau: Niveau::Mineur,
+            incidents: Vec::new(),
+            composants: (1..=5).map(|k| (format!("C{k}"), Niveau::Mineur)).collect(),
+        });
+        let (r, l) = carte(&releve(120, vec![service("GitHub", ralenti)]));
+        assert_eq!((r, l.pilule), (rang::EN_LIGNE_QUI_PRESSE, Some(("Perturbation".to_string(), erp::AMBRE))));
+        assert_eq!(l.rangees[0].bouts[1].texte, " Perturbation mineure");
+        assert_eq!(l.rangees[0].detail, "C1, C2, C3 et 2 autres");
+        let quatre: Vec<String> = (1..=4).map(|k| format!("C{k}")).collect();
+        assert_eq!(liste_coupee(&quatre), "C1, C2, C3 et 1 autre");
+        // Les composants d'une même sorte dans plusieurs groupes (les régions d'une page) se disent ensemble.
+        let regions = ["Web Services (Oregon)", "Web Services (Ohio)", "Cron Jobs (Oregon)", "Web Services (Ohio)"];
+        let composants: Vec<(String, Niveau)> = regions.iter().map(|c| (c.to_string(), Niveau::Majeur)).collect();
+        assert_eq!(composants_dits(&composants), "Web Services (Oregon et Ohio) et Cron Jobs (Oregon)");
+        let cinq: Vec<(String, Niveau)> =
+            (1..=5).map(|k| (format!("Web Services (Région {k})"), Niveau::Majeur)).collect();
+        assert_eq!(composants_dits(&cinq), "Web Services (Région 1, Région 2, Région 3 et 2 autres)");
+        // Une page qui ne se lit plus : sa rangée le dit, grise ; un relevé de plus de 15 minutes, au pied.
+        let (r, l) = carte(&releve(20 * 60, vec![service("Claude", Err("la page ne répond pas".into()))]));
+        assert_eq!((r, l.pilule), (rang::EN_LIGNE, Some(("Lecture manquée".to_string(), erp::GRIS))));
+        assert_eq!(l.rangees[0].bouts[1].texte, " Lecture manquée");
+        assert_eq!(l.rangees[0].detail, "la page ne répond pas");
+        assert_eq!(l.pied, "Lecture manquée · mis à jour à 14\u{a0}h\u{a0}50");
+        assert_eq!(statut_d_incident("monitoring"), "sous surveillance");
+        assert_eq!(statut_d_incident("in_progress"), "en cours");
+        assert_eq!(statut_d_incident("tout_nouveau"), "tout nouveau", "un mot inconnu passe tel quel");
+    }
+
+    #[test]
+    fn les_erreurs_de_render() {
+        let m = maintenant();
+        let ressource = |nom: &str, sorte, nombre, derniere_heure, derniere: Option<Ligne>| Erreurs {
+            nom: nom.into(),
+            sorte,
+            nombre,
+            plus: false,
+            derniere_heure,
+            derniere,
+            reponses_5xx: Default::default(),
+        };
+        let ligne = |il_y_a: i64, message: &str| Some(Ligne { quand: m.unix - il_y_a, message: message.into() });
+        assert!(liste_des_erreurs(&Ok(Vec::new()), m.unix, &m).is_none(), "rien sur Render : pas de carte");
+        // Aucune erreur : sous l'entreprise, en vert.
+        let aucune = Ok(vec![
+            ressource(" app-exemple", Sorte::Web, 0, 0, None),
+            ressource("base-exemple", Sorte::Base, 0, 0, None),
+        ]);
+        let (r, l) = liste_des_erreurs(&aucune, m.unix - 60, &m).unwrap();
+        assert_eq!((r, l.pilule), (rang::EN_LIGNE, Some(("Aucune".to_string(), erp::VERT))));
+        assert_eq!(l.rangees[0].bouts[0], theme::Bout::tete("app-exemple", tete(erp::VERT)), "le nom ébarbé");
+        assert_eq!((l.rangees[1].bouts[1].texte.as_str(), l.rangees[1].droite.as_str()), (" Base de données", "0"));
+        assert_eq!(l.pied, "Les dernières 24 heures · mis à jour à 15\u{a0}h\u{a0}09");
+        // Des erreurs dans la dernière heure : en haut de la page, en rouge ; la plus récente, et sa ligne.
+        let erreurs = Ok(vec![
+            ressource("api-exemple", Sorte::Web, 14, 3, ligne(4 * 60, "  TypeError: x is undefined \n")),
+            ressource("base-exemple", Sorte::Base, 2, 0, ligne(26 * 3600, "ERROR: timeout")),
+        ]);
+        let (r, l) = liste_des_erreurs(&erreurs, m.unix - 60, &m).unwrap();
+        assert_eq!((r, l.pilule), (rang::EN_LIGNE_QUI_PRESSE, Some(("16\u{a0}erreurs".to_string(), erp::ROUGE))));
+        assert_eq!(l.rangees[0].bouts[0].couleur, Some(erp::DANGER_ENCRE));
+        assert_eq!(l.rangees[0].droite, "14");
+        assert_eq!(l.rangees[0].detail, "3 dans la dernière heure · la dernière à 15\u{a0}h\u{a0}06");
+        assert_eq!(l.rangees[0].extrait, "TypeError: x is undefined");
+        assert_eq!(l.rangees[1].bouts[0].couleur, Some(tete(erp::AMBRE)), "des erreurs dans la journée : ambre");
+        assert_eq!(l.rangees[1].detail, "la dernière hier à 13\u{a0}h\u{a0}10");
+        // Des erreurs de la journée seulement : plus bas, en ambre ; davantage que la lecture n'en a compté.
+        let mut beaucoup = ressource("api-exemple", Sorte::Web, 100, 0, ligne(5 * 3600, "Error"));
+        beaucoup.plus = true;
+        let (r, l) = liste_des_erreurs(&Ok(vec![beaucoup]), m.unix, &m).unwrap();
+        assert_eq!((r, l.pilule), (rang::EN_LIGNE_A_SURVEILLER, Some(("100+\u{a0}erreurs".to_string(), erp::AMBRE))));
+        assert_eq!(l.rangees[0].droite, "100+");
+        assert_eq!(compte_lu(1, false, "erreur", "erreurs"), "1\u{a0}erreur");
+        // Des réponses HTTP 5xx, sans erreur : elles comptent à part, dans la pilule et le détail, et leur ligne se
+        // montre ; une dans la dernière heure, et la carte monte.
+        let mut web = ressource("app-exemple", Sorte::Web, 0, 0, None);
+        web.reponses_5xx =
+            Reponses5xx { nombre: 2, plus: false, derniere_heure: 1, derniere: ligne(10 * 60, "HTTP 502 · GET /api") };
+        let (r, l) = liste_des_erreurs(&Ok(vec![web]), m.unix, &m).unwrap();
+        assert_eq!((r, l.pilule), (rang::EN_LIGNE_QUI_PRESSE, Some(("2\u{a0}réponses 5xx".to_string(), erp::ROUGE))));
+        assert_eq!(l.rangees[0].bouts[0].couleur, Some(erp::DANGER_ENCRE));
+        assert_eq!(l.rangees[0].detail, "2\u{a0}réponses HTTP 5xx, dont 1 dans la dernière heure");
+        assert_eq!(l.rangees[0].extrait, "HTTP 502 · GET /api");
+        // Une lecture de Render manquée : sa raison.
+        let (r, l) = liste_des_erreurs(&Err("la clé est refusée (HTTP 401)".into()), m.unix, &m).unwrap();
+        assert_eq!((r, l.pilule), (rang::EN_LIGNE_A_SURVEILLER, Some(("Lecture manquée".to_string(), erp::AMBRE))));
+        assert_eq!(l.rangees[0].bouts[0].texte, "La clé est refusée (HTTP 401).");
+        // Sa commande d'un seul tenant : une ligne ne la coupe pas.
+        let refus = Err("la clé de Render est refusée (HTTP 401) — reposer la clé : eve --cle render".into());
+        let l = liste_des_erreurs(&refus, m.unix, &m).unwrap().1;
+        let attendu = "La clé de Render est refusée (HTTP 401) — reposer la clé : eve\u{a0}--cle\u{a0}render.";
+        assert_eq!(l.rangees[0].bouts[0].texte, attendu);
+    }
+
+    /// Un compte Stripe inventé, lu il y a trois minutes : un paiement de 49,99 $ il y a dix minutes.
+    fn compte_stripe(m: &Maintenant) -> Montants {
+        Montants {
+            lu_a: m.unix - 180,
+            devise: "cad".into(),
+            disponible: 3_410.27,
+            en_attente: 1_256.4,
+            aujourdhui: Somme { montant: 348.0, nombre: 2, plus: false },
+            ce_mois: Somme { montant: 8_921.5, nombre: 41, plus: true },
+            abonnements: Some(Abonnements { actifs: 27, mensuel: 4_263.0 }),
+            virement: Some(Virement { montant: 2_184.6, arrivee: "2026-10-27".into(), fait: false }),
+            ouvertes: Some(Ouvertes { nombre: 3, plus: false, du: 647.0, echues: 1 }),
+            paiements: vec![Paiement {
+                montant: 49.99,
+                quand: m.unix - 600,
+                qui: "Client Exemple inc.".into(),
+                issue: Issue::Reussi,
+            }],
+        }
+    }
+
+    #[test]
+    fn les_montants_de_stripe() {
+        let m = maintenant();
+        let listes = listes_de_stripe(&Ok(compte_stripe(&m)), &m);
+        let (r, l) = &listes[0];
+        assert_eq!(*r, rang::STRIPE);
+        assert_eq!(l.pilule, Some((format!("{} ce mois-ci", dollars(8_921.5)), erp::INDIGO)));
+        let mots: Vec<&str> = l.rangees.iter().map(|r| r.bouts[0].texte.as_str()).collect();
+        assert_eq!(mots, ["Aujourd'hui", "Ce mois-ci", "Abonnements", "Solde", "Virement", "Factures"]);
+        assert_eq!(l.rangees[0].droite, dollars(348.0), "un total s'arrondit au dollar");
+        assert_eq!(l.rangees[1].bouts[1].texte, " au moins 41\u{a0}paiements", "une lecture arrêtée avant la fin");
+        assert_eq!(l.rangees[2].droite, format!("{}/mois", dollars(4_263.0)));
+        assert_eq!(l.rangees[3].detail, format!("{} en attente", dollars(1_256.4)));
+        assert_eq!(l.rangees[4].bouts[1].texte, " arrive demain");
+        assert_eq!(l.rangees[5].bouts[1].texte, " 3\u{a0}ouvertes, dont 1\u{a0}échue");
+        assert_eq!(l.rangees[5].bouts[0].couleur, Some(tete(erp::AMBRE)), "une facture échue : ambre, sans alarme");
+        // Des dizaines de vieilles factures, toutes échues : dites, la carte à son rang.
+        let mut vieilles = compte_stripe(&m);
+        vieilles.ouvertes = Some(Ouvertes { nombre: 42, plus: false, du: 12_345.0, echues: 42 });
+        let (r, l) = listes_de_stripe(&Ok(vieilles.clone()), &m).remove(0);
+        assert_eq!((r, l.rangees[5].bouts[1].texte.as_str()), (rang::STRIPE, " 42\u{a0}ouvertes, toutes échues"));
+        assert_eq!(l.rangees[5].droite, dollars(12_345.0));
+        vieilles.ouvertes = Some(Ouvertes { nombre: 1, plus: false, du: 49.0, echues: 1 });
+        let l = listes_de_stripe(&Ok(vieilles), &m).remove(0).1;
+        assert_eq!(l.rangees[5].bouts[1].texte, " 1\u{a0}ouverte, échue");
+        assert_eq!(l.pied, "Avant les frais de Stripe · mis à jour à 15\u{a0}h\u{a0}07");
+        let (r, paiements) = &listes[1];
+        assert_eq!((*r, paiements.pilule.clone()), (rang::STRIPE, Some(("Tous réussis".to_string(), erp::VERT))));
+        assert_eq!(paiements.rangees[0].droite, "49,99\u{a0}$", "un paiement garde ses cents");
+        assert_eq!(paiements.rangees[0].detail, "aujourd'hui à 15\u{a0}h");
+        // Un paiement échoué ce matin : la carte des paiements monte, rouge ; échoué il y a deux jours, elle reste.
+        let mut s = compte_stripe(&m);
+        let echoue =
+            |il_y_a: i64| Paiement { montant: 99.0, quand: m.unix - il_y_a, qui: " ".into(), issue: Issue::Echoue };
+        s.paiements.insert(0, echoue(3 * 3600));
+        let (r, paiements) = listes_de_stripe(&Ok(s.clone()), &m).remove(1);
+        assert_eq!((r, paiements.teinte), (rang::EN_LIGNE_QUI_PRESSE, erp::ROUGE));
+        assert_eq!(paiements.pilule, Some(("1\u{a0}échoué".to_string(), erp::ROUGE)));
+        assert_eq!(paiements.rangees[0].bouts[0], theme::Bout::tete("Échoué", erp::DANGER_ENCRE));
+        assert_eq!(paiements.rangees[0].bouts[1].texte, " Client", "sans nom : « Client »");
+        s.paiements[0] = echoue(2 * 86_400);
+        assert_eq!(listes_de_stripe(&Ok(s.clone()), &m)[1].0, rang::STRIPE);
+        // Des montants de plus de 25 minutes : une lecture manquée, au pied ; une lecture manquée sans montants : sa
+        // raison ; un compte sans rien : pas de carte.
+        s.lu_a = m.unix - 30 * 60;
+        let pied = listes_de_stripe(&Ok(s), &m)[0].1.pied.clone();
+        assert_eq!(pied, "Avant les frais de Stripe · lecture manquée · mis à jour à 14\u{a0}h\u{a0}40");
+        let refus = "la clé d'API est refusée (invalide, expirée ou révoquée) : la reposer par « eve --cle stripe »";
+        let manquee = listes_de_stripe(&Err(refus.into()), &m);
+        assert_eq!(manquee.len(), 1);
+        assert_eq!(manquee[0].1.pilule, Some(("Lecture manquée".to_string(), erp::AMBRE)));
+        let attendu = "La clé d'API est refusée (invalide, expirée ou révoquée) : la reposer par \
+                       «\u{a0}eve\u{a0}--cle\u{a0}stripe\u{a0}».";
+        assert_eq!(manquee[0].1.rangees[0].bouts[0].texte, attendu, "la commande et ses guillemets d'un tenant");
+        let vide = Montants {
+            disponible: 0.0,
+            en_attente: 0.0,
+            aujourdhui: Somme::default(),
+            ce_mois: Somme::default(),
+            abonnements: None,
+            virement: None,
+            ouvertes: None,
+            paiements: Vec::new(),
+            ..compte_stripe(&m)
+        };
+        assert!(listes_de_stripe(&Ok(vide), &m).is_empty());
+    }
+
+    #[test]
+    fn les_montants_dans_leur_devise() {
+        assert_eq!(montant_stripe(8_921.5, "cad", false), "8\u{202f}922\u{a0}$");
+        assert_eq!(montant_stripe(1_234.56, "CAD", true), "1\u{202f}234,56\u{a0}$");
+        assert_eq!(montant_stripe(50.0, "cad", true), "50\u{a0}$", "un montant rond, sans cents");
+        assert_eq!(montant_stripe(-49.99, "cad", true), "-49,99\u{a0}$");
+        assert_eq!(montant_stripe(120.0, "usd", false), "120\u{a0}$\u{a0}US");
+        assert_eq!(montant_stripe(75.0, "eur", false), "75\u{a0}€");
+        assert_eq!(montant_stripe(300.0, "chf", false), "300\u{a0}CHF");
+        assert_eq!(paiements_dits(0, false), "aucun paiement");
+        assert_eq!(paiements_dits(1, false), "1\u{a0}paiement");
+        let m = maintenant();
+        assert_eq!(jour_dit("2026-10-26", &m), "aujourd'hui");
+        assert_eq!(jour_dit("2026-10-25", &m), "hier");
+        assert_eq!(jour_dit("2026-10-29", &m), "le jeu. 29 oct.");
+    }
+
+    #[test]
+    fn les_cartes_en_ligne_ensemble() {
+        let m = maintenant();
+        assert!(listes_en_ligne(None, None, &m).is_empty(), "sans clé (aucun relevé) : aucune carte");
+        let releve = Releve { lu_a: m.unix, statuts: vec![service("Claude", va())], render: Ok(Vec::new()) };
+        let titres: Vec<String> = listes_en_ligne(Some(&releve), Some(&Ok(compte_stripe(&m))), &m)
+            .into_iter()
+            .map(|(_, l)| l.titre)
+            .collect();
+        assert_eq!(
+            titres,
+            ["Services en ligne", "Stripe", "Paiements Stripe"],
+            "rien sur Render : pas de carte d'erreurs"
+        );
     }
 }

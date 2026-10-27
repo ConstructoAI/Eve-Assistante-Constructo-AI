@@ -1001,7 +1001,7 @@ pub(crate) fn heure_parlee(h: &str) -> String {
 }
 
 /// Une liste dite : « a », « a et b », « a, b et c ».
-fn en_liste(elements: &[String]) -> String {
+pub(crate) fn en_liste(elements: &[String]) -> String {
     match elements {
         [] => String::new(),
         [seul] => seul.clone(),
