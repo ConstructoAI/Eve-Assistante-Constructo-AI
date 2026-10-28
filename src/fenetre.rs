@@ -61,6 +61,13 @@ pub fn montrer() {
     imp::montrer();
 }
 
+/// Les fenêtres visibles de ce programme (la fenêtre native d'Eve, ses boîtes ouvertes) : celles qu'une capture de
+/// l'écran ôte (`capture.rs`).
+#[cfg(windows)]
+pub(crate) fn fenetres_de_ce_programme() -> Vec<windows::Win32::Foundation::HWND> {
+    imp::fenetres_de_ce_programme()
+}
+
 /// Écrit une valeur texte dans le registre de la personne (`HKCU\cle`, la clé créée au besoin) : l'inscription d'Eve
 /// auprès de Windows pour ses notifications (`notifications.rs`).
 pub(crate) fn ecrire_au_registre(cle: &str, nom: &str, texte: &str) -> Result<(), String> {
@@ -344,6 +351,10 @@ mod imp {
         // SAFETY : `liste` est l'adresse du `Vec` que prête `fenetres` (voir là).
         unsafe { (*(liste.0 as *mut Vec<HWND>)).push(f) };
         TRUE
+    }
+
+    pub(super) fn fenetres_de_ce_programme() -> Vec<HWND> {
+        fenetres().into_iter().filter(|&f| visible(f) && de_ce_programme(f)).collect()
     }
 
     /// Une fenêtre de ce programme : la fenêtre native d'Eve (celle d'Edge est à msedge.exe).

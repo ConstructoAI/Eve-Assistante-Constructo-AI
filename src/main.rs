@@ -5,6 +5,7 @@
 
 mod ambiance;
 mod cadre;
+mod capture;
 mod cartes;
 mod centre;
 mod cerveau;
@@ -39,6 +40,7 @@ mod services;
 mod sons;
 mod stripe;
 mod touche;
+mod veilles;
 mod veilleur;
 mod voix;
 
@@ -64,12 +66,19 @@ fn main() {
         Some("--mettre-a-jour") => std::process::exit(mise_a_jour::mettre_a_jour(&args[1..])),
         Some("--revenir") => std::process::exit(mise_a_jour::revenir(&args[1..])),
         Some(mise_a_jour::ARGUMENT_DU_GARDIEN) => std::process::exit(mise_a_jour::surveiller(&args[1..])),
+        // La capture de l'écran sans les fenêtres d'Eve : rien ne s'écrit, pas même le journal.
+        #[cfg(windows)]
+        Some("--essai-capture") => std::process::exit(capture::essai()),
         _ => {}
     }
-    // Les profils (`--profils`, `--profil-ajouter`, `--profil`, `--profil-retirer`) et le cerveau (`--modele`,
-    // `--effort`) : sur reglages.json du dossier local, que l'Eve en marche relit — lancés par Claude au milieu d'un
-    // tour, ni le journal ni la vitrine ne s'ouvrent. Les clés d'API du tableau de bord (`--cle`) non plus.
-    if let Some(code) = profils::commande(&args).or_else(|| reglages::commande(&args)).or_else(|| cles::commande(&args))
+    // Les profils (`--profils`, `--profil-ajouter`, `--profil`, `--profil-retirer`), le cerveau (`--modele`,
+    // `--effort`) et les veilles (`--veilles`, `--veille`, `--veille-retirer`) : sur reglages.json du dossier local, que
+    // l'Eve en marche relit — lancés par Claude au milieu d'un tour, ni le journal ni la vitrine ne s'ouvrent. Les clés
+    // d'API du tableau de bord (`--cle`) non plus.
+    if let Some(code) = profils::commande(&args)
+        .or_else(|| reglages::commande(&args))
+        .or_else(|| veilles::commande(&args))
+        .or_else(|| cles::commande(&args))
     {
         std::process::exit(code);
     }
@@ -328,6 +337,12 @@ fn aide() {
          eve --effort moyen|max       l'effort seul\n\
          eve --prononcer [\"mot\" [\"ce que la voix lit\"]]  une prononciation à soi (« Granby » : « Granbi ») ;\n\
          \x20                            rien : celles de cette Eve ; le mot seul : la retire\n\
+         eve --veilles                les veilles de cette Eve : les fichiers qu'elle guette pour Claude\n\
+         eve --veille \"nom\" \"fichier\" \"consigne\"  une veille : Eve guette ce fichier, sans Claude, et le réveille\n\
+         \x20                            avec la consigne quand il change\n\
+         eve --veille-retirer \"nom\"   la retire ; son fichier reste tel quel\n\
+         eve --essai-capture          « regarde mon écran » : une fenêtre d'essai ôtée d'une capture, comme celles\n\
+         \x20                            d'Eve (rien ne s'enregistre)\n\
          eve --cle [render|stripe [--retirer]]  la clé d'API d'un service que montre le tableau de bord, collée\n\
          \x20                            sur l'entrée standard (chiffrée dans le dossier local) ; rien : ce qui est posé\n\
          eve --version                la version de ce programme et l'empreinte de sa source (son commit)\n\

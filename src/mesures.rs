@@ -18,8 +18,10 @@
 //!
 //! Le coût d'un tour est la différence du cumul que rend Claude Code : son `total_cost_usd` est le coût de toute la
 //! séance, que le journal notait jusqu'au 23 octobre 2026 comme celui du tour (n° 15 de l'analyse). Un journal d'avant
-//! se relit quand même : la différence se fait ici.
+//! se relit quand même : la différence se fait ici. Une séance reprise (`--resume`) garde son cumul d'avant le
+//! redémarrage ([`cout_du_tour_repris`]).
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
 /// Une étape d'une demande, dans l'ordre où elles se suivent.
@@ -109,6 +111,32 @@ pub fn cout_du_tour(cumul_d_avant: Option<f64>, cumul: f64) -> f64 {
     }
 }
 
+/// Le coût du premier tour d'une séance reprise (`--resume`, après un redémarrage d'Eve) : Claude Code y rend le cumul
+/// de toute la séance, ce qui s'est payé avant le redémarrage compris — le 28 octobre 2026, un tour de 0,14 $ s'est
+/// noté 13,99 $, et le coût du jour a compté la séance deux fois. Le coût en est la différence avec `base`, le dernier
+/// cumul connu de la séance ; un cumul plus bas dit que Claude Code a repris le compte à zéro : le cumul lui-même.
+pub fn cout_du_tour_repris(base: f64, cumul: f64) -> f64 {
+    if cumul >= base { cumul - base } else { cumul }
+}
+
+/// Le dernier cumul que le journal a noté pour la séance `session` de Claude Code (« Claude Code ouvert : session … »
+/// précède chacun de ses tours) ; `None` s'il n'en a noté aucun.
+pub fn dernier_cumul(journal: &str, session: &str) -> Option<f64> {
+    let mut seance = "";
+    let mut dernier = None;
+    for ligne in journal.lines() {
+        let Some((_, message)) = horodatee(ligne) else { continue };
+        if let Some(s) = message.strip_prefix("Claude Code ouvert : session ") {
+            seance = s.split(',').next().unwrap_or("");
+        } else if seance == session
+            && let Some((_, _, Some(cumul))) = fin_du_tour(message)
+        {
+            dernier = Some(cumul);
+        }
+    }
+    dernier
+}
+
 /// La médiane (entre les deux du milieu, pour un nombre pair de valeurs) ; `None` sans valeur.
 pub fn mediane(valeurs: &[f64]) -> Option<f64> {
     let v = triees(valeurs);
@@ -138,8 +166,9 @@ fn triees(valeurs: &[f64]) -> Vec<f64> {
 }
 
 /// Le bilan d'un jour (`date` : « 2026-10-25 ») d'après le journal : le nombre de tours de Claude qui répondaient à
-/// une demande, et ce qu'a coûté tout ce que Claude a fait ce jour-là, les tours silencieux compris (le préchauffage
-/// se paie aussi). Le journal est la seule source : la fenêtre et la réponse dite le relisent.
+/// une demande, et ce qu'a coûté tout ce que Claude a fait ce jour-là, les tours que personne n'a demandés compris (le
+/// préchauffage, une veille se paient aussi). Le journal est la seule source : la fenêtre et la réponse dite le
+/// relisent.
 pub fn bilan_du_jour(journal: &str, date: &str) -> (usize, f64) {
     let du_jour: Vec<&str> = journal.lines().filter(|l| l.starts_with(date)).collect();
     let series = lire_journal(&du_jour.join("\n"));
@@ -179,7 +208,7 @@ pub struct Serie {
     pub demandes: Vec<Temps>,
     /// Les tours de Claude qui répondaient à une demande : leur durée en secondes, et leur coût en dollars.
     pub tours: Vec<(Option<f64>, Option<f64>)>,
-    /// Les tours silencieux (le préchauffage, le contexte gardé au chaud) : leur coût.
+    /// Les tours que personne n'a demandés (le préchauffage, le contexte gardé au chaud, une veille) : leur coût.
     pub silencieux: Vec<Option<f64>>,
 }
 
@@ -195,6 +224,11 @@ pub fn lire_journal(texte: &str) -> Vec<Serie> {
     let mut oreille = String::new();
     // Le cumul du tour d'avant, pour un journal d'avant les « cumul » ; il repart à chaque lancement de Claude Code.
     let mut cumul: Option<f64> = None;
+    // La séance de Claude Code qui répond (« Claude Code ouvert : session … », à chaque tour), et le dernier cumul de
+    // chacune : un redémarrage qui la reprend ne le remet pas à zéro (le chef d'avant le 28 octobre 2026 le comptait
+    // une seconde fois au premier tour, [`cout_du_tour_repris`]).
+    let mut seance: Option<String> = None;
+    let mut cumuls: HashMap<String, f64> = HashMap::new();
     // Le dernier tour noté : la ligne de préchauffage qui le suit le dit silencieux.
     let mut dernier_tour: Option<usize> = None;
     for ligne in texte.lines() {
@@ -231,20 +265,36 @@ pub fn lire_journal(texte: &str) -> Vec<Serie> {
                 let i = serie(&mut series, &version, claude.as_deref().unwrap_or_default(), &oreille, minute);
                 series[i].demandes.push(t);
             }
-        } else if let Some((duree, cout, du_tour)) = fin_du_tour(message) {
-            let cout = match cout {
-                Some(c) if du_tour => Some(c),
-                Some(c) => {
+        } else if let Some(s) = message.strip_prefix("Claude Code ouvert : session ") {
+            seance = s.split(',').next().map(str::to_string);
+        } else if let Some((duree, cout, cumul_de_la_seance)) = fin_du_tour(message) {
+            let cout = match (cout, cumul_de_la_seance) {
+                (Some(c), Some(total)) => {
+                    // Un premier tour (son coût est le cumul) d'une séance déjà vue : elle a été reprise.
+                    let base = seance.as_ref().and_then(|s| cumuls.get(s)).copied();
+                    let c = match base {
+                        Some(b) if (c - total).abs() < 1e-9 => cout_du_tour_repris(b, total),
+                        _ => c,
+                    };
+                    if let Some(s) = &seance {
+                        cumuls.insert(s.clone(), total);
+                    }
+                    Some(c)
+                }
+                (Some(c), None) => {
                     let t = cout_du_tour(cumul, c);
                     cumul = Some(c);
                     Some(t)
                 }
-                None => None,
+                (None, _) => None,
             };
             let i = serie(&mut series, &version, claude.as_deref().unwrap_or_default(), &oreille, minute);
             series[i].tours.push((duree, cout));
             dernier_tour = Some(i);
-        } else if message.starts_with("préchauffage fait") || message.starts_with("la base s'est branchée pendant") {
+        } else if message.starts_with("préchauffage fait")
+            || message.starts_with("la base s'est branchée pendant")
+            || (message.starts_with("veille « ") && message.ends_with("» traitée"))
+        {
             if let Some(i) = dernier_tour.take()
                 && let Some((_, cout)) = series[i].tours.pop()
             {
@@ -324,18 +374,18 @@ fn transcription(message: &str) -> Option<(f64, f64)> {
     Some((parole.parse().ok()?, calcul.parse().ok()?))
 }
 
-/// « fin du tour (10.1 s, 0.119 $ ; cumul 0.292 $) : … » : la durée, le coût, et s'il est celui du tour (`true`) ou,
-/// dans un journal d'avant, le cumul de la séance (« fin du tour (10.1 s, 0.292 $) »).
-fn fin_du_tour(message: &str) -> Option<(Option<f64>, Option<f64>, bool)> {
+/// « fin du tour (10.1 s, 0.119 $ ; cumul 0.292 $) : … » : la durée, le coût du tour et le cumul de la séance ; dans un
+/// journal d'avant, le coût noté est le cumul, et le cumul manque (« fin du tour (10.1 s, 0.292 $) »).
+fn fin_du_tour(message: &str) -> Option<(Option<f64>, Option<f64>, Option<f64>)> {
     let (dedans, _) = message.strip_prefix("fin du tour (")?.split_once(") : ")?;
-    let (dedans, du_tour) = match dedans.split_once(" ; cumul ") {
-        Some((avant, _)) => (avant, true),
-        None => (dedans, false),
+    let (dedans, cumul) = match dedans.split_once(" ; cumul ") {
+        Some((avant, cumul)) => (avant, Some(cumul.strip_suffix(" $").and_then(|c| c.parse().ok()).unwrap_or(0.0))),
+        None => (dedans, None),
     };
     let (duree, cout) = dedans.split_once(", ").unwrap_or((dedans, ""));
     let duree = duree.strip_suffix(" s").and_then(|d| d.parse().ok());
     let cout = cout.strip_suffix(" $").and_then(|c| c.parse().ok());
-    Some((duree, cout, du_tour))
+    Some((duree, cout, cumul))
 }
 
 /// Le relevé des séries pour la console : par étape, le nombre de mesures, la médiane, le 90e centile et le pire.
@@ -443,6 +493,34 @@ mod essais {
         assert_eq!(cout_du_tour(None, 0.173), 0.173, "le premier tour de la séance");
         assert!((cout_du_tour(Some(0.173), 0.292) - 0.119).abs() < 1e-9);
         assert_eq!(cout_du_tour(Some(1.4), 0.17), 0.17, "le cumul a baissé : une séance neuve");
+        assert!((cout_du_tour_repris(13.8425, 13.9863) - 0.1438).abs() < 1e-9, "la séance reprise");
+        assert_eq!(cout_du_tour_repris(13.8425, 0.14), 0.14, "Claude Code a repris le compte à zéro");
+    }
+
+    /// Une séance reprise après un redémarrage d'Eve (une mise à jour) : le premier tour que le chef d'avant notait au
+    /// cumul de toute la séance ne compte que ce qu'il a coûté ; une séance neuve, après le redémarrage, compte tout.
+    #[test]
+    fn une_seance_reprise_ne_se_compte_pas_deux_fois() {
+        let journal = "\
+2026-10-28 10:56:17 Claude Code ouvert : session abc, modèle claude-sonnet-5-5, serveurs []
+2026-10-28 10:56:29 fin du tour (12.8 s, 0.1198 $ ; cumul 13.8425 $) : [neutre]
+2026-10-28 11:18:53 Eve 25.0.0 (dcdec6c) démarre (Sam).
+2026-10-28 11:18:59 Claude Code lancé (claude-sonnet-5-5, effort max, la conversation reprise) dans C:\\x
+2026-10-28 11:26:17 Claude Code ouvert : session abc, modèle claude-sonnet-5-5, serveurs []
+2026-10-28 11:26:28 fin du tour (11.5 s, 13.9863 $ ; cumul 13.9863 $) : [neutre]
+2026-10-28 11:41:18 Claude Code ouvert : session abc, modèle claude-sonnet-5-5, serveurs []
+2026-10-28 11:41:22 fin du tour (5.0 s, 0.1216 $ ; cumul 14.1079 $) : [neutre]
+2026-10-28 12:00:00 Eve 26.0.0 (abc1234) démarre (Sam).
+2026-10-28 12:00:05 Claude Code lancé (claude-sonnet-5-5, effort max) dans C:\\x
+2026-10-28 12:00:09 Claude Code ouvert : session def, modèle claude-sonnet-5-5, serveurs []
+2026-10-28 12:00:20 fin du tour (3.0 s, 0.2500 $ ; cumul 0.2500 $) : Prête.
+";
+        let (_, cout) = bilan_du_jour(journal, "2026-10-28");
+        assert!((cout - (0.1198 + 0.1438 + 0.1216 + 0.25)).abs() < 1e-6, "{cout}");
+        // Ce que le chef reprend au journal quand il relance une séance.
+        assert_eq!(dernier_cumul(journal, "abc"), Some(14.1079));
+        assert_eq!(dernier_cumul(journal, "def"), Some(0.25));
+        assert_eq!(dernier_cumul(journal, "xyz"), None);
     }
 
     #[test]
@@ -456,10 +534,12 @@ mod essais {
 2026-10-25 08:12:00 fin du tour (9.1 s, 0.0410 $ ; cumul 0.2710 $) : Voilà le point.
 2026-10-25 08:30:00 fin du tour (12.0 s, 0.0000 $ ; cumul 0.2710 $) : Le tour s'est mal terminé.
 2026-10-25 09:00:00 fin du tour (4.0 s, 0.0190 $ ; cumul 0.2900 $) : C'est noté.
+2026-10-25 09:30:00 fin du tour (3.0 s, 0.0360 $ ; cumul 0.3260 $) : Un virement est arrivé.
+2026-10-25 09:30:00 veille « courriels » traitée
 ";
         let (demandes, cout) = bilan_du_jour(journal, "2026-10-25");
-        assert_eq!(demandes, 3, "le préchauffage n'est pas une demande");
-        assert!((cout - 0.29).abs() < 1e-9, "le préchauffage se paie : {cout}");
+        assert_eq!(demandes, 3, "ni le préchauffage ni une veille ne sont des demandes");
+        assert!((cout - 0.326).abs() < 1e-9, "ils se paient : {cout}");
         assert_eq!(bilan_du_jour(journal, "2026-10-26"), (0, 0.0));
         assert_eq!(dollars(4.1), "4,10 $");
         assert_eq!(dollars(0.0043), "0,004 $");

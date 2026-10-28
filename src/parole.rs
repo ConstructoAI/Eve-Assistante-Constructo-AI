@@ -1304,6 +1304,51 @@ pub fn propos_bref(dit: &str) -> bool {
     !mots.is_empty() && mots.len() <= 12 && mots.iter().all(|m| MOTS_BREFS.contains(m) || EVE.contains(m))
 }
 
+/// Ce qu'Eve dit d'elle-même quand Claude réfléchit sans rien écrire encore — à l'effort max, son premier mot venait
+/// en 19 s en médiane le 28 octobre 2026 (1,2 s à l'effort moyen) : une question se regarde, le reste s'entreprend ;
+/// tour à tour (`n` : le numéro du tour), pour ne pas dire toujours la même phrase.
+pub fn phrase_d_attente(demande: &str, n: u64) -> &'static str {
+    const QUESTION: [&str; 3] = ["Je regarde ça.", "Je vérifie.", "Bonne question, je regarde."];
+    const DEMANDE: [&str; 3] = ["Je m'en occupe.", "D'accord, je m'en occupe.", "Je m'y mets."];
+    let liste: &[&str] = if est_une_question(demande) { &QUESTION } else { &DEMANDE };
+    liste[(n % liste.len() as u64) as usize]
+}
+
+/// Les mots qui ouvrent une question, normalisés ([`normaliser`]).
+const TETES_DE_QUESTION: &[&str] = &[
+    "est ce que", "est ce qu", "qu est ce", "c est quoi", "c est qui", "combien", "quand", "ou", "qui", "quel",
+    "quelle", "quels", "quelles", "comment", "pourquoi", "y a t il", "y a tu", "as tu", "est il", "est elle",
+    "sais tu",
+];
+
+/// Une question : un « ? » au bout, ou un mot qui en ouvre une en tête (le nom d'Eve et la politesse ôtés).
+fn est_une_question(dit: &str) -> bool {
+    if dit.trim_end().ends_with('?') {
+        return true;
+    }
+    let n = normaliser(dit);
+    let n = sans_politesse(&n);
+    TETES_DE_QUESTION.iter().any(|t| n == *t || n.starts_with(&format!("{t} ")))
+}
+
+/// La personne demande-t-elle à Eve de regarder son écran (« regarde mon écran », « tu vois ce qu'il y a à
+/// l'écran ? », « lis l'écran et dis-moi… ») ? Eve en prend une capture et la joint à la demande (`capture.rs`) : le
+/// 28 octobre 2026, Claude a dû répondre « je ne vois pas ton écran », et la personne a recopié ses tableaux à la main.
+/// L'écran nommé avec un verbe qui regarde ; pas l'écran de veille, ni une luminosité.
+pub fn demande_l_ecran(dit: &str) -> bool {
+    let n = normaliser(dit);
+    let ecran = ["mon ecran", "l ecran", "cet ecran", "mes ecrans", "a l ecran", "sur l ecran", "capture d ecran"]
+        .iter()
+        .any(|e| contient(&n, e));
+    let regarde = [
+        "regarde", "regardes", "regarder", "vois", "voir", "vu", "lis", "lire", "jette", "jeter", "analyse",
+        "analyser", "examine", "check", "checke", "montre", "capture", "aide moi",
+    ]
+    .iter()
+    .any(|v| contient(&n, v));
+    ecran && regarde && !contient(&n, "ecran de veille")
+}
+
 /// Les formes sous lesquelles Whisper rend « Eve », le mot d'éveil.
 const EVE: [&str; 6] = ["eve", "eves", "ev", "eva", "hev", "heve"];
 /// Les mots qu'on dit parfois avant d'appeler Eve.
@@ -2496,5 +2541,45 @@ mod essais {
     #[test]
     fn normaliser_retire_accents_et_ponctuation() {
         assert_eq!(normaliser("Ça, c'est confirmé !"), "ca c est confirme");
+    }
+
+    /// La phrase d'attente : une question se regarde, une demande s'entreprend ; tour à tour.
+    #[test]
+    fn la_phrase_d_attente_suit_la_demande() {
+        assert_eq!(phrase_d_attente("Combien de factures sont en retard ?", 0), "Je regarde ça.");
+        assert_eq!(phrase_d_attente("Eve, est-ce que le client a payé", 1), "Je vérifie.");
+        assert_eq!(phrase_d_attente("Prépare la soumission pour Tremblay", 0), "Je m'en occupe.");
+        assert_eq!(phrase_d_attente("Prépare la soumission pour Tremblay", 1), "D'accord, je m'en occupe.");
+        assert_eq!(phrase_d_attente("Prépare la soumission pour Tremblay", 3), "Je m'en occupe.", "tour à tour");
+        assert_eq!(phrase_d_attente("Où est le plan de la terrasse", 2), "Bonne question, je regarde.");
+        assert_eq!(
+            phrase_d_attente("Ouvre le plan de la terrasse", 0),
+            "Je m'en occupe.",
+            "« ou » n'est pas « ouvre »"
+        );
+    }
+
+    /// « Regarde mon écran » : l'écran nommé avec un verbe qui regarde ; pas l'écran de veille, ni la luminosité.
+    #[test]
+    fn regarder_l_ecran() {
+        for oui in [
+            "Eve, regarde mon écran",
+            "Tu vois ce qu'il y a à l'écran ?",
+            "Lis l'écran et dis-moi combien il reste à payer",
+            "Jette un œil à mon écran stp",
+            "Fais une capture d'écran",
+            "Peux-tu regarder ce qui est sur l'écran",
+        ] {
+            assert!(demande_l_ecran(oui), "{oui}");
+        }
+        for non in [
+            "Baisse la luminosité de l'écran",
+            "Mets l'écran de veille",
+            "Regarde mes courriels",
+            "Combien coûte un écran de 27 pouces",
+            "Je vais regarder ça plus tard",
+        ] {
+            assert!(!demande_l_ecran(non), "{non}");
+        }
     }
 }

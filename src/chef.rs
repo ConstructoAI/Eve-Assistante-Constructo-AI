@@ -53,6 +53,7 @@ use crate::rappels::{self, Rappels};
 use crate::reglages::{Profil, Reglages, dossier_local, nom_affiche};
 use crate::sons::{self, Son};
 use crate::touche;
+use crate::veilles::{self, DuNeuf, Vues};
 use crate::veilleur::{Jour, Nouvelle, RendezVous, Sorte};
 use crate::voix::{Voix, VoixDispo};
 
@@ -151,6 +152,13 @@ pub enum Evt {
         duree: Duration,
         issue: Result<Lecture, Panne>,
     },
+    /// La capture de l'écran que demandait `texte` (« regarde mon écran ») est prise et jointe, ou ne l'a pas été
+    /// (`erreur`) : la demande part ([`crate::capture`]).
+    EcranPris {
+        texte: String,
+        fin_de_parole: Option<Instant>,
+        erreur: Option<String>,
+    },
 }
 
 /// Une étape de la connexion à Constructo AI, rapportée par le fil qui parle au serveur.
@@ -197,8 +205,11 @@ const EFFORT_BREF: (&str, &str) = ("low", "bref");
 const ACCORD_DELAI: Duration = Duration::from_secs(180);
 /// Une réponse d'accord arrivée si tôt après un changement de demande ne vaut pas pour la nouvelle : Eve la redemande.
 const ACCORD_GARDE: Duration = Duration::from_millis(1500);
-/// Après ce temps de travail sans un mot, Eve dit « Je m'en occupe ».
+/// Après ce temps de travail sans un mot, Eve dit d'elle-même une phrase d'attente ([`parole::phrase_d_attente`]) ;
+/// plus tôt quand la demande a été dite : on attendait sa réponse dans le silence (à l'effort max, Claude réfléchit
+/// souvent vingt secondes avant son premier mot).
 const ANNONCE_APRES: Duration = Duration::from_secs(5);
+const ANNONCE_APRES_A_LA_VOIX: Duration = Duration::from_millis(2500);
 /// L'écoute à la touche : jamais plus longue (une touche relâchée hors de la fenêtre ne se voit pas toujours).
 const ECOUTE_MAX: Duration = Duration::from_secs(45);
 /// La touche tenue au-delà coupe la voix ; un raccourci clavier (Ctrl+C) ne la coupe pas.
@@ -212,6 +223,8 @@ const REPRISE_MAX: i64 = 3600;
 /// Une conversation neuve chaque jour : passé cette heure, au premier moment libre après ce calme.
 const NOUVELLE_JOURNEE_A: u32 = 4;
 const CALME_AVANT_LA_NOUVELLE: Duration = Duration::from_secs(30 * 60);
+/// Une veille qui a du neuf attend ce calme après le dernier tour : la personne a peut-être une suite à dire.
+const CALME_AVANT_UNE_VEILLE: Duration = Duration::from_secs(30);
 
 /// Claude Code qui n'a pas répondu à `initialize` en ce temps-là est relancé (le serveur de Constructo AI qui dort
 /// sur Render prend jusqu'à une minute à s'éveiller).
@@ -235,6 +248,10 @@ const INTERRUPTEURS: [&str; 10] = [
 ];
 /// Une réponse de plus de tant, finie quand la fenêtre n'est pas devant, se dit par une notification de Windows.
 const NOTIFIER_APRES: Duration = Duration::from_secs(8);
+/// Une écriture de Claude dans Constructo AI qui a réussi : le tableau de bord relit l'ERP ce temps après (les écritures
+/// d'un même travail se suivent : la dernière repousse la lecture), sans attendre sa lecture des dix minutes — le
+/// 28 octobre 2026, deux paiements enregistrés ne se voyaient qu'à la lecture suivante.
+const RELIRE_APRES_UNE_ECRITURE: Duration = Duration::from_secs(3);
 
 /// Comment Eve nomme, à voix haute et dans son fil, celle qui travaille derrière elle : l'Adjointe de la trousse, ou
 /// Claude là où le dossier porte sa propre consigne (une Eve qui n'est pas celle d'Entrepreneur Général).
@@ -301,12 +318,22 @@ struct Message {
     a_la_voix: bool,
     /// Les temps de la demande (aucun pour un tour silencieux).
     chrono: Option<Chrono>,
+    /// Le tour d'une veille qui a du neuf ([`crate::veilles`]) : personne ne l'a demandé, mais il se montre.
+    veille: Option<DuNeuf>,
 }
 
 impl Message {
     /// Un tour silencieux : le préchauffage, ou un tour qui garde le contexte au chaud.
     fn silencieux(texte: impl Into<String>, au_chaud: bool) -> Message {
-        Message { texte: texte.into(), demande: None, pieces: Vec::new(), au_chaud, a_la_voix: false, chrono: None }
+        Message {
+            texte: texte.into(),
+            demande: None,
+            pieces: Vec::new(),
+            au_chaud,
+            a_la_voix: false,
+            chrono: None,
+            veille: None,
+        }
     }
 }
 
@@ -536,6 +563,13 @@ pub struct Chef {
     /// devant : pas de notification).
     notifications: Notifications,
     fenetre_devant: bool,
+    /// Les veilles ([`crate::veilles`]) : ce qu'Eve a vu de leurs fichiers ; celles qui ont du neuf et attendent un
+    /// moment libre ; celle dont le tour court (notée vue à sa fin) ; et ce tour ne se dit pas (la nuit, la maison
+    /// dort : il s'affiche et se notifie).
+    veilles: Vues,
+    veilles_a_dire: VecDeque<DuNeuf>,
+    veille_du_tour: Option<DuNeuf>,
+    tour_sans_voix: bool,
     /// La panne de Claude vue dans le tour (sa sorte : « rate_limit », « overloaded », « reseau »…), dite à sa fin ; un
     /// nouvel essai de l'API déjà dit dans le tour.
     panne: String,
@@ -556,6 +590,9 @@ pub struct Chef {
     /// Le cumul que Claude Code a rendu à la fin du tour d'avant (le coût de sa séance) : le coût d'un tour en est la
     /// différence. Il repart à chaque lancement.
     cumul: Option<f64>,
+    /// Le dernier cumul de la séance qu'un lancement reprend (`--resume`), relu au journal : Claude Code rend au premier
+    /// tour celui de toute la séance, d'avant le redémarrage compris ([`mesures::cout_du_tour_repris`]).
+    cumul_repris: Option<f64>,
     /// La dernière réponse, en pages pour la voix (`parole::pages_pour_la_voix`), et la prochaine page à dire : la
     /// première s'est dite avec la réponse ; « la suite » dit les autres, « répète » la dernière dite.
     pages: Vec<String>,
@@ -605,6 +642,8 @@ pub struct Chef {
     entreprise_delai: Duration,
     entreprise_refuse: Option<u64>,
     entreprise_renouvelee: Option<Instant>,
+    /// Une écriture de Claude dans l'ERP a réussi pendant une lecture, qui ne l'a peut-être pas vue : une autre suit.
+    entreprise_apres_lecture: bool,
     /// Le dossier porte sa propre consigne (`EVE_CONSIGNE.md`, un poste d'architecture) : ce n'est pas l'Adjointe de la
     /// trousse — ni la base d'Entrepreneur Général, ni le `Scan\` où classer une numérisation.
     propre: bool,
@@ -667,6 +706,8 @@ pub struct Chef {
     outils_n: u64,
     pieces: Vec<Piece>,
     compteur_pieces: u64,
+    /// La capture de l'écran d'une demande (« regarde mon écran ») est en cours : la demande l'attend.
+    ecran_en_cours: bool,
     demarrage_windows: bool,
     // Le veilleur et la mémoire
     jour: String,
@@ -801,6 +842,10 @@ impl Chef {
             epingles: Epingles::ouvrir(&dossier_local()),
             notifications,
             fenetre_devant: true,
+            veilles: Vues::ouvrir(&dossier_local()),
+            veilles_a_dire: VecDeque::new(),
+            veille_du_tour: None,
+            tour_sans_voix: false,
             panne: String::new(),
             reessai_dit: false,
             limite: None,
@@ -811,6 +856,7 @@ impl Chef {
             chrono: None,
             chrono_a_entendre: None,
             cumul: None,
+            cumul_repris: None,
             pages: Vec::new(),
             page: 0,
             dit_recemment: VecDeque::new(),
@@ -841,6 +887,7 @@ impl Chef {
             entreprise_delai: entreprise::APRES_UNE_PANNE,
             entreprise_refuse: None,
             entreprise_renouvelee: None,
+            entreprise_apres_lecture: false,
             propre,
             profil,
             laisses: Laisses::default(),
@@ -877,6 +924,7 @@ impl Chef {
             outils_n: 0,
             pieces: Vec::new(),
             compteur_pieces: 0,
+            ecran_en_cours: false,
             demarrage_windows: fenetre::demarrage_windows_actif(),
             jour: journal::date(),
             nouvelles: Vec::new(),
@@ -1130,6 +1178,7 @@ impl Chef {
             Evt::Retour(r) => self.retour_de_connexion(r),
             Evt::Connexion { tour, etape } => self.etape_de_connexion(tour, etape),
             Evt::Entreprise { tour, emis, duree, issue } => self.entreprise_lue(tour, emis, duree, issue),
+            Evt::EcranPris { texte, fin_de_parole, erreur } => self.ecran_pris(texte, fin_de_parole, erreur),
         }
     }
 
@@ -2145,7 +2194,12 @@ impl Chef {
             Ok(l) => {
                 journal::ecrire(&format!("tableau de bord : {}", l.resume()));
                 self.entreprise_delai = entreprise::APRES_UNE_PANNE;
-                self.entreprise_a = Some(Instant::now() + entreprise::INTERVALLE);
+                let apres = if std::mem::take(&mut self.entreprise_apres_lecture) {
+                    RELIRE_APRES_UNE_ECRITURE
+                } else {
+                    entreprise::INTERVALLE
+                };
+                self.entreprise_a = Some(Instant::now() + apres);
                 self.montrer_l_entreprise(Entreprise::lue(&l, &a));
             }
             Err(Panne::Jeton) => {
@@ -2181,6 +2235,19 @@ impl Chef {
                 let message = format!("{}. Nouvel essai dans {minutes} min.", p.texte());
                 self.montrer_l_entreprise(self.entreprise.manquee(&message, &a));
             }
+        }
+    }
+
+    /// Une écriture de Claude dans l'ERP a réussi : le tableau de bord le relit bientôt ([`RELIRE_APRES_UNE_ECRITURE`]),
+    /// ou dès la fin de la lecture en cours.
+    fn relire_l_entreprise_bientot(&mut self) {
+        if !self.espace.constructo || !self.connexion.connectee() {
+            return;
+        }
+        if self.entreprise_occupee {
+            self.entreprise_apres_lecture = true;
+        } else if self.entreprise_a.is_some() {
+            self.entreprise_a = Some(Instant::now() + RELIRE_APRES_UNE_ECRITURE);
         }
     }
 
@@ -2291,7 +2358,6 @@ impl Chef {
 
     /// Une phrase de la personne : dite (`fin_de_parole` : l'instant où elle a fini de parler) ou écrite (`None`).
     fn phrase(&mut self, t: String, fin_de_parole: Option<Instant>) {
-        let a_la_voix = fin_de_parole.is_some();
         journal::ecrire(&format!("demande : {t}"));
         // Une demande est arrivée (dite, tapée, ou prise dans la fenêtre) : la fenêtre d'après « Eve » se referme, et
         // un « Oui ? » encore en train de se dire ne la rouvrira pas.
@@ -2386,6 +2452,41 @@ impl Chef {
             self.repondre_sans_claude(&t, &ecrit, &dit);
             return;
         }
+        // « Regarde mon écran » : la capture d'abord, jointe comme un fichier ; la demande part avec elle (`ecran_pris`).
+        if parole::demande_l_ecran(&t) && !self.ecran_en_cours {
+            self.ecran_en_cours = true;
+            crate::capture::prendre_et_joindre(t, fin_de_parole, self.rapport.clone());
+            return;
+        }
+        self.envoyer(t, fin_de_parole);
+    }
+
+    /// La capture de l'écran est prise — jointe : sa pièce est arrivée avant —, ou ne l'a pas été : la demande part, et
+    /// Claude sait ce qu'il a sous les yeux.
+    fn ecran_pris(&mut self, t: String, fin_de_parole: Option<Instant>, erreur: Option<String>) {
+        self.ecran_en_cours = false;
+        self.note_pour_l_adjointe = Some(match erreur {
+            None => {
+                journal::ecrire("capture de l'écran jointe à la demande");
+                "[Eve : la personne te demande de regarder son écran ; sa capture (l'écran où est la souris, sans la \
+                 fenêtre d'Eve) est jointe à la demande : regarde-la avant de répondre.]"
+                    .to_string()
+            }
+            Some(e) => {
+                journal::ecrire(&format!("capture de l'écran impossible : {e}"));
+                format!(
+                    "[Eve : la capture de l'écran que la personne demande n'a pas pu se faire ({e}) : dis-le-lui, et \
+                     propose-lui d'en coller une dans la fenêtre (Ctrl+V).]"
+                )
+            }
+        });
+        self.envoyer(t, fin_de_parole);
+    }
+
+    /// Une demande pour Claude : affichée, puis envoyée avec ce qu'Eve sait d'autre (l'heure, la mémoire, une note, une
+    /// conversation reprise, les pièces jointes, le relevé que la demande appelle).
+    fn envoyer(&mut self, t: String, fin_de_parole: Option<Instant>) {
+        let a_la_voix = fin_de_parole.is_some();
         let pieces = std::mem::take(&mut self.pieces);
         let noms: Vec<String> = pieces.iter().map(|p| p.nom.clone()).collect();
         self.ajouter("toi", t.clone(), noms.clone());
@@ -2440,7 +2541,13 @@ impl Chef {
             message.push_str(&self.calendrier_pour_l_adjointe());
         }
         if self.tours > 0 && !self.prechauffage {
-            self.dire("C'est noté ; je termine d'abord la demande en cours.");
+            // La personne est là : le tour d'une veille, même la nuit, peut se dire.
+            self.tour_sans_voix = false;
+            self.dire(if self.veille_du_tour.is_some() {
+                "C'est noté ; je finis d'abord de regarder ce qui vient d'arriver."
+            } else {
+                "C'est noté ; je termine d'abord la demande en cours."
+            });
         }
         self.en_attente.push_back(Message {
             texte: message,
@@ -2449,6 +2556,7 @@ impl Chef {
             au_chaud: false,
             a_la_voix,
             chrono: Some(Chrono::nouveau(fin_de_parole)),
+            veille: None,
         });
         self.suivant();
     }
@@ -2562,6 +2670,7 @@ impl Chef {
             au_chaud: false,
             a_la_voix: false,
             chrono: Some(Chrono::nouveau(None)),
+            veille: None,
         });
         self.suivant();
     }
@@ -2728,7 +2837,10 @@ impl Chef {
         let bref = self.effort_par_tour && m.pieces.is_empty() && m.demande.as_deref().is_some_and(parole::propos_bref);
         let effort = if bref { EFFORT_BREF.0.to_string() } else { self.lance_avec.1.clone() };
         self.donner_l_effort(&effort);
-        self.prechauffage = m.demande.is_none();
+        // Un tour sans demande est silencieux — sauf celui d'une veille, qui se montre ; la nuit, sans se dire.
+        self.prechauffage = m.demande.is_none() && m.veille.is_none();
+        self.tour_sans_voix = m.veille.is_some() && !heures_de_bureau();
+        self.veille_du_tour = m.veille;
         self.au_chaud = m.au_chaud;
         self.demande_du_tour = m.demande;
         self.tour_a_la_voix = m.a_la_voix;
@@ -2744,8 +2856,64 @@ impl Chef {
             self.tours = 0;
             self.prechauffage = false;
             self.chrono = None;
+            self.veille_manquee();
             self.systeme(&format!("{} ne répond pas : {e}", self.nommee().le_maj));
         }
+    }
+
+    /// Le tour d'une veille n'a pas abouti (une erreur, un arrêt, Claude qui s'arrête) : rien n'est vu, elle se refait
+    /// plus tard ([`Vues::manquee`]).
+    fn veille_manquee(&mut self) {
+        self.tour_sans_voix = false;
+        if let Some(d) = self.veille_du_tour.take() {
+            journal::ecrire(&format!("veille « {} » : son tour n'a pas abouti, elle se refera", d.nom));
+            self.veilles.manquee(&d.nom, Instant::now());
+        }
+    }
+
+    /// Les veilles ([`crate::veilles`]) : leurs fichiers regardés toutes les cinq secondes, sans Claude ; une qui a du
+    /// neuf le réveille au premier moment libre — personne qui parle ni qui attende, rien en cours, une demi-minute après
+    /// le dernier tour (la personne a peut-être une suite à dire) —, avec sa consigne et ce qui s'est ajouté.
+    fn suivre_les_veilles(&mut self, maintenant: Instant) {
+        for d in self.veilles.regarder(&self.reglages.veilles, maintenant) {
+            let ajout = d.ajout.as_ref().map(|a| format!(", {} ligne(s) ajoutée(s)", a.lines().count()));
+            journal::ecrire(&format!("veille « {} » : du neuf{}", d.nom, ajout.unwrap_or_default()));
+            self.veilles_a_dire.push_back(d);
+        }
+        let libre = self.init_ok
+            && self.erreur.is_none()
+            && self.tours == 0
+            && self.en_attente.is_empty()
+            && self.attentes.is_empty()
+            && !self.ecoute
+            && self.transcriptions == 0
+            && !self.parle
+            && !self.ecran_en_cours
+            && !self.claude_a_suivre
+            && self.relance_dite.is_none()
+            && !self.fin_de_tour.attend()
+            && !self.micro.as_ref().is_some_and(Micro::en_parole)
+            && maintenant.duration_since(self.dernier_tour) >= CALME_AVANT_UNE_VEILLE;
+        if !libre {
+            return;
+        }
+        let Some(d) = self.veilles_a_dire.pop_front() else { return };
+        let texte = format!(
+            "[Eve : nous sommes le {}, il est {}.]\n\n{}",
+            crate::ambiance::date_longue(&journal::date()).to_lowercase(),
+            rappels::heure_dite(&journal::date_et_heure(), &journal::date()),
+            veilles::message(&d, self.reglages.accords_des_veilles)
+        );
+        self.en_attente.push_back(Message {
+            texte,
+            demande: None,
+            pieces: Vec::new(),
+            au_chaud: false,
+            a_la_voix: false,
+            chrono: None,
+            veille: Some(d),
+        });
+        self.suivant();
     }
 
     /// L'effort de réflexion des tours qui suivent, donné à Claude Code s'il change ([`Cerveau::regler_l_effort`]).
@@ -2860,6 +3028,10 @@ impl Chef {
                     }
                     if !en_erreur {
                         self.noter_action(&nom, &entree);
+                    }
+                    // Une écriture dans Constructo AI : le tableau de bord la montre sans attendre ses dix minutes.
+                    if !en_erreur && garde::accord_erp(&nom, &entree).is_some() {
+                        self.relire_l_entreprise_bientot();
                     }
                     let vu = self.vus.remove(&id) || self.retirer_signature(&signature(&nom, &entree));
                     if vu || self.decision(&nom, &entree) == Decision::Libre {
@@ -3066,6 +3238,7 @@ impl Chef {
     fn commenter(&mut self, nom: &str, entree: &Value) {
         if self.prechauffage
             || self.interrompu
+            || self.demande_du_tour.is_none()
             || !self.attentes.is_empty()
             || self.parle
             || self.commentaires.len() >= 2
@@ -3075,7 +3248,10 @@ impl Chef {
         if self.dernier_dit.is_some_and(|d| d.elapsed() < Duration::from_secs(4)) {
             return;
         }
-        let Some((sorte, phrase)) = commentaire(nom, entree) else { return };
+        // Le dossier de la comptabilité nommée (un chemin relatif part du dossier de travail, comme pour la fenêtre).
+        let compta = self.reglages.comptabilite.trim();
+        let comptabilite = (!compta.is_empty()).then(|| self.dossier.clone().unwrap_or_default().join(compta));
+        let Some((sorte, phrase)) = commentaire(nom, entree, comptabilite.as_deref()) else { return };
         if !self.commentaires.insert(sorte) {
             return;
         }
@@ -3096,10 +3272,17 @@ impl Chef {
         // Claude Code rend le cumul de sa séance : le coût du tour en est la différence. Dans une même séance (le cumul
         // repart à chaque lancement de Claude Code), il ne baisse jamais : un cumul plus bas — un tour en erreur rend
         // parfois 0 $ — ne compte pour rien, et ne remet pas le compte à zéro (le tour suivant aurait compté toute la
-        // séance). Au dix-millième : un tour de Haiku coûte moins d'un dixième de cent.
-        let du_tour = cout.map(|c| match self.cumul {
-            Some(avant) if c < avant => 0.0,
-            avant => {
+        // séance). Au dix-millième : un tour de Haiku coûte moins d'un dixième de cent. Le premier tour d'une séance
+        // reprise compte depuis son dernier cumul connu ; un tour en erreur avant lui ne coûte rien et le laisse attendre.
+        let du_tour = cout.map(|c| match (self.cumul, self.cumul_repris) {
+            (None, Some(_)) if c <= 0.0 => 0.0,
+            (None, Some(base)) => {
+                self.cumul_repris = None;
+                self.cumul = Some(c);
+                mesures::cout_du_tour_repris(base, c)
+            }
+            (Some(avant), _) if c < avant => 0.0,
+            (avant, _) => {
                 self.cumul = Some(c);
                 mesures::cout_du_tour(avant, c)
             }
@@ -3174,6 +3357,7 @@ impl Chef {
         let ecrit = std::mem::take(&mut self.en_cours);
         let affiche = if ecrit.trim().is_empty() { texte_seul.clone() } else { ecrit };
         let demande = self.demande_du_tour.take();
+        let veille = self.veille_du_tour.take();
         if interrompu {
             // Affiché, pas dit : la personne vient de dire « arrête ».
             if let Some(d) = &demande {
@@ -3206,12 +3390,15 @@ impl Chef {
                 if let Some(l) = self.fil.last_mut() {
                     l.tour = tour;
                 }
-                // Une réponse longue — ou le compte rendu d'un agent, qui a travaillé en arrière-plan : un tour sans
-                // demande —, finie pendant qu'on était ailleurs : une notification de Windows, ce qui s'en dit.
+                // Une réponse longue — ou un tour sans demande : le compte rendu d'un agent, qui a travaillé en
+                // arrière-plan, ce qu'une veille a trouvé —, finie pendant qu'on était ailleurs : une notification de
+                // Windows, ce qui s'en dit.
                 let longue = self.debut_tour.is_some_and(|d| d.elapsed() >= NOTIFIER_APRES);
                 if longue || demande.is_none() {
                     let dit = parole::pour_la_voix(&affiche);
-                    self.notifier("Réponse prête", if dit.trim().is_empty() { &affiche } else { &dit });
+                    let titre =
+                        veille.as_ref().map_or_else(|| "Réponse prête".into(), |d| format!("Veille « {} »", d.nom));
+                    self.notifier(&titre, if dit.trim().is_empty() { &affiche } else { &dit });
                 }
                 // Ses pages pour la voix : la première vient de se dire (en sourdine, « répète » la dira).
                 self.pages = parole::pages_pour_la_voix(&affiche);
@@ -3234,6 +3421,20 @@ impl Chef {
                 self.memoriser(d, &affiche);
             }
         }
+        // Le tour d'une veille : abouti, ce qu'elle avait de neuf est vu ; arrêté ou en erreur, elle se refera.
+        match veille {
+            Some(d) if !interrompu && !erreur => {
+                // Au journal : ce tour se paie, mais n'est pas une demande (`mesures::bilan_du_jour`).
+                journal::ecrire(&format!("veille « {} » traitée", d.nom));
+                self.veilles.traitee(&d.nom, d.vu);
+            }
+            Some(d) => {
+                self.veille_du_tour = Some(d);
+                self.veille_manquee();
+            }
+            None => {}
+        }
+        self.tour_sans_voix = false;
         self.ranger_le_chrono();
         self.flux.nouveau_tour();
         // Le dernier tour de la séance, au fichier : un redémarrage proche la reprendra.
@@ -3498,6 +3699,9 @@ impl Chef {
         };
         let reprendre = if std::mem::take(&mut self.reprendre) { self.session.clone() } else { None };
         self.lance_en_reprise = reprendre.is_some();
+        // Le cumul de la séance reprise, que le journal a noté à son dernier tour (sa seule source).
+        let cumul_repris =
+            reprendre.as_deref().and_then(|s| mesures::dernier_cumul(&journal::lire_tout(&dossier_local()), s));
         let l = Lancement {
             claude,
             dossier_d_eve: self.dossier.clone().unwrap_or_else(|| dossier.clone()),
@@ -3511,6 +3715,8 @@ impl Chef {
             reprendre,
             generation: self.generation,
             espace: self.espace.clone(),
+            veilles: self.reglages.veilles.clone(),
+            accords_des_veilles: self.reglages.accords_des_veilles,
         };
         match Cerveau::lancer(&l, self.rapport.clone()) {
             Ok(c) => {
@@ -3540,6 +3746,7 @@ impl Chef {
                 self.cerveau = Some(c);
                 self.init_attendue = Some(Instant::now());
                 self.cumul = None;
+                self.cumul_repris = cumul_repris;
                 self.outils_vus = false;
                 // Une séance neuve n'a aucun serveur d'Eve : Constructo AI s'y rebranche après l'initialisation.
                 self.branchement = None;
@@ -3577,6 +3784,7 @@ impl Chef {
         self.prechauffage = false;
         self.interrompu = false;
         self.chrono = None;
+        self.veille_manquee();
         self.attentes.clear();
         self.activite.clear();
         self.en_route.clear();
@@ -3621,6 +3829,11 @@ impl Chef {
         self.prechauffage = false;
         self.interrompu = false;
         self.chrono = None;
+        // Une veille en cours ou qui attendait : la conversation neuve la reprendra plus tard.
+        self.veille_manquee();
+        for d in self.en_attente.drain(..).filter_map(|m| m.veille) {
+            self.veilles.manquee(&d.nom, Instant::now());
+        }
         self.attentes.clear();
         self.activite.clear();
         self.en_attente.clear();
@@ -3729,6 +3942,7 @@ impl Chef {
         self.relire_la_precedente(maintenant);
         self.surveiller_la_connexion(maintenant);
         self.lire_l_entreprise(maintenant);
+        self.suivre_les_veilles(maintenant);
         self.relire_les_reglages();
         self.suivre_claude();
     }
@@ -3784,13 +3998,17 @@ impl Chef {
     }
 
     fn suivi_du_tour(&mut self, maintenant: Instant) {
+        // Un tour que personne n'a demandé (le compte rendu d'un agent, une veille) ne se commente pas.
         if self.tours == 0 || self.prechauffage || !self.attentes.is_empty() || self.parle {
             return;
         }
+        let Some(demande) = self.demande_du_tour.as_deref() else { return };
+        let phrase = parole::phrase_d_attente(demande, self.tour_numero);
         let ecoule = self.debut_tour.map(|d| maintenant.duration_since(d)).unwrap_or_default();
-        if !self.annonce && !self.dit_dans_le_tour && ecoule > ANNONCE_APRES {
+        let apres = if self.tour_a_la_voix { ANNONCE_APRES_A_LA_VOIX } else { ANNONCE_APRES };
+        if !self.annonce && !self.dit_dans_le_tour && ecoule > apres {
             self.annonce = true;
-            self.dire("Je m'en occupe.");
+            self.dire(phrase);
             return;
         }
         // Un travail qui s'allonge se dit : une fois à une minute, une fois à deux minutes et demie.
@@ -3926,6 +4144,12 @@ impl Chef {
     /// L'espace d'actions d'abord (un outil hors des privilèges ne part jamais), puis la garde (les jetons et les clés,
     /// jamais), puis les accords d'Eve, que la personne garde ou retire (le privilège `accords`) : [`garde::decider`].
     fn decision(&self, nom: &str, entree: &Value) -> Decision {
+        // Le tour d'une veille : personne ne l'a demandé, et ce qu'il lit vient d'ailleurs (un courriel, une page) — une
+        // écriture dans l'ERP ou une suppression attend la personne, même sans les accords ([`Reglages::accords_des_veilles`]).
+        if self.veille_du_tour.is_some() && self.reglages.accords_des_veilles {
+            let espace = Espace { accords: true, ..self.espace.clone() };
+            return garde::decider(&espace, nom, entree, true);
+        }
         garde::decider(&self.espace, nom, entree, self.tour_a_la_voix)
     }
 
@@ -4044,7 +4268,7 @@ impl Chef {
 
     /// Une phrase dite à voix haute après ce qui la sépare de la précédente dans le texte (`saut`).
     fn dire_apres(&mut self, texte: &str, saut: parole::Saut) -> Option<u64> {
-        if self.reglages.sourdine {
+        if self.reglages.sourdine || self.tour_sans_voix {
             return None;
         }
         self.parole_id += 1;
@@ -4632,10 +4856,33 @@ fn corps_de_decision(a: &Attente, oui: bool) -> Value {
     }
 }
 
-/// Ce que fait l'Adjointe, en quelques mots, d'après l'outil qu'elle prend (et une sorte, pour ne pas le redire).
-fn commentaire(nom: &str, entree: &Value) -> Option<(&'static str, &'static str)> {
+/// Ce que fait l'Adjointe, en quelques mots, d'après l'outil qu'elle prend (et une sorte, pour ne pas le redire) ;
+/// `comptabilite` : le dossier de la comptabilité de la personne, s'il y en a une — un fichier qu'on y lit ou qu'on y
+/// écrit se dit « ta comptabilité ».
+fn commentaire(
+    nom: &str,
+    entree: &Value,
+    comptabilite: Option<&std::path::Path>,
+) -> Option<(&'static str, &'static str)> {
     if nom.starts_with("mcp__entrepreneur-general__") {
         return Some(("base", "Je consulte la base."));
+    }
+    // Où va l'outil : le fichier, le dossier, ou la commande entière ; comparé sans égard à la casse ni aux barres.
+    let cible = ["file_path", "path", "notebook_path", "command"]
+        .iter()
+        .filter_map(|c| entree.get(c).and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+        .replace('/', "\\");
+    if let Some(d) = comptabilite.map(|d| d.to_string_lossy().to_lowercase().replace('/', "\\"))
+        && !d.trim_matches('\\').is_empty()
+        && cible.contains(d.trim_end_matches('\\'))
+    {
+        return Some(("compta", "Je regarde ta comptabilité."));
+    }
+    if nom.starts_with("mcp__claude-in-chrome__") {
+        return Some(("chrome", "Je regarde dans Chrome."));
     }
     // Constructo AI, par la connexion d'Eve ou par le connecteur de claude.ai : ce que touche l'outil, d'après son nom.
     if let Some(n) = garde::outil_erp(nom) {
@@ -4670,6 +4917,9 @@ fn commentaire(nom: &str, entree: &Value) -> Option<(&'static str, &'static str)
                 } else {
                     Some(("courriels", "Je regarde les courriels."))
                 }
+            } else if dit("outlook.application") {
+                // Outlook lu par son automation, comme le fait l'Assistante en PowerShell.
+                Some(("courriels", "Je regarde les courriels."))
             } else if dit("calendrier") {
                 Some(("calendrier", "Je regarde le calendrier."))
             } else if dit("compta_base.py") || dit("revenus_base.py") {
@@ -4688,6 +4938,7 @@ fn commentaire(nom: &str, entree: &Value) -> Option<(&'static str, &'static str)
         }
         "Read" | "Glob" | "Grep" => Some(("dossiers", "Je cherche dans les dossiers.")),
         "WebSearch" | "WebFetch" => Some(("web", "Je cherche en ligne.")),
+        "Agent" | "Task" => Some(("agents", "Je lance un agent là-dessus.")),
         _ => None,
     }
 }
@@ -4836,6 +5087,26 @@ mod essais {
         assert_eq!(t.premier(), Some(Joie));
         // Sans émotion, rien.
         assert_eq!(Passages::default().phrase(Some(1)), None);
+    }
+
+    /// Ce que fait Claude, dit en quelques mots : Outlook par son automation, la comptabilité nommée (« ta
+    /// comptabilité »), un agent ; une comptabilité vide ne nomme rien.
+    #[test]
+    fn ce_que_fait_claude_se_dit_en_quelques_mots() {
+        let compta = std::path::Path::new(r"C:\Exemple\Comptabilité");
+        let dit = |nom: &str, entree: Value, c: Option<&std::path::Path>| commentaire(nom, &entree, c).map(|x| x.1);
+        let outlook = json!({ "command": "$ol = New-Object -ComObject Outlook.Application" });
+        assert_eq!(dit("PowerShell", outlook, None), Some("Je regarde les courriels."));
+        let plan = json!({ "file_path": r"c:\exemple\comptabilité\plan.md" });
+        assert_eq!(dit("Read", plan.clone(), Some(compta)), Some("Je regarde ta comptabilité."));
+        let ailleurs = json!({ "file_path": r"C:\Exemple\Maison\notes.md" });
+        assert_eq!(dit("Read", ailleurs, Some(compta)), Some("Je cherche dans les dossiers."));
+        assert_eq!(
+            dit("Grep", json!({ "path": "C:/Exemple/Comptabilité" }), Some(compta)),
+            Some("Je regarde ta comptabilité.")
+        );
+        assert_eq!(dit("Read", plan, Some(std::path::Path::new(""))), Some("Je cherche dans les dossiers."));
+        assert_eq!(dit("Agent", json!({}), None), Some("Je lance un agent là-dessus."));
     }
 
     #[test]

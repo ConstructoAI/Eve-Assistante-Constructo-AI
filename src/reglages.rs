@@ -141,6 +141,14 @@ pub struct Reglages {
     pub profils: Vec<Profil>,
     /// Le profil choisi, par son nom ; vide : celui d'office. Eve y passe entre deux demandes.
     pub profil: String,
+    /// Les veilles de cette Eve ([`crate::veilles`]) : chacune un fichier qu'autre chose tient à jour (une tâche
+    /// planifiée de Windows, un script) et la consigne que Claude reçoit quand il change ; `eve --veille` les pose.
+    /// Elles valent tout de suite.
+    pub veilles: Vec<Veille>,
+    /// Pendant un tour qu'une veille a ouvert — personne ne l'a demandé, et ce qu'il lit vient d'ailleurs (un courriel,
+    /// une page) —, une écriture dans Constructo AI ou une suppression attend l'accord de la personne, même sans les
+    /// accords (`privileges.accords`) : un courriel piégé ne la fait pas agir seule. Vrai d'office.
+    pub accords_des_veilles: bool,
     /// Ce que cette Eve sait de son fichier : jamais écrit ([`Fichier`]).
     #[serde(skip)]
     fichier: Fichier,
@@ -186,6 +194,16 @@ pub struct Profil {
     pub nom: String,
     /// Son dossier, un chemin complet : Claude Code y travaille, avec son `CLAUDE.md`.
     pub dossier: PathBuf,
+}
+
+/// Une veille ([`crate::veilles`]) : son nom (« courriels »), le fichier qu'Eve guette, la consigne que Claude reçoit
+/// quand il change.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Veille {
+    pub nom: String,
+    pub fichier: PathBuf,
+    pub consigne: String,
 }
 
 /// Les alertes vocales : ce qu'Eve dit d'elle-même, une cloche d'abord.
@@ -273,6 +291,8 @@ impl Default for Reglages {
             privileges: Privileges::default(),
             profils: Vec::new(),
             profil: String::new(),
+            veilles: Vec::new(),
+            accords_des_veilles: true,
             fichier: Fichier::default(),
         }
     }

@@ -58,6 +58,9 @@ pub struct Lancement {
     pub generation: u64,
     /// Ce que Claude peut prendre : ses outils, les connecteurs, Chrome, les serveurs MCP du poste.
     pub espace: Espace,
+    /// Les veilles de cette Eve, et si leurs tours demandent l'accord avant une écriture ([`crate::veilles`]).
+    pub veilles: Vec<crate::reglages::Veille>,
+    pub accords_des_veilles: bool,
 }
 
 pub struct Cerveau {
@@ -93,6 +96,8 @@ impl Cerveau {
         consigne.push_str(&consigne_des_dessins());
         consigne.push_str("\n\n");
         consigne.push_str(&consigne_des_rappels(&crate::reglages::dossier_local()));
+        consigne.push_str("\n\n");
+        consigne.push_str(&consigne_des_veilles(&l.veilles, l.accords_des_veilles));
         consigne.push_str("\n\n");
         consigne.push_str(&consigne_des_emotions());
         consigne.push_str("\n\n");
@@ -559,7 +564,8 @@ pub fn consigne_de_la_parole() -> String {
          - Réponds comme à l'oral : une à trois phrases courtes en tout. La première se dit dès qu'elle est écrite : \
          cinq à dix mots, l'essentiel. Chaque phrase, une idée, une quinzaine de mots au plus ; le reste, s'il le \
          faut, va après les trois tirets. Avant un travail de plus de quelques secondes, dis en quatre ou cinq mots ce \
-         que tu fais ; pas plus.\n\
+         que tu fais ; pas plus. Quand tu réfléchis longtemps avant d'écrire, Eve dit d'elle-même une phrase \
+         d'attente (« Je regarde ça. », « Je m'en occupe. ») : ne la redis pas, commence par la réponse.\n\
          - Varie tes débuts : pas toujours « Oui », « Parfait » ou « D'accord » ; souvent, entre tout de suite dans la \
          réponse. Le prénom de la personne, presque jamais : au plus pour la saluer. On ne nomme pas quelqu'un à qui \
          l'on parle dans chaque réponse, ni pour le féliciter, le remercier ou lui souhaiter bonne nuit.\n\
@@ -701,6 +707,43 @@ pub fn consigne_des_rappels(local: &Path) -> String {
          - Les rappels vivent dans {fichier} (une liste JSON : id, a, texte, dit, minuterie) : lis-le pour dire ceux qui \
          viennent ; pour en retirer ou en déplacer un, récris ce fichier (Eve le relit).",
         fichier = local.join("rappels.json").display()
+    )
+}
+
+/// La ligne qui ouvre la partie « VEILLES » de la consigne.
+const ENTETE_VEILLES: &str = "VEILLES";
+
+/// La partie « VEILLES » de la consigne, que reçoit toute Eve : pour surveiller quelque chose, Claude fait tenir un
+/// fichier à jour par autre chose (une tâche planifiée) et demande à Eve de le guetter (`eve --veille`, [`crate::veilles`])
+/// — jamais un réveil de Claude Code, qui relit toute la conversation à chaque fois et meurt avec la séance. Ses veilles
+/// (`veilles`), et si leurs tours demandent l'accord (`accords`). Elle vit avec le programme qui les guette.
+pub fn consigne_des_veilles(veilles: &[crate::reglages::Veille], accords: bool) -> String {
+    let accord = if accords {
+        " Pendant ce tour, une écriture dans Constructo AI ou une suppression attend l'accord de la personne (le réglage \
+         accords_des_veilles de reglages.json)."
+    } else {
+        ""
+    };
+    let siennes = if veilles.is_empty() {
+        String::new()
+    } else {
+        let liste: Vec<String> = veilles.iter().map(|v| format!("{} ({})", v.nom, v.fichier.display())).collect();
+        format!("\n- Les veilles de cette Eve : {}.", liste.join(" ; "))
+    };
+    format!(
+        "{ENTETE_VEILLES}\n\
+         - Pour surveiller quelque chose régulièrement (des courriels, un dossier, un compte, une page), ne pose jamais \
+         de réveil de Claude Code (CronCreate, ScheduleWakeup, /loop) : chaque réveil relit toute la conversation, même \
+         quand il n'y a rien de neuf, et il meurt avec ta séance. Fais plutôt tenir un fichier à jour par autre chose — \
+         une tâche planifiée de Windows qui lance un script en lecture seule —, puis demande à Eve de le guetter : & \
+         $env:EVE_PROGRAMME --veille \"courriels\" \"C:\\…\\veille.csv\" \"ce que tu feras de ce qui s'y ajoute\" (en Bash : \
+         \"$EVE_PROGRAMME\" --veille …). Eve le regarde toutes les cinq secondes, sans toi, et ne te réveille que quand il \
+         change : avec sa consigne, et les lignes ajoutées s'il n'a fait que grandir.\n\
+         - Un tour de veille commence par [Eve : la veille « … » a du neuf] : personne ne te l'a demandé. Ta réponse se \
+         montre à la personne, se dit le jour et s'annonce par une notification ; rien qui vaille d'être dit, réponds \
+         seulement [neutre].{accord}\n\
+         - --veilles les montre ; --veille-retirer \"nom\" en retire une. Un réveil qui ferait le travail d'une veille : \
+         retire-le (CronList, puis CronDelete).{siennes}"
     )
 }
 
@@ -948,6 +991,33 @@ mod essais {
         for recopie in ["transcription automatique", "Ta première phrase", "Réponds comme à l'oral"] {
             assert!(!voix.contains(recopie), "{recopie} recopié dans le gabarit du kit");
         }
+    }
+
+    /// La partie « VEILLES » : jamais un réveil de Claude Code ; la commande, en PowerShell et en Bash ; l'accord s'il le
+    /// faut ; les veilles de cette Eve.
+    #[test]
+    fn la_consigne_des_veilles() {
+        let v = [crate::reglages::Veille {
+            nom: "courriels".into(),
+            fichier: PathBuf::from(r"C:\Exemple\Maison\courriels\veille.csv"),
+            consigne: "Applique la consigne.".into(),
+        }];
+        let c = consigne_des_veilles(&v, true);
+        assert!(c.starts_with("VEILLES\n- Pour surveiller quelque chose régulièrement"), "{c}");
+        for attendu in [
+            "CronCreate",
+            "& $env:EVE_PROGRAMME --veille \"courriels\"",
+            "\"$EVE_PROGRAMME\" --veille",
+            "[neutre]",
+            "accords_des_veilles",
+            "CronDelete",
+            r"courriels (C:\Exemple\Maison\courriels\veille.csv)",
+        ] {
+            assert!(c.contains(attendu), "{attendu} manque :\n{c}");
+        }
+        assert!(!c.contains("  "), "les lignes se suivent sans blancs doublés :\n{c}");
+        let sans = consigne_des_veilles(&[], false);
+        assert!(!sans.contains("accords_des_veilles") && !sans.contains("Les veilles de cette Eve"), "{sans}");
     }
 
     /// La partie « PRONONCIATION » dit la commande, en PowerShell et en Bash, et ce qu'on y écrit.

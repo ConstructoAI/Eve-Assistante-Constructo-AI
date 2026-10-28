@@ -319,6 +319,8 @@ pub fn claude(r: &Reglages, args: &[String]) -> i32 {
         reprendre: None,
         generation: 1,
         espace: r.espace(crate::reglages::est_un_specialiste(&dossier)),
+        veilles: r.veilles.clone(),
+        accords_des_veilles: r.accords_des_veilles,
     };
     println!(
         "dossier : {} ; jeton de la base : {}",

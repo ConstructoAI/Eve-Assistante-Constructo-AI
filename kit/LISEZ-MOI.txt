@@ -90,6 +90,15 @@ LUI PARLER
 · Quand sa fenêtre n'est pas devant, un rappel qui sonne, une réponse longue qu'elle a finie ou un accord qu'elle
   attend s'annoncent aussi par une notification de Windows ; un clic ramène sa fenêtre. Réglages, Sur ce poste,
   « Notifications de Windows » les coupe.
+· « Regarde mon écran » : Eve prend une capture de l'écran où est ta souris, sans sa propre fenêtre, et la joint à ta
+  demande (« regarde mon écran et dis-moi ce qui cloche »). Elle reste dans les pièces jointes du jour, sur le poste.
+· Ses veilles : pour surveiller quelque chose (« lis mes courriels aux 15 minutes »), Eve fait tenir un fichier à jour
+  par une tâche planifiée de Windows, puis le guette elle-même, toutes les cinq secondes, sans Claude : elle ne réveille
+  Claude que quand il change, et ce qu'il en dit s'affiche, se dit le jour et s'annonce par une notification. Pendant
+  ces tours, une écriture dans Constructo AI ou une suppression attend ton accord (« accords_des_veilles » dans
+  reglages.json). eve --veilles les montre.
+· Pendant qu'elle réfléchit, Eve te le dit (« Je regarde ça. ») ; pendant un long travail, ce qu'elle fait (« Je
+  regarde les courriels. », « Je regarde ta comptabilité. »).
 · Une conversation par jour : un redémarrage dans la journée reprend celle du jour ; chaque matin, une neuve.
 · Eve vient avec son visage : son portrait et ses poses (programme\portrait du kit, que l'installateur pose chez chaque
   spécialiste), qui prennent la place de l'orbe dans le thème clair de Constructo AI. Réglages › Thème › Portrait d'Eve
