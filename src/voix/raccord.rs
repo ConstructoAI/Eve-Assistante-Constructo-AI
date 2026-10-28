@@ -10,8 +10,8 @@
 //! - une voix qui commence d'un coup, loin de zéro (jusqu'à −18 dBFS au premier échantillon) : un clic.
 //!
 //! Le raccord ([`faconner`]) retrouve les phrases de Piper dans son WAV (il pose après chacune un silence exact, des
-//! zéros), ôte le souffle de leurs bords, les amène toutes au même niveau (un gain par phrase, sans toucher à la vie de
-//! la phrase ; un limiteur doux garde ses crêtes), les fond à leurs bords, et les sépare par la pause que demande leur
+//! zéros), ôte le souffle de leurs bords, les fait finir au studio ([`studio::finir`] : la chaîne de la voix, puis
+//! chacune à la même sonie, ses crêtes gardées), les fond à leurs bords, et les sépare par la pause que demande leur
 //! ponctuation ([`pause_apres`]). La phrase suivante part de la fin de sa voix, après sa propre pause ([`Saut`] : un
 //! paragraphe se marque) : c'est le fil de la voix qui la fait partir à l'heure.
 
@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use eve::parole::Saut;
 
+use super::studio::{self, Chaine};
 use super::{entete, wav_mono};
 
 /// Une trame d'analyse : le niveau se mesure par 10 ms.
@@ -41,16 +42,6 @@ const MARGE_AVANT: f64 = 0.030;
 const MARGE_APRES: f64 = 0.060;
 /// Le silence au bout du WAV, après la voix : le lecteur de Windows finit ainsi sur des zéros.
 const QUEUE: f64 = 0.030;
-/// Le niveau actif de chaque phrase (son énergie moyenne là où elle parle), en dBFS sur l'échelle de Piper : la
-/// médiane des longues phrases. Une phrase plus forte baisse (jusqu'à 10 dB), une plus faible monte (jusqu'à 6 dB, le
-/// limiteur garde ses crêtes sous [`PLAFOND`]) ; à un demi-décibel près, rien ne change.
-const CIBLE: f32 = -15.0;
-const BAISSE_MAX: f32 = 10.0;
-const HAUSSE_MAX: f32 = 6.0;
-const PLAFOND: f32 = 0.89;
-/// Le limiteur : il prépare la baisse avant la crête et la relâche après, sur ce temps.
-const RELACHE: f64 = 0.040;
-const AVANCE_DU_LIMITEUR: f64 = 0.005;
 /// Une pause dans la phrase, là où la frontière d'une phrase coupée pour la synthèse se cherche : 60 ms au moins.
 const PAUSE_DANS_LA_PHRASE: f64 = 0.060;
 
@@ -74,6 +65,8 @@ pub(super) struct Consigne<'a> {
     /// Le texte synthétisé commence par quelques mots de contexte, déjà dits : où ils finissent (leur part du texte
     /// synthétisé, de 0 à 1). La voix ne commence qu'après la pause qui les suit.
     pub contexte: Option<f32>,
+    /// La chaîne de studio de la voix ; aucune : la mise à niveau seule ([`studio::finir`]).
+    pub chaine: Option<Chaine>,
 }
 
 /// La pause après un point, d'après le silence de phrase de la douceur : celui que Piper posait seul, plus ce que son
@@ -113,8 +106,8 @@ pub(super) fn pause_de_saut(saut: Saut, pause: Duration) -> Duration {
     }
 }
 
-/// Façonne un WAV de Piper (PCM 16 bits, mono) : ses phrases retrouvées, sans le souffle de leurs bords, au même
-/// niveau, fondues, séparées par leurs pauses, une courte queue de silence au bout. `None` : ce n'est pas un WAV de
+/// Façonne un WAV de Piper (PCM 16 bits, mono) : ses phrases retrouvées, sans le souffle de leurs bords, finies au
+/// studio, fondues, séparées par leurs pauses, une courte queue de silence au bout. `None` : ce n'est pas un WAV de
 /// Piper, ou il n'a pas de voix — il se dit tel quel.
 pub(super) fn faconner(wav: &[u8], c: &Consigne) -> Option<Faconne> {
     let e = entete(wav)?;
@@ -138,7 +131,7 @@ pub(super) fn faconner(wav: &[u8], c: &Consigne) -> Option<Faconne> {
     for (k, p) in phrases.iter().enumerate() {
         let Some(v) = voix_de(&x[p.clone()], taux) else { continue };
         let mut morceau = x[p.start + v.plage.start..p.start + v.plage.end].to_vec();
-        egaliser(&mut morceau, taux);
+        studio::finir(&mut morceau, e.taux, c.chaine.as_ref());
         fondre(&mut morceau, v.avant.max(taux / 200), v.apres.max(taux / 100));
         if let Some((j, apres)) = precedente {
             // La pause d'après la phrase précédente, d'après son texte si le texte a autant de phrases que Piper ; de
@@ -288,58 +281,6 @@ fn apres_le_contexte(x: &[f32], taux: usize, part: f32) -> usize {
     }
 }
 
-/// Le niveau actif d'une phrase : l'énergie moyenne de ses trames de 20 ms qui parlent (à 30 dB au plus de la plus
-/// forte) — ses silences et son souffle n'y comptent pas.
-fn niveau_actif(x: &[f32], taux: usize) -> Option<f32> {
-    let db = niveaux(x, taux, 0.020);
-    let fort = db.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let actives: Vec<f32> = db.into_iter().filter(|&v| v > (fort - 30.0).max(-50.0)).collect();
-    if actives.is_empty() {
-        return None;
-    }
-    let e = actives.iter().map(|&v| 10f64.powf(f64::from(v) / 10.0)).sum::<f64>() / actives.len() as f64;
-    Some((10.0 * e.log10()) as f32)
-}
-
-/// Amène une phrase à la [`CIBLE`] : un seul gain pour toute la phrase (sa vie, ses appuis restent) ; s'il monte, un
-/// limiteur garde ses crêtes sous [`PLAFOND`] — il prépare sa baisse avant la crête et la relâche après, en douceur.
-fn egaliser(x: &mut [f32], taux: usize) {
-    let Some(niveau) = niveau_actif(x, taux) else { return };
-    let gain_db = (CIBLE - niveau).clamp(-BAISSE_MAX, HAUSSE_MAX);
-    if gain_db.abs() < 0.5 {
-        return;
-    }
-    let g = 10f32.powf(gain_db / 20.0);
-    let mut limite = vec![1.0f32; x.len()];
-    if g > 1.0 {
-        let avance = (taux as f64 * AVANCE_DU_LIMITEUR).round() as usize;
-        for (i, &v) in x.iter().enumerate() {
-            let besoin = PLAFOND / (v.abs() * g).max(1e-9);
-            if besoin < 1.0 {
-                for l in &mut limite[i.saturating_sub(avance)..(i + avance + 1).min(x.len())] {
-                    *l = l.min(besoin);
-                }
-            }
-        }
-        // Lissée des deux côtés : la baisse vient peu à peu avant la crête et s'en va peu à peu après ; jamais
-        // au-dessus de ce qu'il faut.
-        let r = 1.0 - (-1.0 / (taux as f64 * RELACHE)).exp() as f32;
-        let mut avant = limite.clone();
-        for i in 1..avant.len() {
-            avant[i] = avant[i].min(avant[i - 1] + (1.0 - avant[i - 1]) * r);
-        }
-        for i in (0..limite.len().saturating_sub(1)).rev() {
-            limite[i] = limite[i].min(limite[i + 1] + (1.0 - limite[i + 1]) * r);
-        }
-        for (l, a) in limite.iter_mut().zip(avant) {
-            *l = l.min(a);
-        }
-    }
-    for (v, l) in x.iter_mut().zip(limite) {
-        *v *= g * l;
-    }
-}
-
 /// Un fondu en cosinus à l'entrée (`entree` échantillons) et à la sortie (`sortie`) : la voix part de zéro et y
 /// revient, sans clic.
 fn fondre(x: &mut [f32], entree: usize, sortie: usize) {
@@ -389,7 +330,8 @@ mod essais {
     }
 
     fn consigne(texte: &str) -> Consigne<'_> {
-        Consigne { silence: Duration::from_millis(350), texte, pause: Duration::from_millis(450), contexte: None }
+        let (silence, pause) = (Duration::from_millis(350), Duration::from_millis(450));
+        Consigne { silence, texte, pause, contexte: None, chaine: None }
     }
 
     /// Les plages où le son dépasse −42 dBFS par trames de 10 ms, en ms.
@@ -458,8 +400,8 @@ mod essais {
     }
 
     #[test]
-    fn chaque_phrase_au_meme_niveau() {
-        // Une phrase forte (−10 dBFS) et une faible (−20 dBFS) dans le même WAV : les deux à la cible.
+    fn chaque_phrase_a_la_meme_sonie() {
+        // Une phrase forte (−10 dBFS) et une faible (−20 dBFS) dans le même WAV : les deux à la sonie du studio.
         let silence = vec![0.0; (0.35 * TAUX as f64) as usize];
         let mut x = voix(0.6, -10.0);
         x.extend(&silence);
@@ -469,21 +411,9 @@ mod essais {
         let y = lire(&f.wav);
         let v = voix_entendue(&y);
         assert_eq!(v.len(), 2, "{v:?}");
-        let a = niveau_actif(&y[v[0].0 * TAUX / 1000..v[0].1 * TAUX / 1000], TAUX).unwrap();
-        let b = niveau_actif(&y[v[1].0 * TAUX / 1000..v[1].1 * TAUX / 1000], TAUX).unwrap();
-        assert!((a - CIBLE).abs() < 0.6 && (b - CIBLE).abs() < 0.6, "{a} {b}");
-        // Une phrase faible aux crêtes pleines (Piper ramène sa crête à 0 dBFS) : elle monte, et ses crêtes restent
-        // sous le plafond ; loin d'elles, la voix monte de tout le gain.
-        let mut z = voix(1.0, -21.0);
-        for i in [5_000, 12_000, 18_000] {
-            z[i] = 0.99;
-        }
-        z.extend(&silence);
-        let y = lire(&faconner(&en_wav(&z), &consigne("Une phrase calme.")).unwrap().wav);
-        let crete = y.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-        assert!(crete <= PLAFOND + 1e-3, "{crete}");
-        let niveau = niveau_actif(&y[400..1_800], TAUX).unwrap();
-        assert!((niveau - (-21.0 + HAUSSE_MAX)).abs() < 0.6, "loin des crêtes : {niveau}");
+        let sonie = |(a, b): (usize, usize)| studio::sonie(&y[a * TAUX / 1000..b * TAUX / 1000], TAUX as u32).unwrap();
+        let (a, b) = (sonie(v[0]), sonie(v[1]));
+        assert!((a - studio::SONIE).abs() < 0.6 && (b - studio::SONIE).abs() < 0.6, "{a} {b}");
     }
 
     #[test]

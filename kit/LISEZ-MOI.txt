@@ -128,6 +128,21 @@ spécialiste a sa propre connexion.
 · Il faut un abonnement Constructo AI qui ouvre le connecteur MCP de l'ERP.
 
 
+TES SERVICES EN LIGNE (FACULTATIF)
+----------------------------------
+Si ton entreprise fait tourner ses propres services sur Render ou encaisse par Stripe, le tableau de bord (le thème
+Constructo AI) peut montrer leur état : celui de Claude, de GitHub et de Render, les erreurs des journaux de tes
+services Render, et tes montants Stripe (le solde, ce qui est entré, les abonnements, les factures ouvertes). Eve ne
+fait que lire (des requêtes GET), avec une clé d'API que tu lui donnes, chiffrée pour ta session Windows dans son
+dossier local ; Claude ne la voit jamais. Sans clé, rien ne se lit ni ne s'affiche.
+· Poser une clé : dans PowerShell,
+    $env:EVE_DOSSIER_LOCAL = "$env:LOCALAPPDATA\Eve\specialistes\<son nom>"
+    & "$env:LOCALAPPDATA\Eve\programme\eve.exe" --cle render      (ou --cle stripe)
+  puis colle la clé et fais Entrée (elle ne s'affiche pas). Pour Stripe, une clé restreinte en lecture seule suffit
+  (Stripe : Développeurs, Clés API, « Créer une clé restreinte »). « --cle render --retirer » la retire ; « --cle »
+  seul dit ce qui est posé. Eve la prend sans redémarrer.
+
+
 OÙ EST QUOI
 -----------
 · Son dossier de travail (celui que tu as choisi) : PROFIL.md, son profil, que tu peux relire et modifier ;

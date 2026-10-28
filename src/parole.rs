@@ -615,15 +615,34 @@ pub fn rappel_dit(dit: &str) -> Option<RappelDit> {
         return None;
     }
     let apres = debut + 2;
+    // Une heure dite ne se lit sûrement que sans un jour, une date ni un moment de la journée ailleurs dans la phrase :
+    // « jeudi à 10 h » n'est pas demain à 10 h, ni « ce soir à 8 h » demain à 8 h, ni « le 30 à 9 h » aujourd'hui.
+    let sure = |quand: Quand, moment: std::ops::Range<usize>| {
+        let date = |x: &str| CALENDRIER.contains(&x) || x.starts_with(|c: char| c.is_ascii_digit());
+        matches!(quand, Quand::Dans(_)) || !m.iter().enumerate().any(|(j, x)| !moment.contains(&j) && date(&x.0))
+    };
     if let Some((quand, k)) = moment_dit(&m, apres) {
-        return Some(RappelDit { quand, texte: sujet(dit, &m, k, m.len()), minuterie: false });
+        return sure(quand, apres..k).then(|| RappelDit { quand, texte: sujet(dit, &m, k, m.len()), minuterie: false });
     }
     // Le premier moment qui va jusqu'au bout : « de téléphoner à Marie demain à 9 h » (pas « à 9 h » seul).
     (apres + 1..m.len()).find_map(|k| {
         let (quand, fin) = moment_dit(&m, k)?;
-        (fin == m.len()).then(|| RappelDit { quand, texte: sujet(dit, &m, apres, k), minuterie: false })
+        (fin == m.len() && sure(quand, k..fin)).then(|| RappelDit {
+            quand,
+            texte: sujet(dit, &m, apres, k),
+            minuterie: false,
+        })
     })
 }
+
+/// Les mots qui changent le jour d'une heure dite ou son moment de la journée (« jeudi à 10 h », « ce soir à 8 h »,
+/// « demain matin à 9 h », « après-demain à 9 h »), hors de l'heure elle-même (« 4 h de l'après-midi », « 8 h du
+/// soir ») : la voie rapide ne les lit pas ; le rappel va à Claude.
+const CALENDRIER: [&str; 27] = [
+    "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche", "prochain", "prochaine", "semaine",
+    "mois", "soir", "matin", "apres", "lendemain", "janvier", "fevrier", "mars", "avril", "mai", "juin", "juillet",
+    "aout", "septembre", "octobre", "novembre", "decembre",
+];
 
 /// Ce que vaut une transcription, avant de partir à Claude (le garde-fou de l'oreille).
 #[derive(Debug, PartialEq)]
@@ -1771,8 +1790,16 @@ mod essais {
         assert_eq!(r("rappelle-moi dans 1 heure et demie de rappeler le client").quand, Quand::Dans(5400));
         assert_eq!(r("Rappelle-moi à huit heures de sortir le chien").quand, a(8, 0, false));
         assert_eq!(r("Rappelle-moi à midi de manger").quand, a(12, 0, false));
-        // Ce qui ne se lit pas aussi sûrement va à Claude.
+        assert_eq!(r("Rappelle-moi à 8 h du soir de sortir les poubelles").quand, a(20, 0, false));
+        // Ce qui ne se lit pas aussi sûrement va à Claude : un jour ou un moment de la journée hors de l'heure (« jeudi
+        // à dix heures » devenait demain à 10 h, le jeudi gardé dans le texte du rappel).
         for t in [
+            "Rappelle-moi d'appeler le plombier jeudi à dix heures.",
+            "Rappelle-moi ce soir à 8 h de sortir les poubelles",
+            "Rappelle-moi de payer le loyer demain matin à 9 h",
+            "Rappelle-moi après-demain à 9 h d'appeler Marie",
+            "Rappelle-moi à 10 h mardi prochain d'appeler le notaire",
+            "Rappelle-moi le 30 à 9 h de payer le loyer",
             "Rappelle-moi à 4 de sortir le chien",
             "Rappelle-moi vendredi d'appeler le notaire",
             "Quelle heure est-il ?",

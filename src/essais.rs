@@ -36,6 +36,8 @@
 //!   qui continue, une clé retirée ou posée en marche.
 //! - `eve --essai-stripe` : une lecture du compte Stripe, avec la clé du dossier local, imprimée comme le tableau de
 //!   bord la montrerait ; les routes lues et les droits d'une clé restreinte.
+//! - `eve --essai-son textes.txt dossier` : ce qu'Eve dirait de chaque texte, rendu sans le jouer — les WAV que
+//!   recevrait le lecteur, et leur tout.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -6492,12 +6494,7 @@ impl Vitrine {
     /// pris. Elle dit ce que montre le tableau de bord : le chantier de l'école, la plus grosse facture en retard, le
     /// hockey.
     fn conversation(&self) -> Vec<Value> {
-        // Ce qui se dit à la française ; les cartes (après les trois tirets) telles quelles.
-        let francais = |texte: &str| match texte.split_once("\n---\n") {
-            Some((dit, cartes)) => format!("{}\n---\n{cartes}", insecables(dit)),
-            None => insecables(texte),
-        };
-        let ligne = |de: &str, texte: &str, heure: &str| EtatDuTheme::ligne(de, &francais(texte), heure, false);
+        let ligne = |de: &str, texte: &str, heure: &str| EtatDuTheme::ligne(de, texte, heure, false);
         let eve = |texte: &str, heure: &str, tour: &str| {
             let mut l = ligne("eve", texte, heure);
             l["tour"] = Value::String(format!("{tour} · Sonnet 5.5, moyen"));
@@ -6577,44 +6574,6 @@ impl Vitrine {
     }
 }
 
-/// Un texte de la vitrine à la française : une espace insécable devant « ? ! : ; » et « », après « et entre un nombre
-/// et son unité ($, %, M$, h) ; une espace fine entre les milliers. Une bulle ne se coupe plus au mauvais endroit
-/// (« soumission / ? », « 1,45 / M$ »).
-fn insecables(texte: &str) -> String {
-    let mut s = texte.to_string();
-    for (de, a) in [
-        (" ?", "\u{a0}?"),
-        (" !", "\u{a0}!"),
-        (" :", "\u{a0}:"),
-        (" ;", "\u{a0};"),
-        ("« ", "«\u{a0}"),
-        (" »", "\u{a0}»"),
-        (" $", "\u{a0}$"),
-        (" %", "\u{a0}%"),
-        (" M$", "\u{a0}M$"),
-    ] {
-        s = s.replace(de, a);
-    }
-    // Les heures (« 6 h 30 », « 17 h ») et les milliers (« 142 000 ») : un nombre ne se sépare pas de ce qui le suit.
-    let c: Vec<char> = s.chars().collect();
-    let a = |k: usize| c.get(k).copied().unwrap_or(' ');
-    (0..c.len())
-        .map(|k| match c[k] {
-            ' ' if k > 0 && a(k - 1).is_ascii_digit() && a(k + 1).is_ascii_digit() => '\u{202f}',
-            ' ' if k > 0 && a(k - 1).is_ascii_digit() && a(k + 1) == 'h' && !a(k + 2).is_alphabetic() => '\u{a0}',
-            ' ' if k > 2
-                && a(k - 1) == 'h'
-                && a(k - 2) == ' '
-                && a(k - 3).is_ascii_digit()
-                && a(k + 1).is_ascii_digit() =>
-            {
-                '\u{a0}'
-            }
-            x => x,
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod essais_de_la_vitrine {
     use super::*;
@@ -6668,7 +6627,7 @@ mod essais_de_la_vitrine {
         assert!(RETARDS_DE_LA_VITRINE.iter().all(|f| f.2 <= RETARDS_DE_LA_VITRINE[0].2));
         let dette = texte(5);
         assert!(dette.starts_with(client.trim_end_matches(" inc.")), "{dette}");
-        assert!(dette.contains("142\u{202f}000\u{a0}$") && dette.contains(&format!("{jours} jours")), "{dette}");
+        assert!(dette.contains("142 000 $") && dette.contains(&format!("{jours} jours")), "{dette}");
         // Le chantier de l'école est sur la carte des chantiers, et sa coulée à l'agenda, jeudi prochain.
         let e = v.entreprise(8 * 3600);
         assert!(
@@ -6691,16 +6650,6 @@ mod essais_de_la_vitrine {
             }
         }
         assert_eq!(fil.len(), MOMENTS_DE_LA_VITRINE.last().unwrap().lignes);
-    }
-
-    #[test]
-    fn un_texte_a_la_francaise() {
-        assert_eq!(
-            insecables("la soumission ? Oui : 1,45 M$, 60 %, à 6 h 30, à 17 h. Environ 142 000 $ !"),
-            "la soumission\u{a0}? Oui\u{a0}: 1,45\u{a0}M$, 60\u{a0}%, à 6\u{a0}h\u{a0}30, à 17\u{a0}h. Environ \
-             142\u{202f}000\u{a0}$\u{a0}!"
-        );
-        assert_eq!(insecables("« le Mur », à 16 h à l'entrepôt"), "«\u{a0}le Mur\u{a0}», à 16\u{a0}h à l'entrepôt");
     }
 }
 
@@ -9362,5 +9311,106 @@ pub fn stripe(args: &[String]) -> i32 {
         let quand = crate::rappels::heure_locale(p.quand).unwrap_or_default();
         println!("  {quand}  {:>14}  {issue:<10}  {}", argent(p.montant), p.qui);
     }
+    0
+}
+
+// ---- Le son de la voix, rendu sans le jouer -----------------------------------------------------------------------
+
+/// `eve --essai-son <textes.txt> <dossier> [--bruts DOSSIER] [--id VOIX] [--douceur N]` : ce qu'Eve dirait de chaque
+/// texte (une ligne du fichier chacun ; « \n » y fait une autre ligne, « \n\n » un autre paragraphe), rendu sans le
+/// jouer — aucun son dans la pièce : le WAV de chaque phrase tel que le lecteur le recevrait (`phrase-TT-MM.wav`), le
+/// tout de chaque texte, ses phrases à leur heure (`texte-TT.wav`), et ce qui s'y dit (`rendu.json`). Les WAV de Piper
+/// se gardent (`--bruts`, d'office `<dossier>\bruts`) : un autre rendu les reprend, et seul le traitement change.
+pub fn son(r: &Reglages, args: &[String]) -> i32 {
+    let usage = "eve --essai-son <textes.txt> <dossier> [--bruts DOSSIER] [--id VOIX] [--douceur N]";
+    let mut reglages = r.clone();
+    let (mut positionnels, mut bruts) = (Vec::new(), None);
+    let mut mots = args.iter();
+    while let Some(a) = mots.next() {
+        if !matches!(a.as_str(), "--bruts" | "--id" | "--douceur") {
+            positionnels.push(a.clone());
+            continue;
+        }
+        let Some(valeur) = mots.next() else {
+            eprintln!("{usage} : {a} veut une valeur");
+            return 2;
+        };
+        match a.as_str() {
+            "--bruts" => bruts = Some(std::path::PathBuf::from(valeur)),
+            "--id" => reglages.voix = valeur.clone(),
+            _ => match valeur.parse() {
+                Ok(n) => reglages.douceur = n,
+                Err(_) => {
+                    eprintln!("{usage} : --douceur veut un nombre");
+                    return 2;
+                }
+            },
+        }
+    }
+    let [textes, dossier] = positionnels.as_slice() else {
+        eprintln!("{usage}");
+        return 2;
+    };
+    let dossier = Path::new(dossier);
+    let textes: Vec<String> = match std::fs::read_to_string(textes) {
+        Ok(t) => t.lines().filter(|l| !l.trim().is_empty()).map(|l| l.replace("\\n", "\n")).collect(),
+        Err(e) => {
+            eprintln!("{textes} : {e}");
+            return 1;
+        }
+    };
+    let bruts = bruts.unwrap_or_else(|| dossier.join("bruts"));
+    if let Err(e) = std::fs::create_dir_all(dossier) {
+        eprintln!("{} : {e}", dossier.display());
+        return 1;
+    }
+    println!(
+        "voix : {} ; débit {} ; douceur {} ; {} texte(s)",
+        reglages.voix,
+        reglages.debit,
+        reglages.douceur,
+        textes.len()
+    );
+    let t0 = Instant::now();
+    let rendus = match voix::rendre(&reglages, &textes, &bruts) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("le rendu a échoué : {e}");
+            return 1;
+        }
+    };
+    let secondes = |d: Duration| (d.as_secs_f64() * 1000.0).round() / 1000.0;
+    let mut resume = Vec::new();
+    for (t, (texte, rendu)) in textes.iter().zip(&rendus).enumerate() {
+        let tout = format!("texte-{:02}.wav", t + 1);
+        let mut phrases = Vec::new();
+        for (m, p) in rendu.phrases.iter().enumerate() {
+            let nom = format!("phrase-{:02}-{:02}.wav", t + 1, m + 1);
+            if let Err(e) = std::fs::write(dossier.join(&nom), &p.wav) {
+                eprintln!("{nom} : {e}");
+                return 1;
+            }
+            phrases.push(serde_json::json!({
+                "fichier": nom,
+                "texte": p.texte,
+                "pause": secondes(p.pause),
+                "debut": secondes(p.debut),
+                "voix": [secondes(p.voix.0), secondes(p.voix.1)],
+            }));
+        }
+        if let Err(e) = std::fs::write(dossier.join(&tout), &rendu.tout) {
+            eprintln!("{tout} : {e}");
+            return 1;
+        }
+        let dit: Vec<&str> = rendu.phrases.iter().map(|p| p.texte.as_str()).collect();
+        println!("{tout} : {} phrase(s) — {}", rendu.phrases.len(), dit.join(" "));
+        resume.push(serde_json::json!({ "texte": texte, "dit": dit.join(" "), "fichier": tout, "phrases": phrases }));
+    }
+    let json = serde_json::to_string_pretty(&resume).unwrap_or_default();
+    if let Err(e) = std::fs::write(dossier.join("rendu.json"), json) {
+        eprintln!("rendu.json : {e}");
+        return 1;
+    }
+    println!("rendu en {:.1} s dans {}", t0.elapsed().as_secs_f32(), dossier.display());
     0
 }

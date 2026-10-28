@@ -43,6 +43,7 @@ pub use prosodie::{Marque, Repere};
 
 mod prosodie;
 mod raccord;
+mod studio;
 mod supertonic;
 
 /// Supertonic se mène comme Piper ([`Piper`]) : sa « voix » est ce préfixe et son style (« supertonic/F3 »).
@@ -587,8 +588,8 @@ enum Trace {
 }
 
 /// La douceur de la voix neuronale : la prosodie de Piper (`--noise_scale` : la variabilité de la voix ; `--noise_w` :
-/// celle du rythme ; `--sentence_silence` : la pause entre les phrases), puis un passe-bas doux (deux pôles : les
-/// sifflantes adoucies) et un gain un peu sous 1. Réglée à l'oreille (A, B).
+/// celle du rythme ; `--sentence_silence` : la pause entre les phrases), puis le son fini au studio, chaque phrase
+/// passée par la chaîne de la voix ([`studio::Chaine`]) avant sa mise à niveau. Réglée à l'oreille (A, B).
 #[derive(Clone, Copy)]
 struct Douceur {
     bruit: f32,
@@ -596,26 +597,33 @@ struct Douceur {
     /// Le silence que Piper pose après chaque phrase (il les sépare dans son WAV) ; la pause après un point en vient
     /// ([`raccord::pause_de_phrase`]).
     silence: f32,
-    /// La fréquence de coupure du passe-bas (Hz) ; 0 : aucun.
-    coupure: f32,
-    gain: f32,
+    /// La chaîne de studio : réglée sur la voix de Piper ([`douceur_du_moteur`]) ; aucune, la mise à niveau seule.
+    chaine: Option<studio::Chaine>,
+}
+
+/// Le traitement d'un moteur : la chaîne de studio a été réglée sur la voix de Piper ; Supertonic et les voix de
+/// Windows n'en prennent que la mise à niveau (leur sonie, leurs crêtes).
+fn douceur_du_moteur(tige: Option<&str>, douceur: Douceur) -> Douceur {
+    match tige {
+        Some(t) if !t.starts_with(SUPERTONIC) => douceur,
+        _ => Douceur { chaine: None, ..douceur },
+    }
 }
 
 impl Douceur {
     fn de(niveau: u8) -> Douceur {
         match niveau {
-            0 => Douceur { bruit: 0.667, rythme: 0.8, silence: 0.2, coupure: 0.0, gain: 1.0 },
+            0 => Douceur { bruit: 0.667, rythme: 0.8, silence: 0.2, chaine: None },
             // « Encore un peu plus douce » : une voix plus calme, des aigus plus adoucis. Le
             // rythme reste celui de Piper (0,8) : à 0,30, `noise_w` divisait la durée des sons par deux — 11,6 syllabes
             // par seconde, le double d'un débit naturel, et Whisper n'y comprenait plus rien (mesuré ; à l'écoute :
             // « robotique… ou trop vite »). Mesuré aussi le 2026-10-26 (huit phrases, trois tirages) : le calme de
             // `noise_scale` 0,45 rend la voix plus nette sans l'aplatir — l'oreille d'Eve en entend 5,6 % des mots de
-            // travers, contre 10,6 % à 0,667, et sa mélodie garde 3,9 demi-tons d'écart, contre 3,7 ; le passe-bas ôte
-            // 1,8 dB à la présence de la voix (2 à 4,5 kHz) et 6 dB à ses aigus, sans que l'oreille ni un juge (UTMOS22)
-            // s'en ressentent ; un adoucisseur des seules sifflantes, essayé à sa place, était moins bien noté (0,05 à
-            // 0,1 de moins).
-            1 => Douceur { bruit: 0.45, rythme: 0.8, silence: 0.35, coupure: 5000.0, gain: 0.85 },
-            _ => Douceur { bruit: 0.40, rythme: 0.8, silence: 0.40, coupure: 4000.0, gain: 0.80 },
+            // travers, contre 10,6 % à 0,667, et sa mélodie garde 3,9 demi-tons d'écart, contre 3,7. Les aigus
+            // adoucis : la chaîne du studio, à la place d'un passe-bas qui étouffait la voix
+            // ([`studio::Chaine::DOUCE`]).
+            1 => Douceur { bruit: 0.45, rythme: 0.8, silence: 0.35, chaine: Some(studio::Chaine::DOUCE) },
+            _ => Douceur { bruit: 0.40, rythme: 0.8, silence: 0.40, chaine: Some(studio::Chaine::PLUS_DOUCE) },
         }
     }
 }
@@ -723,31 +731,6 @@ fn lire_wav(chemin: &Path, fin: bool) -> io::Result<Option<Vec<u8>>> {
         return Ok(None);
     }
     if ramener(&mut wav) { Ok(Some(wav)) } else { Err(io::Error::other("ce n'est pas un WAV")) }
-}
-
-/// Adoucit un WAV de Piper (PCM 16 bits), en mémoire : deux passes d'un passe-bas du premier ordre, et le gain.
-fn adoucir(wav: &mut [u8], d: Douceur) {
-    if d.coupure <= 0.0 && (d.gain - 1.0).abs() < f32::EPSILON {
-        return;
-    }
-    let Some(e) = entete(wav) else { return };
-    let fin = (e.debut + e.taille).min(wav.len());
-    let (echantillons, _) = wav[e.debut..fin].as_chunks_mut::<2>();
-    let mut x: Vec<f32> = echantillons.iter().map(|&b| f32::from(i16::from_le_bytes(b))).collect();
-    let taux = e.taux as f32;
-    if d.coupure > 0.0 && taux > 0.0 {
-        let a = 1.0 - (-2.0 * std::f32::consts::PI * d.coupure / taux).exp();
-        for _ in 0..2 {
-            let mut s = 0.0f32;
-            for v in x.iter_mut() {
-                s += a * (*v - s);
-                *v = s;
-            }
-        }
-    }
-    for (b, v) in echantillons.iter_mut().zip(x) {
-        *b = ((v * d.gain).clamp(-32_768.0, 32_767.0) as i16).to_le_bytes();
-    }
 }
 
 /// Piper et ses voix : dans le dossier local du poste (`piper\piper\piper.exe`, `voix\*.onnx` et leur `.onnx.json`, que
@@ -1212,8 +1195,7 @@ impl<A> File<A> {
 struct Piper {
     /// Le processus de Piper ; aucun pour Supertonic.
     enfant: Option<Child>,
-    /// Le traitement de ses WAV ([`adoucir`]) : la douceur d'Eve pour Piper ; pour Supertonic, son gain seul (le
-    /// passe-bas a été réglé sur la voix de Piper).
+    /// Le traitement de ses WAV : la douceur d'Eve, sa chaîne de studio pour Piper seulement ([`douceur_du_moteur`]).
     douceur: Douceur,
     /// Supertonic : les phrases jusqu'à ce numéro sont coupées, il les saute (un modèle se recharge en secondes).
     oubli: Option<Arc<AtomicU64>>,
@@ -1242,7 +1224,7 @@ impl Piper {
             let s = supertonic::Supertonic::lancer(style, supertonic::vitesse(debit), dossier);
             return Ok(Piper {
                 enfant: None,
-                douceur: Douceur { coupure: 0.0, ..douceur },
+                douceur: douceur_du_moteur(Some(tige), douceur),
                 oubli: Some(s.oubli),
                 entree: s.entree,
                 sorties: s.sorties,
@@ -1862,17 +1844,7 @@ impl Fil {
     fn son(&mut self, numero: u64, wav: Vec<u8>, synthese: Option<Duration>, douceur: Douceur) -> Son {
         let Some(m) = self.file.morceaux.iter().find(|m| m.numero == numero) else { return Son::tel_quel(wav) };
         let synthetise = File::a_synthetiser(m).chars().count();
-        let consigne = raccord::Consigne {
-            silence: Duration::from_secs_f32(douceur.silence),
-            texte: &m.texte,
-            pause: self.file.pause,
-            contexte: m.synthese.as_ref().map(|s| s.1),
-        };
-        let mut son = match raccord::faconner(&wav, &consigne) {
-            Some(f) => Son { wav: f.wav, tete: f.tete, voix: f.voix },
-            None => Son::tel_quel(wav.clone()),
-        };
-        adoucir(&mut son.wav, douceur);
+        let son = faconner_le_son(&wav, &consigne_de(m, self.file.pause, douceur));
         // Toute la voix que Piper a faite (son contexte compris, sans son silence de fin) : par caractère, et le temps
         // qu'il y a mis. Une phrase trop courte n'apprend rien (son temps est surtout celui de Piper qui démarre).
         let brute = duree_wav(&wav).unwrap_or_default().as_secs_f64() - f64::from(douceur.silence);
@@ -2087,9 +2059,8 @@ impl Fil {
             }
             match resultat {
                 Some(Ok(wav)) => {
-                    // Le raccord et le gain d'Eve, comme Piper ; pas le passe-bas, réglé sur la voix de Piper (comme
-                    // pour Supertonic).
-                    let son = self.son(numero, wav, None, Douceur { coupure: 0.0, ..self.douceur });
+                    // Le raccord et la mise à niveau d'Eve, comme Piper ; pas la chaîne, réglée sur la voix de Piper.
+                    let son = self.son(numero, wav, None, douceur_du_moteur(None, self.douceur));
                     self.file.pret(numero, son);
                     self.erreur_windows_dite = false;
                 }
@@ -2270,6 +2241,142 @@ fn depart(tait: Instant, pause: Duration, avance: Duration) -> Instant {
     (tait + pause).checked_sub(avance).unwrap_or(tait)
 }
 
+/// Comment façonner le WAV d'un morceau de la file : le silence de phrase de la douceur, son texte, la pause d'un
+/// point, la part de son contexte s'il est la seconde partie d'une phrase coupée, et la chaîne de studio du moteur.
+fn consigne_de<'a, A>(m: &'a Morceau<A>, pause: Duration, douceur: Douceur) -> raccord::Consigne<'a> {
+    raccord::Consigne {
+        silence: Duration::from_secs_f32(douceur.silence),
+        texte: &m.texte,
+        pause,
+        contexte: m.synthese.as_ref().map(|s| s.1),
+        chaine: douceur.chaine,
+    }
+}
+
+/// Un WAV de la voix tel qu'il se dit : façonné par le raccord (le souffle de ses bords ôté, chaque phrase finie au
+/// studio, fondue, ses pauses selon la ponctuation). Le même pour le fil et pour le rendu ([`rendre`]).
+fn faconner_le_son(wav: &[u8], consigne: &raccord::Consigne) -> Son {
+    match raccord::faconner(wav, consigne) {
+        Some(f) => Son { wav: f.wav, tete: f.tete, voix: f.voix },
+        None => Son::tel_quel(wav.to_vec()),
+    }
+}
+
+// ---- Le rendu, sans le jouer ---------------------------------------------------------------------------------------
+
+/// Un texte rendu tel qu'Eve le dirait ([`rendre`]) : chacune de ses phrases, et le tout.
+pub struct Rendu {
+    pub phrases: Vec<PhraseRendue>,
+    /// Ce qui s'entendrait, du début du premier son à la fin du dernier : un WAV.
+    pub tout: Vec<u8>,
+}
+
+/// Une phrase rendue : ce qu'elle dit (le texte tel qu'il se dit), le WAV que recevrait le lecteur, la pause de la file
+/// avant sa voix, et où, dans le tout, ce WAV commence, sa voix commence et sa voix se tait.
+pub struct PhraseRendue {
+    pub texte: String,
+    pub wav: Vec<u8>,
+    pub pause: Duration,
+    pub debut: Duration,
+    pub voix: (Duration, Duration),
+}
+
+/// Ce qu'Eve dirait de chaque texte, rendu sans le jouer (`eve --essai-son`), par le chemin d'une réponse : ses
+/// phrases telles que la parole en flux les donne ([`parole::EnFlux`]), le texte tel qu'il se dit, la file et ses
+/// pauses, Piper avec les réglages d'Eve, le son façonné ([`faconner_le_son`]) ; puis chaque son posé là où le lecteur
+/// le ferait entendre. Seule la coupure d'une phrase en retard ne se fait pas : elle dépend du temps que met Piper sur
+/// le poste à cet instant. Les WAV de Piper se gardent dans `bruts` (`brut-TT-MM.wav`, et à côté le texte qu'il a
+/// dit) : un autre rendu des mêmes textes les reprend — les mêmes tirages de Piper, seul le traitement change.
+pub fn rendre(reglages: &Reglages, textes: &[String], bruts: &Path) -> Result<Vec<Rendu>, String> {
+    let Moteur::Piper(tige, locuteur) = moteur(&reglages.voix) else {
+        return Err(format!("le rendu ne fait que Piper et Supertonic, pas « {} »", reglages.voix));
+    };
+    fs::create_dir_all(bruts).map_err(|e| format!("{} : {e}", bruts.display()))?;
+    let douceur = Douceur::de(reglages.douceur);
+    let douceur_du_son = douceur_du_moteur(Some(tige.as_str()), douceur);
+    let mut piper: Option<Piper> = None;
+    let mut rendus = Vec::new();
+    for (t, texte) in textes.iter().enumerate() {
+        // Les phrases comme le chef les donne à la voix, puis la file, comme le fil les reçoit.
+        let mut flux = parole::EnFlux::default();
+        let mut phrases = flux.ajouter(texte);
+        phrases.extend(flux.finir());
+        let mut file: File<()> = File::nouvelle(raccord::pause_de_phrase(douceur.silence));
+        for (k, p) in phrases.iter().enumerate() {
+            let dit = diction::tel_qu_il_se_dit(&diction::avec_les_prononciations(&p.texte, &reglages.prononciations));
+            file.ajouter(k as u64 + 1, &dit, false, p.saut);
+        }
+        let mut sons = Vec::new();
+        for (m, morceau) in file.morceaux.iter().enumerate() {
+            let a_dire = File::a_synthetiser(morceau);
+            let nom = format!("brut-{:02}-{:02}", t + 1, m + 1);
+            let (chemin, dit) = (bruts.join(format!("{nom}.wav")), bruts.join(format!("{nom}.txt")));
+            let deja = fs::read_to_string(&dit).is_ok_and(|s| s == a_dire).then(|| fs::read(&chemin).ok()).flatten();
+            let brut = match deja {
+                Some(w) => w,
+                None => {
+                    if piper.is_none() {
+                        let p = Piper::lancer(&tige, locuteur, reglages.debit, douceur, bruts);
+                        piper = Some(p.map_err(|e| format!("Piper ne démarre pas ({e})"))?);
+                    }
+                    let Some(p) = piper.as_mut() else { return Err("Piper manque".into()) };
+                    let w = synthetiser(p, a_dire, &format!("{nom}.wav"), bruts)?;
+                    fs::write(&dit, a_dire).map_err(|e| format!("{} : {e}", dit.display()))?;
+                    w
+                }
+            };
+            let son = faconner_le_son(&brut, &consigne_de(morceau, file.pause, douceur_du_son));
+            sons.push((morceau.pause, morceau.texte.clone(), son));
+        }
+        rendus.push(poser(sons)?);
+    }
+    Ok(rendus)
+}
+
+/// Une phrase dite par Piper, attendue : son WAV, complet.
+fn synthetiser(p: &mut Piper, texte: &str, nom: &str, dossier: &Path) -> Result<Vec<u8>, String> {
+    p.envoyer(0, texte, nom, dossier)?;
+    let ligne = p.sorties.recv_timeout(DELAI_PIPER).map_err(|_| format!("Piper ne répond plus{}", p.detail()))?;
+    p.attendus.pop_front();
+    let chemin = PathBuf::from(ligne);
+    let chemin = if chemin.is_absolute() { chemin } else { dossier.join(chemin) };
+    let depuis = Instant::now();
+    loop {
+        match lire_wav(&chemin, depuis.elapsed() > DELAI_WAV) {
+            Ok(Some(w)) => return Ok(w),
+            Ok(None) => thread::sleep(PAS),
+            Err(e) => return Err(format!("{} : {e}", chemin.display())),
+        }
+    }
+}
+
+/// Les sons d'un texte posés là où le lecteur les ferait entendre : le premier au début ; chacun des suivants, sa voix
+/// à la fin de la voix d'avant plus sa pause (sa marge, avant sa voix, empiète sur la pause). Ils s'additionnent là où
+/// ils se chevauchent, comme les deux lecteurs qui jouent ensemble.
+fn poser(sons: Vec<(Duration, String, Son)>) -> Result<Rendu, String> {
+    let taux = sons.iter().find_map(|(_, _, s)| entete(&s.wav).map(|e| e.taux)).ok_or("aucun son")?;
+    let (mut tout, mut phrases, mut tait) = (Vec::<f32>::new(), Vec::new(), None::<f64>);
+    for (pause, texte, son) in sons {
+        let e = entete(&son.wav).ok_or("un son illisible")?;
+        if e.taux != taux || e.octets_par_seconde != taux * 2 {
+            return Err("des sons de cadences différentes".into());
+        }
+        let debut = tait.map_or(0.0, |t| (t + pause.as_secs_f64() - son.tete.as_secs_f64()).max(0.0));
+        let i0 = (debut * f64::from(taux)).round() as usize;
+        let (echantillons, _) = son.wav[e.debut..(e.debut + e.taille).min(son.wav.len())].as_chunks::<2>();
+        tout.resize(tout.len().max(i0 + echantillons.len()), 0.0);
+        for (v, b) in tout[i0..].iter_mut().zip(echantillons) {
+            *v += f32::from(i16::from_le_bytes(*b));
+        }
+        let debut = Duration::from_secs_f64(i0 as f64 / f64::from(taux));
+        tait = Some((debut + son.voix).as_secs_f64());
+        let voix = (debut + son.tete, debut + son.voix);
+        phrases.push(PhraseRendue { texte, wav: son.wav, pause, debut, voix });
+    }
+    let echantillons: Vec<i16> = tout.iter().map(|v| v.round().clamp(-32_768.0, 32_767.0) as i16).collect();
+    Ok(Rendu { phrases, tout: wav_mono(&echantillons, taux) })
+}
+
 /// Les WAV restés d'une séance précédente.
 fn vider_parole(dossier: &Path) {
     let Ok(d) = fs::read_dir(dossier) else { return };
@@ -2284,6 +2391,14 @@ fn vider_parole(dossier: &Path) {
 }
 
 // ---- Windows --------------------------------------------------------------------------------------------------------
+
+/// La poignée d'essai `EVE_MUET=1` : les lecteurs de la voix jouent à volume nul — tout le reste pareil, le temps de
+/// chaque son et la piste de la bouche —, et ni les petits sons ni la musique ne sonnent. Pour chronométrer une Eve
+/// d'essai la nuit, sans un son dans la pièce ; jamais posée par Eve elle-même.
+pub fn muette() -> bool {
+    static MUETTE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *MUETTE.get_or_init(|| std::env::var_os("EVE_MUET").is_some_and(|v| v == "1"))
+}
 
 #[cfg(windows)]
 pub fn initialiser_winrt() {
@@ -2393,6 +2508,9 @@ mod lecture {
             let silence = super::wav_mono(&[0; 2205], 22_050);
             for j in &self.joueurs {
                 let _ = j.SetAutoPlay(false);
+                if super::muette() {
+                    let _ = j.SetVolume(0.0);
+                }
                 if let Ok(s) = source(&silence) {
                     let _ = j.SetSource(&s);
                     let _ = j.Play();
@@ -3007,19 +3125,14 @@ mod essais {
     }
 
     #[test]
-    fn la_douceur_adoucit_et_baisse_le_son() {
-        let mut w = wav(&vec![10_000; 2_000]);
-        adoucir(&mut w, Douceur::de(1));
-        let e = entete(&w).unwrap();
-        let dernier = i16::from_le_bytes([w[e.debut + 2 * 1999], w[e.debut + 2 * 1999 + 1]]);
-        let premier = i16::from_le_bytes([w[e.debut], w[e.debut + 1]]);
-        // Le passe-bas monte en douceur (pas de claquement), puis le gain de 0,85.
-        assert!(premier < 8_000, "{premier}");
-        assert!((8_400..=8_600).contains(&dernier), "{dernier}");
-        let mut telle = wav(&[10_000; 10]);
-        let avant = telle.clone();
-        adoucir(&mut telle, Douceur::de(0));
-        assert_eq!(telle, avant);
+    fn la_chaine_du_studio_est_celle_de_piper_seulement() {
+        // La douceur 1 a la chaîne de Jessica ; Supertonic et les voix de Windows, la mise à niveau seule ; la
+        // douceur 0, Piper tel quel.
+        let d = Douceur::de(1);
+        assert_eq!(douceur_du_moteur(Some("fr_FR-upmc-medium"), d).chaine, Some(studio::Chaine::DOUCE));
+        assert_eq!(douceur_du_moteur(Some("supertonic/F3"), d).chaine, None);
+        assert_eq!(douceur_du_moteur(None, d).chaine, None);
+        assert_eq!(Douceur::de(0).chaine, None);
     }
 
     #[test]

@@ -2757,7 +2757,7 @@ fn texte_d_eve(
                     if !job.text.is_empty() {
                         job.append("\n", 0.0, format_de_base(apres, opacite, e));
                     }
-                    ligne_en_forme(&mut job, &mut liens, l, apres, opacite, e);
+                    ligne_en_forme(&mut job, &mut liens, &insecables(l), apres, opacite, e);
                 }
                 if !job.text.is_empty() {
                     texte_avec_liens(ui, job, &liens, gestes);
@@ -2940,6 +2940,45 @@ fn ligne_en_forme(job: &mut LayoutJob, liens: &mut Liens, ligne: &str, apres: bo
         ajouter(job, &r[..n], base);
         reste = &r[n..];
     }
+}
+
+/// Une ligne à la française, pour l'écran seulement (le texte copié garde ses espaces) : une espace insécable devant
+/// « ? ! : ; » et « », après « et entre un nombre et ce qui le suit (son unité, ses milliers, « h »). Toujours U+00A0 :
+/// c'est la seule qu'egui ne coupe pas — il coupe à l'espace fine (U+202F), que Claude écrit parfois entre les
+/// milliers. Une bulle ne se coupe plus au mauvais endroit (« soumission / ? », « 1 / 250 $ »).
+pub(crate) fn insecables(texte: &str) -> String {
+    let mut s = texte.replace('\u{202f}', "\u{a0}");
+    for (de, a) in [
+        (" ?", "\u{a0}?"),
+        (" !", "\u{a0}!"),
+        (" :", "\u{a0}:"),
+        (" ;", "\u{a0};"),
+        ("« ", "«\u{a0}"),
+        (" »", "\u{a0}»"),
+        (" $", "\u{a0}$"),
+        (" %", "\u{a0}%"),
+        (" M$", "\u{a0}M$"),
+    ] {
+        s = s.replace(de, a);
+    }
+    // Les heures (« 6 h 30 », « 17 h ») et les milliers (« 142 000 ») : un nombre ne se sépare pas de ce qui le suit.
+    let c: Vec<char> = s.chars().collect();
+    let a = |k: usize| c.get(k).copied().unwrap_or(' ');
+    (0..c.len())
+        .map(|k| match c[k] {
+            ' ' if k > 0 && a(k - 1).is_ascii_digit() && a(k + 1).is_ascii_digit() => '\u{a0}',
+            ' ' if k > 0 && a(k - 1).is_ascii_digit() && a(k + 1) == 'h' && !a(k + 2).is_alphabetic() => '\u{a0}',
+            ' ' if k > 2
+                && a(k - 1) == 'h'
+                && a(k - 2) == ' '
+                && a(k - 3).is_ascii_digit()
+                && a(k + 1).is_ascii_digit() =>
+            {
+                '\u{a0}'
+            }
+            x => x,
+        })
+        .collect()
 }
 
 /// `job.append`, sans les morceaux vides.
@@ -3203,6 +3242,44 @@ mod essais {
         let (mut job, mut liens) = (LayoutJob::default(), Liens::new());
         ligne_en_forme(&mut job, &mut liens, ligne, false, 1.0, &theme::SOMBRES);
         (job, liens)
+    }
+
+    #[test]
+    fn un_texte_a_la_francaise() {
+        assert_eq!(
+            insecables("la soumission ? Oui : 1,45 M$, 60 %, à 6 h 30, à 17 h. Environ 142 000 $ !"),
+            "la soumission\u{a0}? Oui\u{a0}: 1,45\u{a0}M$, 60\u{a0}%, à 6\u{a0}h\u{a0}30, à 17\u{a0}h. Environ \
+             142\u{a0}000\u{a0}$\u{a0}!"
+        );
+        assert_eq!(insecables("« le Mur », à 16 h à l'entrepôt"), "«\u{a0}le Mur\u{a0}», à 16\u{a0}h à l'entrepôt");
+        // L'espace fine que Claude écrit entre les milliers, egui la coupe : elle devient insécable.
+        assert_eq!(insecables("1\u{202f}250 $"), "1\u{a0}250\u{a0}$");
+        // Le reste ne bouge pas : une liste, un lien, du code.
+        for l in ["- Lundi et mardi", "[le site](https://exemple.ca/a?b=1)", "`a?b`", "Bonjour Sam."] {
+            assert_eq!(insecables(l), l);
+        }
+    }
+
+    /// Ce qu'egui fait d'une ligne trop longue : le « ? » et le montant ne partent jamais seuls à la ligne suivante.
+    #[test]
+    fn une_bulle_ne_se_coupe_pas_au_mauvais_endroit() {
+        let ctx = egui::Context::default();
+        polices(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let p = ui.painter();
+            // Des largeurs où chaque mot tient (plus étroite, egui coupe un mot là où il peut).
+            for largeur in (120..400).step_by(7).map(|l| l as f32) {
+                for texte in ["Tu veux que je relance la soumission ?", "La facture est de 1 250 $ en tout."] {
+                    let mut job = LayoutJob::single_section(insecables(texte), TextFormat::default());
+                    job.wrap.max_width = largeur;
+                    for r in &p.layout_job(job).rows {
+                        let r = r.text();
+                        let r = r.trim();
+                        assert!(!r.starts_with(['?', '$']) && !r.starts_with("250"), "{texte:?} à {largeur} : {r:?}");
+                    }
+                }
+            }
+        });
     }
 
     #[test]

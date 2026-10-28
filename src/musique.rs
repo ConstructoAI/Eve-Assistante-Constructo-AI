@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, SizedSample};
 
+use crate::filtres::Biquad;
 use crate::journal;
 
 // ---- Les gammes ---------------------------------------------------------------------------------------------------
@@ -239,62 +240,6 @@ impl Hasard {
 }
 
 // ---- Les filtres --------------------------------------------------------------------------------------------------
-
-/// Un biquad (la forme transposée directe II), en f64 : une coupure basse devant la cadence reste juste.
-#[derive(Clone, Copy, Default)]
-struct Biquad {
-    b0: f64,
-    b1: f64,
-    b2: f64,
-    a1: f64,
-    a2: f64,
-    z1: f64,
-    z2: f64,
-}
-
-impl Biquad {
-    fn passe_bas(frequence: f64, q: f64, taux: f64) -> Biquad {
-        let mut b = Biquad::default();
-        b.regler(frequence, q, taux);
-        b
-    }
-
-    /// Un passe-bas (le livre de recettes de Robert Bristow-Johnson, que suit WebAudio) ; `q` linéaire. L'état reste :
-    /// la coupure peut glisser sans clic.
-    fn regler(&mut self, frequence: f64, q: f64, taux: f64) {
-        let (s, c) = (TAU * frequence / taux).sin_cos();
-        let alpha = s / (2.0 * q);
-        let a0 = 1.0 + alpha;
-        self.b0 = (1.0 - c) / 2.0 / a0;
-        self.b1 = (1.0 - c) / a0;
-        self.b2 = self.b0;
-        self.a1 = -2.0 * c / a0;
-        self.a2 = (1.0 - alpha) / a0;
-    }
-
-    #[inline]
-    fn filtrer(&mut self, x: f64) -> f64 {
-        let y = self.b0 * x + self.z1;
-        self.z1 = self.b1 * x - self.a1 * y + self.z2;
-        self.z2 = self.b2 * x - self.a2 * y;
-        y
-    }
-
-    fn vider(&mut self) {
-        self.z1 = 0.0;
-        self.z2 = 0.0;
-    }
-
-    /// Le gain à une fréquence (pour les essais).
-    #[cfg(test)]
-    fn gain(&self, frequence: f64, taux: f64) -> f64 {
-        let w = TAU * frequence / taux;
-        let (c1, s1, c2, s2) = (w.cos(), w.sin(), (2.0 * w).cos(), (2.0 * w).sin());
-        let (nr, ni) = (self.b0 + self.b1 * c1 + self.b2 * c2, -(self.b1 * s1 + self.b2 * s2));
-        let (dr, di) = (1.0 + self.a1 * c1 + self.a2 * c2, -(self.a1 * s1 + self.a2 * s2));
-        ((nr * nr + ni * ni) / (dr * dr + di * di)).sqrt()
-    }
-}
 
 /// Le Q linéaire d'un passe-bas de WebAudio, qui le donne en décibels (la spécification de `BiquadFilterNode`).
 fn q_de_webaudio(q_db: f64) -> f64 {
@@ -1134,6 +1079,10 @@ impl Musique {
     /// Ouvre la sortie audio par défaut ; None s'il n'y en a pas (et une ligne au journal). La musique et les sons sont
     /// allumés, comme dans la page.
     pub fn nouvelle() -> Option<Musique> {
+        if crate::voix::muette() {
+            journal::ecrire("musique : EVE_MUET ; le centre de commande reste muet");
+            return None;
+        }
         let partage = Arc::new(Partage::nouveau());
         match ouvrir(&partage) {
             Ok((flux, nom, taux)) => {

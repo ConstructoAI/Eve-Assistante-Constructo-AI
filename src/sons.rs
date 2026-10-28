@@ -113,10 +113,12 @@ fn tampon(son: Son) -> &'static [u8] {
     }
 }
 
-/// Joue un son sans attendre (un son en cours s'arrête pour lui).
+/// Joue un son sans attendre (un son en cours s'arrête pour lui) ; rien sous `EVE_MUET` ([`crate::voix::muette`]).
 #[cfg(windows)]
 pub fn jouer(son: Son) {
-    let _ = lancer(son);
+    if !crate::voix::muette() {
+        let _ = lancer(son);
+    }
 }
 
 /// Confie le son à Windows ; faux s'il le refuse.

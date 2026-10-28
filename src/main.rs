@@ -15,6 +15,7 @@ mod ecran;
 mod entreprise;
 mod essais;
 mod fenetre;
+mod filtres;
 mod groupe;
 mod historique;
 mod historique_ui;
@@ -100,6 +101,7 @@ fn main() {
         Some("--essai-portrait") => essais::portrait(&args[1..]),
         Some("--essai-services") => essais::services(&args[1..]),
         Some("--essai-stripe") => essais::stripe(&args[1..]),
+        Some("--essai-son") => essais::son(&reglages, &args[1..]),
         Some("--aide" | "-h" | "--help") => {
             aide();
             0
@@ -306,7 +308,9 @@ fn aide() {
          \x20                            journal ; --suivre : le suivi tourne encore tant de secondes\n\
          eve --essai-stripe           une lecture du compte Stripe (la clé du dossier local : eve --cle stripe),\n\
          \x20                            ce que le tableau de bord en montre ; les droits d'une clé restreinte\n\
-         eve --mesures [dossier…]     le temps de chaque étape des demandes et le coût des tours, lus au journal\n\
+         eve --essai-son textes.txt dossier [--bruts DOSSIER] [--id VOIX] [--douceur N]  ce qu'Eve dirait de chaque\n\
+         \x20                            texte, rendu sans le jouer : les WAV de ses phrases et leur tout\n\
+         eve --mesures [dossier…]    le temps de chaque étape des demandes et le coût des tours, lus au journal\n\
          eve --profils                les profils de cette Eve (EVE_DOSSIER_LOCAL), le profil choisi marqué\n\
          eve --profil-ajouter \"nom\" \"dossier\"  un profil de plus : un dossier qui porte son CLAUDE.md\n\
          eve --profil [\"nom\"]         le profil choisi, où Eve passe entre deux demandes (rien : celui d'office)\n\

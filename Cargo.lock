@@ -1045,7 +1045,7 @@ dependencies = [
 
 [[package]]
 name = "eve"
-version = "22.0.0"
+version = "23.0.0"
 dependencies = [
  "cpal",
  "eframe",
