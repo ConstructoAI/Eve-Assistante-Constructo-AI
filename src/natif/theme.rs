@@ -122,6 +122,28 @@ pub(crate) mod erp {
         teinte([0x7D, 0xC4, 0xB5], [0x4A, 0x94, 0x85], [[0x2D, 0xD4, 0xBF], [0x0D, 0x94, 0x88]]);
     pub const GRIS: Teinte = teinte([0xB8, 0xC4, 0xCE], [0x6B, 0x7B, 0x8A], [[0x94, 0xA3, 0xB8], [0x47, 0x55, 0x69]]);
 
+    /// La teinte qu'une carte épinglée nomme (« bleu », « vert »… ; sans égard aux accents ni à la casse).
+    pub fn nommee(nom: &str) -> Option<Teinte> {
+        Some(match eve::parole::normaliser(nom).as_str() {
+            "bleu" => BLEU,
+            "vert" => VERT,
+            "rouge" => ROUGE,
+            "jaune" => JAUNE,
+            "ambre" => AMBRE,
+            "orange" => ORANGE,
+            "violet" => VIOLET,
+            "indigo" => INDIGO,
+            "sarcelle" => SARCELLE,
+            "gris" => GRIS,
+            _ => return None,
+        })
+    }
+
+    /// Ce qui monte quand c'est bon, ce qui baisse quand c'est mauvais : l'encre d'un écart (les jetons de texte des
+    /// tableaux de bord : le vert du succès, le rouge critique), jamais celle d'une série.
+    pub const ECART_BON: Color32 = Color32::from_rgb(0x00, 0x63, 0x00);
+    pub const ECART_MAUVAIS: Color32 = Color32::from_rgb(0xD0, 0x3B, 0x3B);
+
     /// Le titre d'une carte (le gris ardoise le plus foncé des tableaux de bord) et le filet froid des cartes.
     pub const TITRE: Color32 = Color32::from_rgb(0x1F, 0x29, 0x37);
     pub const FILET_DE_CARTE: Color32 = Color32::from_rgb(0xE5, 0xEA, 0xF1);
@@ -132,6 +154,18 @@ pub(crate) mod erp {
 
 /// Les icônes de Windows du thème (Segoe Fluent Icons), vérifiées sur un échantillon rendu.
 pub(crate) mod pictos {
+    /// Les cartes qu'on épingle : la note, la liste, les chiffres, le graphique (le tableau, le dessin et l'épingle
+    /// sont ceux des cartes de la conversation, `cartes::pictos`) ; leur menu (« ⋯ ») et ce qu'il offre (modifier,
+    /// retirer, en parler) ; le « + » qui en ajoute une.
+    pub const NOTE: char = '\u{E70B}';
+    pub const LISTE: char = '\u{E8FD}';
+    pub const CALCUL: char = '\u{E8EF}';
+    pub const GRAPHIQUE: char = '\u{E9D2}';
+    pub const MENU: char = '\u{E712}';
+    pub const MODIFIER: char = '\u{E70F}';
+    pub const RETIRER: char = '\u{E74D}';
+    pub const PARLER: char = '\u{E8BD}';
+    pub const AJOUTER: char = '\u{E710}';
     pub const ECHEANCES: char = '\u{EC92}';
     pub const DECISION: char = '\u{E7C1}';
     pub const COURRIELS: char = '\u{E715}';
@@ -416,6 +450,29 @@ fn visuels_clairs(v: &mut egui::Visuals) {
     v.widgets.active.bg_fill = ardoise_survol;
     v.widgets.active.weak_bg_fill = ardoise_survol;
     v.widgets.active.bg_stroke = Stroke::new(2.0, erp::BULLE_LISERE.gamma_multiply(0.6));
+}
+
+/// Les visuels d'un panneau de la fenêtre dans le thème clair — les réglages, l'historique, le menu des profils, et la
+/// liste qui s'ouvre de l'un d'eux — : ceux du thème ([`visuels_clairs`]), et ce qu'on y touche (la liste des voix, un
+/// champ) blanc et cerné comme un champ de l'ERP (`.erp-input`), l'accent au survol ; ce qui s'en ouvre, blanc comme
+/// lui, avec son ombre.
+pub(crate) fn visuels_du_panneau(v: &mut egui::Visuals) {
+    visuels_clairs(v);
+    let p = &super::PANNEAU_CLAIR;
+    v.window_fill = p.fond;
+    v.window_stroke = Stroke::new(1.0, p.filet);
+    v.window_shadow = p.ombres[1];
+    v.popup_shadow = p.ombres[1];
+    for (w, fond, bord) in [
+        (&mut v.widgets.inactive, p.champ, p.filet_fort),
+        (&mut v.widgets.hovered, p.piste, p.accent.gamma_multiply(0.6)),
+        (&mut v.widgets.active, p.piste, p.accent),
+        (&mut v.widgets.open, p.piste, p.accent),
+    ] {
+        w.weak_bg_fill = fond;
+        w.bg_stroke = Stroke::new(1.0, bord);
+        w.fg_stroke = Stroke::new(1.0, p.encre);
+    }
 }
 
 /// Les encres du texte d'Eve (`texte_d_eve`) : celles du thème sombre, ou celles du clair, comme le markdown de
@@ -773,6 +830,9 @@ impl Rangee {
 /// tête est rouge.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Liste {
+    /// Ce qui la nomme dans l'ordre que donne la personne en déplaçant les cartes : d'office, d'après son titre
+    /// ([`cle_de`]).
+    pub(crate) cle: String,
     pub(crate) titre: String,
     pub(crate) icone: char,
     pub(crate) teinte: erp::Teinte,
@@ -781,12 +841,79 @@ pub(crate) struct Liste {
     pub(crate) barre: Vec<(f64, Color32, String)>,
     pub(crate) rangees: Vec<Rangee>,
     pub(crate) pied: String,
+    /// Ce que ses rangées offrent en propre dans leur menu (une relance, un suivi, « c'est fait »), avant ce qu'offre
+    /// toute rangée ([`Action::PARTOUT`]).
+    pub(crate) actions: Vec<Action>,
+}
+
+/// Ce qu'on fait d'une rangée d'une carte, depuis son menu (un clic sur elle) : ce que sa carte offre en propre — une
+/// relance (une facture en retard), un suivi (une soumission, un devis), « c'est fait » (une échéance, la décision du
+/// jour) —, puis, partout, en parler à Eve et se le faire rappeler demain matin.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Action {
+    Relance,
+    Suivi,
+    Fait,
+    Demander,
+    RappelDemain,
+}
+
+impl Action {
+    /// Ce qu'offre toute rangée, après ce que sa carte offre en propre.
+    pub(crate) const PARTOUT: [Action; 2] = [Action::Demander, Action::RappelDemain];
+
+    /// Ce que dit le menu.
+    pub(crate) fn mot(self) -> &'static str {
+        match self {
+            Action::Relance => "Préparer une relance",
+            Action::Suivi => "Préparer un suivi",
+            Action::Fait => "C'est fait",
+            Action::Demander => "En parler à Eve",
+            Action::RappelDemain => "Me le rappeler demain",
+        }
+    }
+
+    /// Son icône (Segoe Fluent Icons) : le courriel, l'envoi, la coche, la bulle, la cloche.
+    fn icone(self) -> char {
+        match self {
+            Action::Relance => '\u{E715}',
+            Action::Suivi => '\u{E724}',
+            Action::Fait => '\u{E73E}',
+            Action::Demander => '\u{E8BD}',
+            Action::RappelDemain => pictos::RAPPELS,
+        }
+    }
+}
+
+/// Ce qu'un clic rend d'une carte en liste : la page d'une rangée, ou ce qu'on a choisi dans le menu d'une rangée (et
+/// son rang dans la carte).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Clic {
+    Page(String),
+    Action(Action, usize),
+}
+
+/// Ce que dit une rangée, en une ligne, pour une demande à Eve ou un rappel : ses morceaux, sa valeur, son détail, son
+/// extrait (« Facture 1043 Tremblay — 12 000 $ (échue depuis 34 jours) »).
+pub(crate) fn texte_de_rangee(r: &Rangee) -> String {
+    let mut t = r.bouts.iter().map(|b| b.texte.as_str()).collect::<String>().trim().to_string();
+    if !r.droite.is_empty() {
+        t.push_str(&format!(" — {}", r.droite));
+    }
+    if !r.detail.is_empty() {
+        t.push_str(&format!(" ({})", r.detail));
+    }
+    if !r.extrait.is_empty() {
+        t.push_str(&format!(" : « {} »", r.extrait));
+    }
+    t
 }
 
 impl Liste {
     pub(crate) fn nouvelle(titre: impl Into<String>, icone: char, teinte: erp::Teinte) -> Liste {
         let titre = titre.into();
         Liste {
+            cle: cle_de(&titre),
             titre,
             icone,
             teinte,
@@ -795,7 +922,14 @@ impl Liste {
             barre: Vec::new(),
             rangees: Vec::new(),
             pied: String::new(),
+            actions: Vec::new(),
         }
+    }
+
+    /// Ce que ses rangées offrent en propre dans leur menu.
+    pub(crate) fn actions(mut self, actions: &[Action]) -> Liste {
+        self.actions = actions.to_vec();
+        self
     }
 
     /// La pilule de la tête, de sa teinte.
@@ -803,15 +937,38 @@ impl Liste {
         self.pilule = Some((texte.into(), teinte));
         self
     }
+
+    /// Une clé à elle, quand son titre change (la météo porte sa ville).
+    pub(crate) fn cle(mut self, cle: impl Into<String>) -> Liste {
+        self.cle = cle.into();
+        self
+    }
 }
 
-/// Une carte en liste ([`Liste`]) dans toute la largeur donnée ; rend la page d'une rangée cliquée (son `lien`).
-pub(crate) fn carte_liste(ui: &mut egui::Ui, l: &Liste) -> Option<String> {
+/// La clé d'une carte d'après son titre : en minuscules, sans accents, ses mots liés d'un tiret (« Agenda de
+/// l'entreprise » : `agenda-de-l-entreprise`).
+pub(crate) fn cle_de(titre: &str) -> String {
+    eve::parole::normaliser(titre).replace(' ', "-")
+}
+
+/// Une carte en liste ([`Liste`]) dans toute la largeur donnée ; rend la page d'une rangée cliquée (son `lien`), ou ce
+/// qu'on a choisi dans le menu d'une autre.
+pub(crate) fn carte_liste(ui: &mut egui::Ui, l: &Liste) -> Option<Clic> {
     let lavis = if l.alerte { erp::ROUGE.pastel } else { l.teinte.pastel };
     let mut cliquee = None;
     carte(ui, Some(lavis), 0.0, |ui| {
         let pilule = l.pilule.as_ref().map(|(t, x)| (t.as_str(), *x));
         tete_de_carte(ui, &l.titre, l.icone, l.teinte, l.alerte, pilule);
+        cliquee = corps_de_liste(ui, l);
+    });
+    cliquee
+}
+
+/// Ce qu'une carte en liste montre sous sa tête : sa barre empilée, ses rangées, son pied ; dans une carte épinglée,
+/// qui a sa tête à elle. Rend ce qu'un clic sur une rangée demande.
+pub(crate) fn corps_de_liste(ui: &mut egui::Ui, l: &Liste) -> Option<Clic> {
+    let mut cliquee = None;
+    {
         if !l.barre.is_empty() {
             ui.add_space(2.0);
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 10.0), Sense::hover());
@@ -828,8 +985,8 @@ pub(crate) fn carte_liste(ui: &mut egui::Ui, l: &Liste) -> Option<String> {
                 let (f, _) = ui.allocate_exact_size(vec2(ui.available_width(), 11.0), Sense::hover());
                 ui.painter().hline(f.x_range(), f.center().y, Stroke::new(1.0, erp::FILET_DE_CARTE));
             }
-            if let Some(lien) = rangee_de_liste(ui, r, (&l.titre, k)) {
-                cliquee = Some(lien);
+            if let Some(clic) = rangee_de_liste(ui, r, (&l.titre, k), &l.actions) {
+                cliquee = Some(clic);
             }
         }
         if !l.pied.is_empty() {
@@ -837,8 +994,200 @@ pub(crate) fn carte_liste(ui: &mut egui::Ui, l: &Liste) -> Option<String> {
             let pied = RichText::new(&l.pied).size(12.5).color(erp::TEXTE_2);
             ui.add(egui::Label::new(pied).wrap().selectable(false));
         }
-    });
+    }
     cliquee
+}
+
+/// Une ligne du menu d'une carte : son icône et son mot ; à confirmer, elle demande un second clic (son mot devient
+/// une question, en rouge).
+pub(crate) struct LigneDeMenu {
+    pub(crate) icone: char,
+    pub(crate) mot: &'static str,
+    pub(crate) a_confirmer: bool,
+}
+
+/// La tête d'une carte ([`tete_de_carte`]) et, contre son bord droit, le bouton « ⋯ » de son menu ([`menu_du_bouton`] :
+/// ses `lignes`). `cle` : de quoi nommer le bouton. Rend le rang de la ligne choisie, et la place du titre (sans le
+/// bouton) : un clic sur le titre d'une note l'ouvre.
+pub(crate) fn tete_avec_menu(
+    ui: &mut egui::Ui,
+    titre: &str,
+    icone: char,
+    teinte: erp::Teinte,
+    cle: &str,
+    lignes: &[LigneDeMenu],
+) -> (Option<usize>, Rect) {
+    let (coin, largeur, cote) = (ui.cursor().min, ui.available_width(), 30.0);
+    let place_de_la_tete = Rect::from_min_size(coin, vec2((largeur - cote - 6.0).max(60.0), 400.0));
+    let mut tete = ui.new_child(UiBuilder::new().max_rect(place_de_la_tete).layout(Layout::top_down(Align::Min)));
+    tete_de_carte(&mut tete, titre, icone, teinte, false, None);
+    let haut = tete.min_rect().height();
+    ui.advance_cursor_after_rect(Rect::from_min_size(coin, vec2(largeur, haut)));
+    let place = Rect::from_center_size(pos2(coin.x + largeur - cote / 2.0, coin.y + 18.0), vec2(cote, cote));
+    let rep = ui.interact(place, egui::Id::unique(("menu-de-carte", cle)), Sense::click());
+    let ouvert = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&rep));
+    let p = ui.painter();
+    if rep.hovered() || ouvert {
+        p.rect_filled(place, 8.0, erp::SURVOL);
+    }
+    let encre = if rep.hovered() || ouvert { erp::TITRE } else { erp::TEXTE_2 };
+    let police = FontId::new(16.0, FontFamily::Name(ICONES.into()));
+    p.text(place.center(), Align2::CENTER_CENTER, pictos::MENU, police, encre);
+    let rep = rep.on_hover_text("Plus d'actions").on_hover_cursor(egui::CursorIcon::PointingHand);
+    let choisie = menu_du_bouton(&rep, cle, lignes, true);
+    (choisie, Rect::from_min_size(coin, vec2((largeur - cote - 10.0).max(0.0), haut)))
+}
+
+/// Le menu qu'ouvre un clic sur un bouton du tableau de bord (`rep`), blanc comme les panneaux du thème : ses `lignes` ;
+/// une ligne à confirmer demande un second clic (son mot devient une question, en rouge), et se désarme quand le menu se
+/// ferme. `cle` : de quoi nommer ses lignes ; `a_droite` : le bouton est contre un bord droit — le menu s'aligne sur
+/// son bord droit au lieu de déborder. Rend le rang de la ligne choisie.
+pub(crate) fn menu_du_bouton(rep: &egui::Response, cle: &str, lignes: &[LigneDeMenu], a_droite: bool) -> Option<usize> {
+    let armee_id = egui::Id::unique(("menu-arme", cle));
+    let armee = rep.ctx.data(|d| d.get_temp::<usize>(armee_id));
+    let style = |s: &mut egui::Style| {
+        visuels_du_panneau(&mut s.visuals);
+        egui::containers::menu::menu_style(s);
+    };
+    let pan = &super::PANNEAU_CLAIR;
+    let cadre = egui::Frame::new()
+        .fill(pan.fond)
+        .stroke((1.0, pan.filet))
+        .corner_radius(10)
+        .inner_margin(Margin::same(6))
+        .shadow(pan.ombres[1]);
+    let mut choisie = None;
+    let (place, sinon) = if a_droite {
+        (egui::RectAlign::BOTTOM_END, [egui::RectAlign::TOP_END])
+    } else {
+        (egui::RectAlign::BOTTOM_START, [egui::RectAlign::TOP_START])
+    };
+    let menu = egui::Popup::menu(rep)
+        .align(place)
+        .align_alternatives(&sinon)
+        .gap(4.0)
+        .frame(cadre)
+        .style(style)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            for (k, l) in lignes.iter().enumerate() {
+                let arme = armee == Some(k);
+                let mot = if arme { format!("{} pour de bon ?", l.mot) } else { l.mot.to_string() };
+                let id = egui::Id::unique(("ligne-du-menu", cle, k));
+                if ligne_du_menu(ui, l.icone, &mot, arme, id).clicked() {
+                    if l.a_confirmer && !arme {
+                        ui.ctx().data_mut(|d| d.insert_temp(armee_id, k));
+                    } else {
+                        choisie = Some(k);
+                        ui.close();
+                    }
+                }
+            }
+        });
+    if menu.is_none() || choisie.is_some() {
+        rep.ctx.data_mut(|d| d.remove::<usize>(armee_id));
+    }
+    choisie
+}
+
+/// Une ligne d'un menu du tableau de bord : son icône, de l'accent (rouge si elle demande confirmation), et ce qu'elle
+/// fait ; au survol, un fond.
+fn ligne_du_menu(ui: &mut egui::Ui, icone: char, mot: &str, danger: bool, id: egui::Id) -> egui::Response {
+    let (rect, _) = ui.allocate_exact_size(vec2(LARGEUR_DU_MENU, 32.0), Sense::hover());
+    let rep = ui.interact(rect, id, Sense::click());
+    let p = ui.painter();
+    if rep.hovered() {
+        p.rect_filled(rect, 6.0, erp::SURVOL);
+    }
+    let (accent, encre) = if danger { (erp::ECART_MAUVAIS, erp::ECART_MAUVAIS) } else { (erp::PRIMAIRE, erp::TEXTE) };
+    let police = FontId::new(14.0, FontFamily::Name(ICONES.into()));
+    p.text(pos2(rect.left() + 16.0, rect.center().y), Align2::CENTER_CENTER, icone, police, accent);
+    let police = FontId::new(13.5, FontFamily::Name(SEMI.into()));
+    p.text(pos2(rect.left() + 34.0, rect.center().y), Align2::LEFT_CENTER, mot, police, encre);
+    rep.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Un chiffre d'une carte épinglée : sa valeur, son étiquette, son écart (« +12 % depuis septembre ») et s'il est bon
+/// (une hausse l'est d'office ; une carte dit quand c'est une baisse).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PetitChiffre {
+    pub(crate) valeur: String,
+    pub(crate) etiquette: String,
+    pub(crate) ecart: String,
+    pub(crate) baisse_bonne: bool,
+}
+
+/// La largeur d'un chiffre dans une carte : autant de colonnes qu'il en tient (trois au plus).
+const LARGEUR_DE_CHIFFRE: f32 = 130.0;
+
+/// Les chiffres d'une carte épinglée, en grille : chacun sa valeur en grand (en demi-gras, aux chiffres
+/// proportionnels), son étiquette grise, son écart signé dans l'encre de ce qu'il veut dire — le vert d'un bon écart,
+/// le rouge d'un mauvais, le gris d'un écart nul —, jamais la couleur d'une série.
+pub(crate) fn chiffres_de_carte(ui: &mut egui::Ui, chiffres: &[PetitChiffre]) {
+    if chiffres.is_empty() {
+        return;
+    }
+    let largeur = ui.available_width();
+    let n = ((largeur / LARGEUR_DE_CHIFFRE).floor() as usize).clamp(1, 3).min(chiffres.len());
+    let colonne = (largeur - 14.0 * (n as f32 - 1.0)) / n as f32;
+    for rangee in chiffres.chunks(n) {
+        let p = ui.painter().clone();
+        let mises: Vec<_> = rangee
+            .iter()
+            .map(|c| {
+                let gras = FontId::new(22.0, FontFamily::Name(SEMI.into()));
+                let mesure = p.layout_no_wrap(c.valeur.clone(), gras.clone(), erp::TITRE).size().x;
+                let taille = if mesure > colonne { (22.0 * colonne / mesure).max(14.0) } else { 22.0 };
+                let mut job = egui::text::LayoutJob::simple_singleline(
+                    c.valeur.clone(),
+                    FontId::new(taille, FontFamily::Name(SEMI.into())),
+                    erp::TITRE,
+                );
+                job.wrap = egui::text::TextWrapping::truncate_at_width(colonne);
+                let valeur = p.layout_job(job);
+                let etiquette = p.layout(c.etiquette.clone(), FontId::proportional(12.5), erp::TEXTE_2, colonne);
+                let encre = match sens_de_l_ecart(&c.ecart) {
+                    0 => erp::TEXTE_2,
+                    s if (s > 0) != c.baisse_bonne => erp::ECART_BON,
+                    _ => erp::ECART_MAUVAIS,
+                };
+                let police = FontId::new(12.5, FontFamily::Name(SEMI.into()));
+                let ecart = (!c.ecart.is_empty()).then(|| p.layout(c.ecart.clone(), police, encre, colonne));
+                (valeur, etiquette, ecart)
+            })
+            .collect();
+        let h = mises
+            .iter()
+            .map(|(v, e, x)| v.size().y + e.size().y + x.as_ref().map_or(0.0, |x| x.size().y + 2.0))
+            .fold(0.0, f32::max);
+        let (r, _) = ui.allocate_exact_size(vec2(largeur, h), Sense::hover());
+        for (k, (valeur, etiquette, ecart)) in mises.into_iter().enumerate() {
+            let x = r.left() + k as f32 * (colonne + 14.0);
+            let mut y = r.top();
+            let (h_v, h_e) = (valeur.size().y, etiquette.size().y);
+            p.galley(pos2(x, y), valeur, erp::TITRE);
+            y += h_v;
+            p.galley(pos2(x, y), etiquette, erp::TEXTE_2);
+            y += h_e + 2.0;
+            if let Some(g) = ecart {
+                p.galley(pos2(x, y), g, erp::TEXTE_2);
+            }
+        }
+        ui.add_space(4.0);
+    }
+}
+
+/// Le sens d'un écart d'après son signe (« +12 % », « −3 », « -3 ») : 1, −1, ou 0 sans signe ou pour un écart nul.
+pub(crate) fn sens_de_l_ecart(ecart: &str) -> i8 {
+    let e = ecart.trim_start();
+    let nul = !e.chars().any(|c| c.is_ascii_digit() && c != '0');
+    match e.chars().next() {
+        _ if nul => 0,
+        Some('+' | '↑' | '▲') => 1,
+        Some('-' | '−' | '–' | '↓' | '▼') => -1,
+        _ => 0,
+    }
 }
 
 /// La taille du texte des rangées, de leur détail et de leur extrait.
@@ -848,8 +1197,10 @@ const EXTRAIT_DE_RANGEE: f32 = 12.0;
 
 /// Une rangée d'une carte en liste : son carré de légende, ses morceaux mis en page sur la largeur (moins la valeur à
 /// droite, alignée sur leur première ligne), son détail gris dessous, son extrait, sa mesure. `cle` : de quoi nommer sa
-/// bulle. Une rangée qui ouvre une page se lave de gris au survol, la main et l'adresse avec ; rend sa page cliquée.
-fn rangee_de_liste(ui: &mut egui::Ui, r: &Rangee, cle: (&str, usize)) -> Option<String> {
+/// bulle. Elle se lave de gris au survol, la main avec : une rangée qui ouvre une page (son adresse au survol) rend sa
+/// page cliquée ; une autre ouvre son menu — ce que sa carte offre en propre (`actions`), puis ce qu'offre toute rangée
+/// — et rend ce qu'on y choisit.
+fn rangee_de_liste(ui: &mut egui::Ui, r: &Rangee, cle: (&str, usize), actions: &[Action]) -> Option<Clic> {
     let largeur = ui.available_width();
     let debut = ui.cursor().min;
     // Le lavis du survol, sous la rangée : sa place se garde avant elle, sa forme vient après (sa hauteur connue).
@@ -949,14 +1300,53 @@ fn rangee_de_liste(ui: &mut egui::Ui, r: &Rangee, cle: (&str, usize)) -> Option<
         }
         None => {}
     }
-    let lien = r.lien.as_ref()?;
     let rangee = Rect::from_min_max(debut, pos2(debut.x + largeur, ui.min_rect().bottom()));
-    let rep = ui.interact(rangee, egui::Id::unique(("lien-de-rangee", cle.0, cle.1)), Sense::click());
-    if rep.hovered() {
-        ui.painter().set(lavis, Shape::rect_filled(rangee.expand2(vec2(8.0, 4.0)), 8.0, erp::SURVOL));
+    let laver =
+        |ui: &egui::Ui| ui.painter().set(lavis, Shape::rect_filled(rangee.expand2(vec2(8.0, 4.0)), 8.0, erp::SURVOL));
+    if let Some(lien) = &r.lien {
+        let rep = ui.interact(rangee, egui::Id::unique(("lien-de-rangee", cle.0, cle.1)), Sense::click());
+        if rep.hovered() {
+            laver(ui);
+        }
+        let rep = rep.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(lien);
+        return rep.clicked().then(|| Clic::Page(lien.clone()));
     }
-    let rep = rep.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(lien);
-    rep.clicked().then(|| lien.clone())
+    let rep = ui.interact(rangee, egui::Id::unique(("rangee-de-carte", cle.0, cle.1)), Sense::click());
+    let ouvert = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&rep));
+    if rep.hovered() || ouvert {
+        laver(ui);
+    }
+    let rep = rep.on_hover_cursor(egui::CursorIcon::PointingHand);
+    // Son menu, sur sa propre couche : blanc comme les panneaux du thème, ses lignes à la largeur de la plus longue.
+    let style = |s: &mut egui::Style| {
+        visuels_du_panneau(&mut s.visuals);
+        egui::containers::menu::menu_style(s);
+    };
+    let p = &super::PANNEAU_CLAIR;
+    let cadre = egui::Frame::new()
+        .fill(p.fond)
+        .stroke((1.0, p.filet))
+        .corner_radius(10)
+        .inner_margin(Margin::same(6))
+        .shadow(p.ombres[1]);
+    let mut choisie = None;
+    egui::Popup::menu(&rep).gap(4.0).frame(cadre).style(style).show(|ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        for a in actions.iter().chain(Action::PARTOUT.iter()) {
+            if ligne_d_action(ui, *a, cle).clicked() {
+                choisie = Some(*a);
+            }
+        }
+    });
+    choisie.map(|a| Clic::Action(a, cle.1))
+}
+
+/// La largeur des lignes du menu d'une rangée.
+const LARGEUR_DU_MENU: f32 = 236.0;
+
+/// Une ligne du menu d'une rangée : son icône, de l'accent, et ce qu'elle fait ; au survol, un fond.
+fn ligne_d_action(ui: &mut egui::Ui, a: Action, cle: (&str, usize)) -> egui::Response {
+    ligne_du_menu(ui, a.icone(), a.mot(), false, egui::Id::unique(("action-de-rangee", cle.0, cle.1, a.mot())))
 }
 
 /// Une barre empilée dans `r` : ses parts (leur valeur, leur couleur) côte à côte en proportion, deux points de blanc
@@ -988,27 +1378,139 @@ pub(crate) fn barre_empilee(p: &egui::Painter, r: Rect, parts: &[(f64, Color32)]
     places
 }
 
-/// Des cartes en maçonnerie, comme les tableaux de bord d'aujourd'hui : `n` cartes sur `colonnes` colonnes de même
-/// largeur, chacune sous la plus courte des colonnes (la plus à gauche, à égalité), à [`ECART`] l'une de l'autre — les
-/// colonnes prennent la hauteur de ce qu'elles portent, rien ne reste vide entre deux cartes. `carte(ui, k)` dessine la
-/// k-ième dans la largeur de sa colonne ; dans l'ordre, les premières en haut.
-pub(crate) fn maconnerie(ui: &mut egui::Ui, colonnes: usize, n: usize, mut carte: impl FnMut(&mut egui::Ui, usize)) {
+/// Une carte qu'on vient de lâcher dans la maçonnerie ([`maconnerie`]) : son rang dans l'ordre, et celui qu'elle y
+/// prend (compté dans l'ordre sans elle).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Deplacement {
+    pub(crate) de: usize,
+    pub(crate) vers: usize,
+}
+
+/// Des cartes en maçonnerie, comme les tableaux de bord d'aujourd'hui : sur `colonnes` colonnes de même largeur,
+/// chacune sous la plus courte des colonnes (la plus à gauche, à égalité), à [`ECART`] l'une de l'autre — les
+/// colonnes prennent la hauteur de ce qu'elles portent, rien ne reste vide entre deux cartes ; `carte(ui, k)` dessine
+/// la k-ième dans la largeur de sa colonne, dans l'ordre, les premières en haut. Et on les déplace à la souris : une
+/// carte se tient et se tire de partout où rien d'autre ne se clique (ses rangées gardent leurs clics : sa poignée
+/// est sous elles, comme le fond d'une zone qui défile, à la place qu'elle avait à l'image d'avant) ; tirée, elle
+/// pâlit à sa place, un trait de l'accent montre où elle ira — avant ou après la carte la plus proche du pointeur —,
+/// et la page défile quand le pointeur s'approche de son bord. `cles` nomme chaque carte : sa tenue survit à un ordre
+/// qui change. Rend où l'on vient d'en lâcher une.
+pub(crate) fn maconnerie(
+    ui: &mut egui::Ui,
+    colonnes: usize,
+    cles: &[String],
+    mut carte: impl FnMut(&mut egui::Ui, usize),
+) -> Option<Deplacement> {
+    let n = cles.len();
     if n == 0 {
-        return;
+        return None;
     }
+    // La carte tenue, et si elle a bougé : egui commence le glisser d'une poignée qui ne sent que lui dès qu'on appuie ;
+    // elle n'est tirée qu'à huit points de là — un clic (sur une rangée, sur la carte) ne déplace rien.
+    let tenue_id = egui::Id::unique("carte-tenue-du-tableau");
+    let bouge = ui.input(|i| i.pointer.press_origin()).zip(ui.ctx().pointer_interact_pos());
+    let bouge = bouge.is_some_and(|(a, b)| a.distance(b) > 8.0);
+    let tenue = ui.ctx().data(|d| d.get_temp::<(String, bool)>(tenue_id)).map(|(c, a_bouge)| (c, a_bouge || bouge));
+    if let Some(t) = &tenue {
+        ui.ctx().data_mut(|d| d.insert_temp(tenue_id, t.clone()));
+    }
+    let tiree = tenue.filter(|(_, a_bouge)| *a_bouge).and_then(|(c, _)| cles.iter().position(|x| *x == c));
     let colonnes = colonnes.max(1);
     let (origine, largeur) = (ui.cursor().min, ui.available_width());
     let l = ((largeur - ECART * (colonnes - 1) as f32) / colonnes as f32).max(40.0);
     let mut bas = vec![origine.y; colonnes];
-    for k in 0..n {
+    let mut places = Vec::with_capacity(n);
+    let mut lachee = false;
+    for (k, cle) in cles.iter().enumerate() {
         let c = (0..colonnes).min_by(|a, b| bas[*a].total_cmp(&bas[*b])).unwrap_or(0);
         let place = Rect::from_min_size(pos2(origine.x + c as f32 * (l + ECART), bas[c]), vec2(l, 100_000.0));
         let mut enfant = ui.new_child(UiBuilder::new().max_rect(place).layout(Layout::top_down(Align::Min)));
+        let poignee = egui::Id::unique(("carte-du-tableau", cle.as_str()));
+        let avant = ui.ctx().data(|d| d.get_temp::<Rect>(poignee.with("place")));
+        let sa_place = avant.filter(|r| r.min == place.min).unwrap_or(Rect::from_min_size(place.min, vec2(l, 60.0)));
+        let rep = enfant.interact(sa_place, poignee, Sense::drag());
+        if rep.drag_started() {
+            ui.ctx().data_mut(|d| d.insert_temp(tenue_id, (cle.clone(), false)));
+        }
+        lachee |= rep.drag_stopped();
+        if tiree.is_none() && rep.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        }
+        if tiree == Some(k) {
+            enfant.multiply_opacity(0.35);
+        }
         carte(&mut enfant, k);
+        let rect = Rect::from_min_max(place.min, pos2(place.max.x, enfant.min_rect().bottom()));
+        ui.ctx().data_mut(|d| d.insert_temp(poignee.with("place"), rect));
+        places.push(rect);
         bas[c] = enfant.min_rect().bottom().max(bas[c]) + ECART;
     }
     let fond = bas.iter().copied().fold(origine.y, f32::max) - ECART;
     ui.advance_cursor_after_rect(Rect::from_min_max(origine, pos2(origine.x + largeur, fond.max(origine.y))));
+    if lachee {
+        ui.ctx().data_mut(|d| d.remove::<(String, bool)>(tenue_id));
+    }
+    let de = tiree?;
+    let pointeur = ui.ctx().pointer_interact_pos();
+    // Où elle ira : avant ou après la carte la plus proche du pointeur.
+    let cible = pointeur.and_then(|p| {
+        let plus_proche = places
+            .iter()
+            .enumerate()
+            .filter(|(k, _)| *k != de)
+            .min_by(|(_, a), (_, b)| a.distance_sq_to_pos(p).total_cmp(&b.distance_sq_to_pos(p)));
+        plus_proche.map(|(k, r)| (k, p.y > r.center().y))
+    });
+    if let Some((k, apres)) = cible {
+        let r = places[k];
+        let y = if apres { r.bottom() + ECART / 2.0 } else { r.top() - ECART / 2.0 };
+        ui.painter().line_segment([pos2(r.left() + 8.0, y), pos2(r.right() - 8.0, y)], Stroke::new(3.0, erp::PRIMAIRE));
+    }
+    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    // Près du bord de ce qui se voit, la page défile — d'autant plus vite que le pointeur s'enfonce dans la bande du
+    // bord, neuf points par image au plus.
+    if let Some(p) = pointeur {
+        let vu = ui.clip_rect();
+        let bande = 56.0;
+        let enfonce = |d: f32| (bande - d.max(0.0)) / bande * 9.0;
+        let pas = if p.y < vu.top() + bande {
+            enfonce(p.y - vu.top())
+        } else if p.y > vu.bottom() - bande {
+            -enfonce(vu.bottom() - p.y)
+        } else {
+            0.0
+        };
+        if pas != 0.0 {
+            ui.scroll_with_delta(vec2(0.0, pas));
+            ui.ctx().request_repaint();
+        }
+    }
+    if !lachee {
+        return None;
+    }
+    let (k, apres) = cible?;
+    let k = if k > de { k - 1 } else { k };
+    let vers = if apres { k + 1 } else { k };
+    (vers != de).then_some(Deplacement { de, vers })
+}
+
+/// L'ordre de la personne (`ordre` : des clés) posé sur l'ordre d'office : les cartes qu'il nomme prennent, dans son
+/// ordre, les places qu'elles avaient ; celles qu'il ne nomme pas (une carte nouvelle, une carte d'une autre vue) gardent
+/// la leur.
+pub(crate) fn ranger<T>(cartes: &mut Vec<T>, cle: impl Fn(&T) -> &str, ordre: &[String]) {
+    if ordre.is_empty() {
+        return;
+    }
+    let rang = |c: &T| ordre.iter().position(|o| o == cle(c));
+    let places: Vec<usize> = (0..cartes.len()).filter(|&k| rang(&cartes[k]).is_some()).collect();
+    let mut par_rang = places.clone();
+    par_rang.sort_by_key(|&k| rang(&cartes[k]));
+    let mut suite: Vec<usize> = (0..cartes.len()).collect();
+    for (p, k) in places.iter().zip(par_rang) {
+        suite[*p] = k;
+    }
+    let mut vieilles: Vec<Option<T>> = cartes.drain(..).map(Some).collect();
+    cartes.extend(suite.into_iter().filter_map(|k| vieilles[k].take()));
 }
 
 /// Un chiffre du tableau de bord, pour sa tuile : sa valeur en grand (« 4 », « 12 000 $ »), son étiquette grise (« au
@@ -1113,9 +1615,26 @@ pub(super) fn taille_du_bouton_erp(p: &egui::Painter, code: Option<char>, texte:
 
 /// Un bouton de l'ERP : un rayon de 4 points, une icône au besoin, son mot en demi-gras.
 pub(super) fn bouton_erp(ui: &mut egui::Ui, code: Option<char>, texte: &str, sorte: BoutonErp) -> egui::Response {
+    bouton_erp_nomme(ui, None, code, texte, sorte)
+}
+
+/// Un bouton de l'ERP ([`bouton_erp`]) qui porte un nom (`id`) : celui d'un menu qu'on retrouve (un essai le vise).
+pub(super) fn bouton_erp_nomme(
+    ui: &mut egui::Ui,
+    id: Option<egui::Id>,
+    code: Option<char>,
+    texte: &str,
+    sorte: BoutonErp,
+) -> egui::Response {
     let MiseEnPageDuBouton { texte: g_texte, icone: g_icone, taille, marge: px } =
         mise_en_page_du_bouton(ui.painter(), code, texte, sorte);
-    let (rect, rep) = ui.allocate_exact_size(taille, Sense::click());
+    let (rect, rep) = match id {
+        None => ui.allocate_exact_size(taille, Sense::click()),
+        Some(id) => {
+            let (rect, _) = ui.allocate_exact_size(taille, Sense::hover());
+            (rect, ui.interact(rect, id, Sense::click()))
+        }
+    };
     if ui.is_rect_visible(rect) {
         let (survol, enfonce) = (rep.hovered(), rep.is_pointer_button_down_on());
         let (fond, bord, encre) = match sorte {
@@ -1507,10 +2026,11 @@ impl Fenetre {
                 ui.vertical(|ui| {
                     ui.add_space(4.0);
                     ui.spacing_mut().item_spacing.y = 2.0;
-                    ui.label(RichText::new("Portrait d'Eve").size(14.0).color(couleurs::ENCRE));
+                    let p = super::panneau(ui);
+                    ui.label(RichText::new("Portrait d'Eve").size(14.0).color(p.encre));
                     let aide =
                         if visage.is_some() { "À la place de l'orbe" } else { "Une photo à la place de l'orbe" };
-                    ui.label(RichText::new(aide).size(12.0).color(couleurs::ENCRE_3));
+                    ui.label(RichText::new(aide).size(12.0).color(p.encre_3));
                 });
             });
             ui.add_space(8.0);
@@ -1753,6 +2273,8 @@ impl Fenetre {
         self.pieces_en_attente(ui, &pieces::CLAIR, 12.0);
         let id = egui::Id::unique("saisie-texte-constructo");
         ui.horizontal(|ui| {
+            // La rangée prend la hauteur du champ (à l'image d'avant) : ses boutons s'y centrent.
+            ui.set_min_height(self.hauteur_de_la_saisie + 4.0);
             ui.add_space(12.0);
             ui.spacing_mut().item_spacing.x = 8.0;
             self.bouton_micro_clair(ui);
@@ -1765,21 +2287,20 @@ impl Fenetre {
                 .corner_radius(4)
                 .inner_margin(if actif { Margin::same(0) } else { Margin::same(1) })
                 .show(ui, |ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.saisie)
-                            .id(id)
-                            .frame(egui::Frame::new().inner_margin(Margin::symmetric(11, 10)))
-                            .font(FontId::proportional(14.0))
-                            .text_color(erp::TEXTE)
-                            .hint_text(RichText::new("Écris ta demande à Eve…").color(erp::TEXTE_3))
-                            .desired_width(largeur - 2.0),
-                    )
+                    let allure = super::AllureDuChamp {
+                        police: FontId::proportional(14.0),
+                        encre: Some(erp::TEXTE),
+                        indice: RichText::new("Écris ta demande à Eve…").color(erp::TEXTE_3).into(),
+                        marge: Margin::symmetric(11, 10),
+                        largeur: largeur - 2.0,
+                    };
+                    self.champ_de_saisie(ui, id, allure)
                 })
                 .inner;
+            let (champ, entree) = champ;
             if std::mem::take(&mut self.saisie_au_clavier) {
                 champ.request_focus();
             }
-            let entree = champ.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             let pret = !self.saisie.trim().is_empty();
             if (bouton_envoyer_clair(ui, pret).clicked() || entree) && pret {
                 let t = std::mem::take(&mut self.saisie).trim().to_string();
@@ -1796,7 +2317,8 @@ impl Fenetre {
                 if arreter.on_hover_text("Eve se tait").clicked() {
                     self.geste("arreter", Value::Null);
                 }
-                if bouton_erp(ui, Some(icones::NOUVELLE), "Nouvelle conversation", BoutonErp::Fantome).clicked() {
+                let nouvelle = bouton_erp(ui, Some(icones::NOUVELLE), "Nouvelle conversation", BoutonErp::Fantome);
+                if nouvelle.on_hover_text("Ctrl+N").clicked() {
                     self.geste("nouvelle", Value::Null);
                 }
             });
@@ -2161,7 +2683,7 @@ fn bouton_envoyer_clair(ui: &mut egui::Ui, pret: bool) -> egui::Response {
     p.rect_filled(rect, 4.0, fond);
     let police = FontId::new(16.0, FontFamily::Name(ICONES.into()));
     p.text(rect.center(), Align2::CENTER_CENTER, icones::ENVOYER, police, Color32::WHITE);
-    rep.on_hover_text("Envoyer (Entrée)").on_hover_cursor(egui::CursorIcon::PointingHand)
+    rep.on_hover_text(super::AIDE_DE_L_ENVOI).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Le contexte de la fenêtre ouverte : un essai la capture par lui (`eve --essai-theme`).
@@ -2206,7 +2728,11 @@ mod essais {
                 ..Default::default()
             };
             let mut cliquee = None;
-            let _ = ctx.run_ui(entree, |ui| cliquee = carte_liste(ui, &l));
+            let _ = ctx.run_ui(entree, |ui| {
+                if let Some(Clic::Page(page)) = carte_liste(ui, &l) {
+                    cliquee = Some(page);
+                }
+            });
             cliquee
         };
         assert_eq!(image(Vec::new()), None);
@@ -2224,6 +2750,141 @@ mod essais {
         assert_eq!(image(vec![bouton(true)]), None);
         assert_eq!(image(vec![bouton(false)]).as_deref(), Some("https://status.exemple"));
         assert_eq!(image(Vec::new()), None, "un clic, une page");
+    }
+
+    /// L'ordre de la personne : les cartes qu'il nomme prennent, dans son ordre, les places qu'elles avaient ; les
+    /// autres (une nouvelle, une d'une autre vue) gardent la leur ; une clé qu'aucune carte ne porte ne dérange rien.
+    #[test]
+    fn l_ordre_de_la_personne_se_pose_sur_celui_d_office() {
+        let d_office = |cles: &[&str]| cles.iter().map(|c| c.to_string()).collect::<Vec<_>>();
+        let ordre = d_office(&["meteo", "absente", "alertes"]);
+        let mut cartes = d_office(&["alertes", "journee", "meteo", "epicerie"]);
+        ranger(&mut cartes, |c| c.as_str(), &ordre);
+        assert_eq!(cartes, d_office(&["meteo", "journee", "alertes", "epicerie"]));
+        let mut cartes = d_office(&["alertes", "journee"]);
+        ranger(&mut cartes, |c| c.as_str(), &[]);
+        assert_eq!(cartes, d_office(&["alertes", "journee"]), "sans ordre : celui d'office");
+        assert_eq!(cle_de("Agenda de l'entreprise"), "agenda-de-l-entreprise");
+        assert_eq!(cle_de("Échéances"), "echeances");
+    }
+
+    /// Une carte tirée par sa tête et lâchée sous une autre y va (`Deplacement`) ; une rangée qui ouvre une page, sous la
+    /// poignée de sa carte, garde son clic — et ce clic ne déplace rien, même sur deux colonnes, où la carte la plus
+    /// proche est dans l'autre (egui commence le glisser d'une poignée dès qu'on appuie).
+    #[test]
+    fn une_carte_se_deplace_et_ses_rangees_gardent_leurs_clics() {
+        let ctx = egui::Context::default();
+        crate::natif::polices(&ctx);
+        let listes: Vec<Liste> = ["Première", "Deuxième", "Troisième"]
+            .iter()
+            .map(|titre| {
+                let mut l = Liste::nouvelle(*titre, pictos::SERVICES, erp::VERT);
+                let mut page = Rangee::nouvelle("Claude", erp::TEXTE, "Opérationnel");
+                page.lien = Some(format!("https://{}.exemple", cle_de(titre)));
+                l.rangees.push(page);
+                l
+            })
+            .collect();
+        let cles: Vec<String> = listes.iter().map(|l| l.cle.clone()).collect();
+        let mut t = 0.0;
+        let mut image = |evenements: Vec<egui::Event>| {
+            t += 0.1;
+            let entree = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(760.0, 900.0))),
+                time: Some(t),
+                events: evenements,
+                ..Default::default()
+            };
+            let (mut lien, mut lachee) = (None, None);
+            let _ = ctx.run_ui(entree, |ui| {
+                lachee = maconnerie(ui, 2, &cles, |ui, k| {
+                    if let Some(Clic::Page(l)) = carte_liste(ui, &listes[k]) {
+                        lien = Some(l);
+                    }
+                });
+            });
+            (lien, lachee)
+        };
+        // Deux images : la poignée de chaque carte prend la place que sa carte avait à l'image d'avant.
+        image(Vec::new());
+        image(Vec::new());
+        let place = |cle: &str| {
+            let poignee = egui::Id::unique(("carte-du-tableau", cle));
+            ctx.data(|d| d.get_temp::<Rect>(poignee.with("place"))).expect("la place d'une carte")
+        };
+        let (premiere, troisieme) = (place("premiere"), place("troisieme"));
+        let bouton = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        // Tirée par sa tête (son coin, où rien ne se clique), lâchée sous la troisième.
+        let tete = premiere.left_top() + vec2(6.0, 6.0);
+        image(vec![egui::Event::PointerMoved(tete)]);
+        image(vec![bouton(tete, true)]);
+        let sous = troisieme.center_bottom() - vec2(0.0, 4.0);
+        for k in 1..=8 {
+            image(vec![egui::Event::PointerMoved(tete + (sous - tete) * (k as f32 / 8.0))]);
+        }
+        let (_, lachee) = image(vec![bouton(sous, false)]);
+        assert_eq!(lachee, Some(Deplacement { de: 0, vers: 2 }));
+        // La rangée de la deuxième carte, sous sa poignée : un clic, sa page.
+        let rangee = ctx.read_response(egui::Id::unique(("lien-de-rangee", "Deuxième", 0))).expect("sa rangée").rect;
+        image(vec![egui::Event::PointerMoved(rangee.center())]);
+        image(vec![bouton(rangee.center(), true)]);
+        let (lien, lachee) = image(vec![bouton(rangee.center(), false)]);
+        assert_eq!((lien.as_deref(), lachee), (Some("https://deuxieme.exemple"), None));
+    }
+
+    /// Une rangée sans page : un clic ouvre son menu — ce que sa carte offre en propre, puis ce qu'offre toute rangée —,
+    /// et ce qu'on y choisit revient avec le rang de la rangée ; ce qu'elle dit, en une ligne, pour la demande.
+    #[test]
+    fn une_rangee_ouvre_son_menu_et_rend_ce_qu_on_y_choisit() {
+        let ctx = egui::Context::default();
+        crate::natif::polices(&ctx);
+        let mut l = Liste::nouvelle("Factures en retard", pictos::RETARD, erp::ROUGE).actions(&[Action::Relance]);
+        let mut r = Rangee::nouvelle("1043", erp::ROUGE.encre, "Tremblay").a_droite("12 000 $");
+        r.detail = "échue depuis 34 jours".into();
+        l.rangees.push(r);
+        assert_eq!(texte_de_rangee(&l.rangees[0]), "1043 Tremblay — 12 000 $ (échue depuis 34 jours)");
+        let mut t = 0.0;
+        let mut image = |evenements: Vec<egui::Event>| {
+            t += 0.1;
+            let entree = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(420.0, 500.0))),
+                time: Some(t),
+                events: evenements,
+                ..Default::default()
+            };
+            let mut clic = None;
+            let _ = ctx.run_ui(entree, |ui| clic = carte_liste(ui, &l));
+            clic
+        };
+        let bouton = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        assert_eq!(image(Vec::new()), None);
+        let rangee =
+            ctx.read_response(egui::Id::unique(("rangee-de-carte", "Factures en retard", 0))).expect("la rangée");
+        for e in [egui::Event::PointerMoved(rangee.rect.center()), bouton(rangee.rect.center(), true)] {
+            assert_eq!(image(vec![e]), None);
+        }
+        assert_eq!(image(vec![bouton(rangee.rect.center(), false)]), None, "un clic ouvre le menu");
+        image(Vec::new());
+        let ligne =
+            |a: Action| ctx.read_response(egui::Id::unique(("action-de-rangee", "Factures en retard", 0, a.mot())));
+        for a in [Action::Relance, Action::Demander, Action::RappelDemain] {
+            assert!(ligne(a).is_some(), "{} dans le menu", a.mot());
+        }
+        assert!(ligne(Action::Fait).is_none(), "ce que la carte n'offre pas");
+        let relance = ligne(Action::Relance).expect("la relance").rect.center();
+        image(vec![egui::Event::PointerMoved(relance)]);
+        image(vec![bouton(relance, true)]);
+        assert_eq!(image(vec![bouton(relance, false)]), Some(Clic::Action(Action::Relance, 0)));
     }
 
     #[test]

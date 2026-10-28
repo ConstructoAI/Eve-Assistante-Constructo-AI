@@ -1993,7 +1993,8 @@ pub(crate) fn jour_court(date: &str) -> String {
 
 /// La décision du jour en carte : son délai dans la pilule (rouge, l'échéance dépassée), son texte en demi-gras.
 fn liste_de_la_decision(d: &Decision) -> theme::Liste {
-    let mut l = theme::Liste::nouvelle("Décision du jour", pictos::DECISION, erp::AMBRE);
+    let mut l =
+        theme::Liste::nouvelle("Décision du jour", pictos::DECISION, erp::AMBRE).actions(&[theme::Action::Fait]);
     let texte = theme::Bout { texte: d.texte.clone(), couleur: Some(erp::TITRE), fort: true, barre: false };
     let mut r = theme::Rangee { bouts: vec![texte], ..theme::Rangee::default() };
     // « AVANT LE 30 OCT. · DANS 7 J » : le délai dans la pilule, la date dessous — la pilule reste courte.
@@ -2107,7 +2108,7 @@ fn liste_de_la_journee(moments: &[Moment]) -> theme::Liste {
 /// rouge sous son seuil, comme le tableau HTML les passe au rouge —, son texte, son délai en détail ; dans la pilule,
 /// combien pressent (en rouge), sinon combien il y en a.
 fn liste_des_echeances(echeances: &[(String, Bloc)]) -> theme::Liste {
-    let mut l = theme::Liste::nouvelle("Échéances", pictos::ECHEANCES, erp::BLEU);
+    let mut l = theme::Liste::nouvelle("Échéances", pictos::ECHEANCES, erp::BLEU).actions(&[theme::Action::Fait]);
     let pressent = echeances.iter().filter(|(_, b)| b.alerte).count();
     l.pilule = Some(if pressent > 0 {
         (nombre(pressent, "qui presse", "qui pressent"), erp::ROUGE)

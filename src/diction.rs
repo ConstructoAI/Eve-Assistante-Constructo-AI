@@ -1766,8 +1766,8 @@ mod essais {
     fn les_adresses_et_les_suspensions_se_disent() {
         assert_eq!(dit("Écris à info@exemple.ca."), "Écris à info arobase exemple point C A.");
         assert_eq!(
-            dit("Écris à sam.tremblay2000@gmail.com, merci."),
-            "Écris à sam point tremblay deux mille arobase djimèle point com, merci."
+            dit("Écris à sam.tremblay42@exemple.com, merci."),
+            "Écris à sam point tremblay quarante-deux arobase exemple point com, merci."
         );
         assert_eq!(dit("Le site exemple.com."), "Le site exemple point com.");
         // Pas des adresses : un fichier, une abréviation.

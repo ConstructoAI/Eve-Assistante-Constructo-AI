@@ -10,7 +10,7 @@ license = "Apache-2.0"
 # La révision d'Eve (12.0.0 : la v12), sa seule source : la fenêtre la montre (« v12 »), `eve --version` la dit, le zip
 # (emballer.ps1) et l'étiquette du dépôt public (outils\publier.ps1) en prennent le nom. Une révision de plus : monter
 # ce nombre (13.0.0 pour la v13), et rien d'autre.
-version = "24.0.0"
+version = "25.0.0"
 edition = "2024"
 rust-version = "1.99"
 publish = false
@@ -72,6 +72,8 @@ windows = { version = "0.62.2", features = [
     "Graphics_Imaging",
     "Foundation",
     "Foundation_Collections",
+    "UI_Notifications",
+    "Data_Xml_Dom",
     "Win32_System_WinRT",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",

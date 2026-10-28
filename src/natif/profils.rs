@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use eframe::egui::{self, Align2, Color32, FontFamily, FontId, Margin, Sense, Stroke, pos2, vec2};
 use serde_json::Value;
 
-use super::{Fenetre, ICONES, SEMI, couleurs, groupe, icones, rubrique};
+use super::{
+    Fenetre, ICONES, PANNEAU_CLAIR, PANNEAU_SOMBRE, Panneau, SEMI, couleurs, groupe, icones, panneau, rubrique,
+};
 
 /// Le chevron du menu (ChevronDown, de Segoe Fluent Icons).
 const CHEVRON: char = '\u{E70D}';
@@ -101,7 +103,16 @@ impl Fenetre {
             .map(|p| 30.0 + mesure(&p.nom, police_du_menu()).size().x + if p.office { d_office } else { 0.0 } + 14.0)
             .fold(220.0, f32::max);
         let mut choisi = None;
-        egui::Popup::menu(&rep).gap(6.0).frame(cadre_du_menu()).show(|ui| {
+        // Le menu, sur sa propre couche, prend les visuels de son thème : dans le clair, ceux de ses panneaux.
+        let clair = self.theme_constructo(ui.ctx());
+        let pan = if clair { &PANNEAU_CLAIR } else { &PANNEAU_SOMBRE };
+        let style = move |s: &mut egui::Style| {
+            if clair {
+                super::theme::visuels_du_panneau(&mut s.visuals);
+            }
+            egui::containers::menu::menu_style(s);
+        };
+        egui::Popup::menu(&rep).gap(6.0).frame(cadre_du_menu(pan)).style(style).show(|ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             for p in &profils {
                 if ligne_du_menu(ui, p, crate::profils::meme(&p.nom, &actif), largeur).clicked() {
@@ -135,7 +146,7 @@ impl Fenetre {
         ui.add_space(6.0);
         let aide = "Un profil : un dossier avec son CLAUDE.md, et sa conversation. Demande à Eve d'en créer un ; elle \
                     change de profil entre deux demandes.";
-        ui.label(egui::RichText::new(aide).size(12.0).color(couleurs::ENCRE_3));
+        ui.label(egui::RichText::new(aide).size(12.0).color(panneau(ui).encre_3));
         if let Some(nom) = choisi {
             self.geste("profil", Value::String(nom));
         }
@@ -154,15 +165,15 @@ impl Fenetre {
     }
 }
 
-/// Le cadre du menu des profils, celui des panneaux de la fenêtre : la surface, son filet, des coins arrondis, une
+/// Le cadre du menu des profils, celui des panneaux de la fenêtre : leur fond, leur filet, des coins arrondis, leur
 /// ombre.
-fn cadre_du_menu() -> egui::Frame {
+fn cadre_du_menu(p: &Panneau) -> egui::Frame {
     egui::Frame::new()
-        .fill(couleurs::SURFACE)
-        .stroke((1.0, couleurs::FILET))
+        .fill(p.fond)
+        .stroke((1.0, p.filet))
         .corner_radius(10)
         .inner_margin(Margin::same(6))
-        .shadow(egui::Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(100) })
+        .shadow(p.ombres[1])
 }
 
 /// Le nom d'un profil dans le menu.
@@ -175,27 +186,23 @@ fn police_du_menu() -> FontId {
 fn ligne_du_menu(ui: &mut egui::Ui, p: &Publie, actif: bool, largeur: f32) -> egui::Response {
     let (rect, _) = ui.allocate_exact_size(vec2(largeur, 30.0), Sense::hover());
     let rep = ui.interact(rect, id_du_profil(&p.nom), Sense::click());
+    let pan = panneau(ui);
     let painter = ui.painter();
     if rep.hovered() {
-        painter.rect_filled(rect, 6.0, Color32::from_white_alpha(12));
+        painter.rect_filled(rect, 6.0, pan.survol);
     }
     if actif {
         let coche = FontId::new(12.0, FontFamily::Name(ICONES.into()));
-        painter.text(
-            pos2(rect.left() + 14.0, rect.center().y),
-            Align2::CENTER_CENTER,
-            icones::OUI,
-            coche,
-            couleurs::ACCENT,
-        );
+        painter.text(pos2(rect.left() + 14.0, rect.center().y), Align2::CENTER_CENTER, icones::OUI, coche, pan.accent);
     }
-    let encre = if actif { Color32::WHITE } else { couleurs::ENCRE };
+    // L'actif se détache : le plus clair des textes dans le sombre, le plus foncé dans le clair.
+    let encre = if actif && ui.visuals().dark_mode { Color32::WHITE } else { pan.encre };
     let nom =
         painter.text(pos2(rect.left() + 30.0, rect.center().y), Align2::LEFT_CENTER, &p.nom, police_du_menu(), encre);
     if p.office {
         let x = (rect.right() - 10.0).max(nom.right() + 12.0);
         let petit = FontId::proportional(11.5);
-        painter.text(pos2(x, rect.center().y), Align2::RIGHT_CENTER, "d'office", petit, couleurs::ENCRE_3);
+        painter.text(pos2(x, rect.center().y), Align2::RIGHT_CENTER, "d'office", petit, pan.encre_3);
     }
     let rep = rep.on_hover_cursor(egui::CursorIcon::PointingHand);
     if p.dossier.is_empty() { rep } else { rep.on_hover_text(&p.dossier) }
@@ -207,22 +214,23 @@ fn rangee_de_profil(ui: &mut egui::Ui, p: &Publie, actif: bool, premier: bool) -
     let largeur = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(largeur, 46.0), Sense::hover());
     let rep = ui.interact(rect, id_du_profil_des_reglages(&p.nom), Sense::click());
+    let pan = panneau(ui);
     let painter = ui.painter();
     if !premier {
-        painter.hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.0, couleurs::FILET));
+        painter.hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.0, pan.filet));
     }
     let nom = if p.office { format!("{} (d'office)", p.nom) } else { p.nom.clone() };
     let police = FontId::proportional(14.0);
-    painter.text(pos2(rect.left(), rect.center().y - 8.0), Align2::LEFT_CENTER, nom, police, couleurs::ENCRE);
+    painter.text(pos2(rect.left(), rect.center().y - 8.0), Align2::LEFT_CENTER, nom, police, pan.encre);
     let dossier = chemin_court(ui, &p.dossier, largeur - 40.0);
-    painter.text(pos2(rect.left(), rect.center().y + 9.0), Align2::LEFT_CENTER, dossier, petite(), couleurs::ENCRE_3);
+    painter.text(pos2(rect.left(), rect.center().y + 9.0), Align2::LEFT_CENTER, dossier, petite(), pan.encre_3);
     let centre = pos2(rect.right() - 12.0, rect.center().y);
     if actif {
-        painter.circle_filled(centre, 10.0, couleurs::ACCENT);
+        painter.circle_filled(centre, 10.0, pan.accent);
         let coche = FontId::new(10.0, FontFamily::Name(ICONES.into()));
-        painter.text(centre, Align2::CENTER_CENTER, icones::OUI, coche, couleurs::SUR_PLEIN);
+        painter.text(centre, Align2::CENTER_CENTER, icones::OUI, coche, pan.sur_plein);
     } else {
-        let anneau = if rep.hovered() { couleurs::ENCRE_2 } else { couleurs::FILET_FORT };
+        let anneau = if rep.hovered() { pan.encre_2 } else { pan.filet_fort };
         painter.circle_stroke(centre, 9.0, Stroke::new(1.5, anneau));
     }
     let rep = if actif { rep } else { rep.on_hover_cursor(egui::CursorIcon::PointingHand) };

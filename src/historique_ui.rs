@@ -21,13 +21,13 @@ use std::time::Duration;
 
 use eframe::egui::text::{LayoutJob, TextFormat, TextWrapping};
 use eframe::egui::{
-    self, Align2, Color32, FontFamily, FontId, Galley, Id, Margin, Rect, RichText, Sense, Shadow, Stroke, StrokeKind,
+    self, Align2, Color32, FontFamily, FontId, Galley, Id, Margin, Rect, RichText, Sense, Stroke, StrokeKind,
     UiBuilder, pos2, vec2,
 };
 
 use crate::cartes::{Cartes, Geste};
 use crate::historique::{self, Entree, Resume};
-use crate::natif::{self, Ligne, couleurs, melange};
+use crate::natif::{self, Ligne, Panneau, melange};
 
 /// Les conversations de la liste : 300 au plus, comme la route `/historique` de la page.
 const LIMITE: usize = 300;
@@ -234,16 +234,14 @@ impl Historique {
         ui.allocate_rect(place, Sense::hover());
         ui.multiply_opacity(entre);
         let cadre = place.translate(vec2(0.0, 8.0 * (1.0 - entre)));
+        let pan = natif::panneau(ui);
         let p = ui.painter();
         // L'ombre du panneau (`--ombre-panneau`) : une proche et nette, une large et douce.
-        for ombre in [
-            Shadow { offset: [0, 2], blur: 6, spread: 0, color: Color32::from_black_alpha(100) },
-            Shadow { offset: [0, 16], blur: 44, spread: 0, color: Color32::from_black_alpha(150) },
-        ] {
+        for ombre in pan.ombres {
             p.add(ombre.as_shape(cadre, 14));
         }
-        p.rect(cadre, 14.0, couleurs::SURFACE, Stroke::new(1.0, couleurs::FILET), StrokeKind::Inside);
-        p.hline(cadre.x_range(), cadre.top() + TETE + 0.5, Stroke::new(1.0, couleurs::FILET));
+        p.rect(cadre, 14.0, pan.fond, Stroke::new(1.0, pan.filet), StrokeKind::Inside);
+        p.hline(cadre.x_range(), cadre.top() + TETE + 0.5, Stroke::new(1.0, pan.filet));
         let tete = Rect::from_min_size(cadre.min, vec2(cadre.width(), TETE));
         let corps = Rect::from_min_max(pos2(cadre.left(), tete.bottom() + 1.0), cadre.max);
         let aujourdhui = crate::journal::date();
@@ -353,10 +351,11 @@ impl Historique {
 
     /// La tête (`.panneau-tete`) : le ruban, ← dans une conversation, le titre, × ; rend `Fermer` sur ×.
     fn tete(&mut self, ui: &egui::Ui, r: Rect) -> Option<Sortie> {
+        let pan = natif::panneau(ui);
         let milieu = r.top() + 9.0 + 16.0;
         let mut x = r.left() + 14.0;
         let ruban = Rect::from_min_size(pos2(x, milieu - 10.0), vec2(5.0, 20.0));
-        ui.painter().rect_filled(ruban, 3.0, couleurs::ACCENT);
+        ui.painter().rect_filled(ruban, 3.0, pan.accent);
         x = ruban.right() + 10.0;
         if self.ouverte.is_some() {
             let b = Rect::from_min_size(pos2(x, milieu - 16.0), vec2(32.0, 32.0));
@@ -368,7 +367,7 @@ impl Historique {
         }
         let titre = if self.ouverte.is_some() { "Conversation" } else { "Historique" };
         let gras = FontId::new(16.0, FontFamily::Name(natif::GRAS.into()));
-        texte(ui.painter(), pos2(x, milieu), Align2::LEFT_CENTER, titre, gras, couleurs::ENCRE, 0.32);
+        texte(ui.painter(), pos2(x, milieu), Align2::LEFT_CENTER, titre, gras, pan.encre, 0.32);
         let b = Rect::from_min_size(pos2(r.right() - 9.0 - 32.0, milieu - 16.0), vec2(32.0, 32.0));
         let fermer =
             bouton_carre(ui, b, id_de(Element::Fermer), natif::icones::NON, "Fermer (Échap)", "Fermer l'historique");
@@ -377,6 +376,7 @@ impl Historique {
 
     /// La liste (H2 à H4) : la recherche, fixe en haut, puis les conversations par jour, qui défilent.
     fn liste(&mut self, ui: &mut egui::Ui, corps: Rect, temps: f64, aujourdhui: &str) {
+        let pan = natif::panneau(ui);
         let champ = Rect::from_min_size(corps.min + vec2(MARGE, 10.0), vec2(corps.width() - 2.0 * MARGE, 38.0));
         self.champ_de_recherche(ui, champ, temps);
         let zone =
@@ -396,7 +396,7 @@ impl Historique {
                     match self.attendue {
                         Some(t) if temps - t > ROUE => {
                             ui.add_space(24.0);
-                            ui.vertical_centered(|ui| ui.add(egui::Spinner::new().size(18.0).color(couleurs::ENCRE_3)));
+                            ui.vertical_centered(|ui| ui.add(egui::Spinner::new().size(18.0).color(pan.encre_3)));
                         }
                         Some(t) => ui.ctx().request_repaint_after(Duration::from_secs_f64(t + ROUE - temps)),
                         None => {}
@@ -430,20 +430,15 @@ impl Historique {
         let id = id_de(Element::Cherche);
         let actif = ui.ctx().memory(|m| m.has_focus(id));
         let icones_de_windows = FontFamily::Name(natif::ICONES.into());
+        let pan = natif::panneau(ui);
         let p = ui.painter();
         if actif {
-            p.rect_filled(rect.expand(3.0), 12.0, couleurs::ACCENT.gamma_multiply(0.16));
+            p.rect_filled(rect.expand(3.0), 12.0, pan.accent.gamma_multiply(0.16));
         }
-        let bord = if actif { couleurs::ACCENT } else { couleurs::FILET_FORT };
-        p.rect(rect, 9.0, couleurs::FOND, Stroke::new(1.0, bord), StrokeKind::Inside);
+        let bord = if actif { pan.accent } else { pan.filet_fort };
+        p.rect(rect, 9.0, pan.champ, Stroke::new(1.0, bord), StrokeKind::Inside);
         let loupe = FontId::new(13.0, icones_de_windows.clone());
-        p.text(
-            pos2(rect.left() + 12.0, rect.center().y),
-            Align2::LEFT_CENTER,
-            icones::CHERCHER,
-            loupe,
-            couleurs::ENCRE_3,
-        );
+        p.text(pos2(rect.left() + 12.0, rect.center().y), Align2::LEFT_CENTER, icones::CHERCHER, loupe, pan.encre_3);
         let effacer = !self.recherche.is_empty();
         let droite = rect.right() - if effacer { 34.0 } else { 10.0 };
         let zone = Rect::from_min_max(pos2(rect.left() + 34.0, rect.top()), pos2(droite, rect.bottom()));
@@ -455,8 +450,8 @@ impl Historique {
                 .margin(Margin::ZERO)
                 .align(Align2::LEFT_CENTER)
                 .font(FontId::proportional(14.0))
-                .text_color(couleurs::ENCRE)
-                .hint_text(RichText::new("Chercher dans les conversations…").color(couleurs::ENCRE_3))
+                .text_color(pan.encre)
+                .hint_text(RichText::new("Chercher dans les conversations…").color(pan.encre_3))
                 .desired_width(zone.width()),
         );
         if champ.changed() {
@@ -471,9 +466,9 @@ impl Historique {
             let rep = ui.interact(r, id_de(Element::Effacer), Sense::click());
             let p = ui.painter();
             if rep.hovered() {
-                p.circle_filled(r.center(), 11.0, couleurs::SURFACE_2);
+                p.circle_filled(r.center(), 11.0, pan.groupe);
             }
-            let encre = if rep.hovered() { couleurs::ENCRE } else { couleurs::ENCRE_3 };
+            let encre = if rep.hovered() { pan.encre } else { pan.encre_3 };
             p.text(r.center(), Align2::CENTER_CENTER, natif::icones::NON, FontId::new(10.0, icones_de_windows), encre);
             anneau(ui, &rep, r, 12.0);
             rep.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Effacer la recherche"));
@@ -498,6 +493,7 @@ impl Historique {
         if std::mem::take(&mut self.remonter_echanges) {
             defile = defile.vertical_scroll_offset(0.0);
         }
+        let pan = natif::panneau(ui);
         let ouverte = self.ouverte.as_ref()?;
         let premier = ouverte.echanges.first()?;
         let pied = Rect::from_min_max(pos2(corps.left(), corps.bottom() - PIED), corps.max);
@@ -510,7 +506,7 @@ impl Historique {
                 ui.horizontal(|ui| {
                     ui.add_space(2.0);
                     let titre = titre_de_la_conversation(&ouverte.echanges, aujourdhui);
-                    ui.add(egui::Label::new(natif::semi(titre, 13.0).color(couleurs::ENCRE_2)).selectable(false));
+                    ui.add(egui::Label::new(natif::semi(titre, 13.0).color(pan.encre_2)).selectable(false));
                 });
                 ui.add_space(10.0);
                 for e in &ouverte.echanges {
@@ -525,7 +521,7 @@ impl Historique {
                         en_cours: false,
                         tour: "",
                     };
-                    natif::bulle(ui, &toi, cartes, &mut gestes);
+                    natif::bulle_du_theme(ui, &toi, cartes, &mut gestes);
                     let reponse = if e.reponse.trim().is_empty() { "(sans réponse)" } else { e.reponse.as_str() };
                     let eve = Ligne {
                         de: "eve",
@@ -536,14 +532,14 @@ impl Historique {
                         en_cours: false,
                         tour: "",
                     };
-                    natif::bulle(ui, &eve, cartes, &mut gestes);
+                    natif::bulle_du_theme(ui, &eve, cartes, &mut gestes);
                     if !e.issue.is_empty() {
                         issue(ui, &e.issue);
                     }
                 }
             });
         });
-        ui.painter().hline(corps.x_range(), pied.top() + 0.5, Stroke::new(1.0, couleurs::FILET));
+        ui.painter().hline(corps.x_range(), pied.top() + 0.5, Stroke::new(1.0, pan.filet));
         let bouton = Rect::from_min_max(pied.min + vec2(MARGE, 11.0), pied.max - vec2(MARGE, 12.0));
         if bouton_reprendre(ui, bouton).clicked() {
             return Some(Sortie::Reprendre(ouverte.id.clone()));
@@ -738,8 +734,8 @@ fn heure_dans_la_conversation(e: &Entree, premier: &Entree) -> String {
 // ---- Le dessin -----------------------------------------------------------------------------------------------------
 
 /// Le fond d'un élément survolé (`--accent-wash`) : l'accent à 12 % sur la surface du panneau.
-fn lavis() -> Color32 {
-    melange(couleurs::SURFACE, couleurs::ACCENT, 0.12)
+fn lavis(pan: &Panneau) -> Color32 {
+    melange(pan.fond, pan.accent, 0.12)
 }
 
 /// Un texte posé à `pos` selon `ancre`, ses lettres espacées de `espace`.
@@ -762,17 +758,18 @@ fn une_ligne(p: &egui::Painter, t: &str, police: FontId, couleur: Color32, large
 /// peint en dedans : la zone qui défile rognerait un anneau tracé autour d'une conversation de la liste.
 fn anneau(ui: &egui::Ui, rep: &egui::Response, rect: Rect, rayon: f32) {
     if rep.has_focus() {
-        ui.painter().rect_stroke(rect, rayon, Stroke::new(2.0, couleurs::ACCENT), StrokeKind::Inside);
+        ui.painter().rect_stroke(rect, rayon, Stroke::new(2.0, natif::panneau(ui).accent), StrokeKind::Inside);
     }
 }
 
 /// Un bouton carré de la tête (←, ×), comme `.fermer` dans la page : rien autour, un fond et un filet au survol.
 fn bouton_carre(ui: &egui::Ui, rect: Rect, id: Id, code: char, infobulle: &str, nom: &'static str) -> egui::Response {
     let rep = ui.interact(rect, id, Sense::click());
+    let pan = natif::panneau(ui);
     let (fond, bord, encre) = if rep.hovered() {
-        (couleurs::SURFACE_2, couleurs::FILET, couleurs::ENCRE)
+        (pan.groupe, pan.filet, pan.encre)
     } else {
-        (Color32::TRANSPARENT, Color32::TRANSPARENT, couleurs::ENCRE_2)
+        (Color32::TRANSPARENT, Color32::TRANSPARENT, pan.encre_2)
     };
     let p = ui.painter();
     p.rect(rect, 8.0, fond, Stroke::new(1.0, bord), StrokeKind::Inside);
@@ -792,17 +789,18 @@ fn bouton_carre(ui: &egui::Ui, rect: Rect, id: Id, code: char, infobulle: &str, 
 fn bouton_reprendre(ui: &egui::Ui, rect: Rect) -> egui::Response {
     let rep = ui.interact(rect, id_de(Element::Reprendre), Sense::click());
     let enfonce = rep.is_pointer_button_down_on();
+    let pan = natif::panneau(ui);
     let fond = match (enfonce, rep.hovered()) {
-        (true, _) => melange(couleurs::SURFACE, couleurs::ACCENT, 0.2),
-        (false, true) => lavis(),
-        _ => couleurs::SURFACE,
+        (true, _) => melange(pan.fond, pan.accent, 0.2),
+        (false, true) => lavis(pan),
+        _ => pan.fond,
     };
     let p = ui.painter();
-    p.rect(rect, 9.0, fond, Stroke::new(1.0, couleurs::ACCENT), StrokeKind::Inside);
+    p.rect(rect, 9.0, fond, Stroke::new(1.0, pan.accent), StrokeKind::Inside);
     // Enfoncé, il descend d'un point, comme `.bouton:active`.
     let centre = rect.center() + vec2(0.0, if enfonce { 1.0 } else { 0.0 });
     let semi = FontId::new(14.0, FontFamily::Name(natif::SEMI.into()));
-    p.text(centre, Align2::CENTER_CENTER, "Reprendre cette conversation", semi, couleurs::ACCENT);
+    p.text(centre, Align2::CENTER_CENTER, "Reprendre cette conversation", semi, pan.accent);
     anneau(ui, &rep, rect, 9.0);
     rep.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Reprendre cette conversation"));
     rep.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -810,16 +808,17 @@ fn bouton_reprendre(ui: &egui::Ui, rect: Rect) -> egui::Response {
 
 /// Le jour d'un groupe de conversations (`.hist-jour`) : en capitales, à chasse fixe.
 fn en_tete_du_jour(ui: &mut egui::Ui, jour: &str) {
+    let pan = natif::panneau(ui);
     ui.add_space(12.0);
     let format = TextFormat {
         font_id: FontId::monospace(11.0),
-        color: couleurs::ENCRE_3,
+        color: pan.encre_3,
         extra_letter_spacing: 0.66,
         ..Default::default()
     };
     let galley = ui.painter().layout_job(LayoutJob::single_section(jour.to_uppercase(), format));
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), galley.size().y), Sense::hover());
-    ui.painter().galley(pos2(r.left() + 2.0, r.top()), galley, couleurs::ENCRE_3);
+    ui.painter().galley(pos2(r.left() + 2.0, r.top()), galley, pan.encre_3);
     ui.add_space(5.0);
 }
 
@@ -827,6 +826,7 @@ fn en_tete_du_jour(ui: &mut egui::Ui, jour: &str) {
 /// au survol, le filet et le fond de l'accent.
 fn element(ui: &mut egui::Ui, c: &Resume) -> egui::Response {
     let largeur = ui.available_width();
+    let pan = natif::panneau(ui);
     let dedans = (largeur - 2.0 * 12.0).max(40.0);
     let titre = if c.titre.trim().is_empty() { "(sans demande)" } else { c.titre.as_str() };
     let meta = format!("{} · {}", plage(c), nombre_d_echanges(c.echanges));
@@ -836,7 +836,7 @@ fn element(ui: &mut egui::Ui, c: &Resume) -> egui::Response {
         let extrait = c.extrait.as_deref().map(extrait_lisible).filter(|x| !x.is_empty()).map(|x| {
             let format = TextFormat {
                 font_id: FontId::proportional(12.5),
-                color: couleurs::ENCRE_2,
+                color: pan.encre_2,
                 italics: true,
                 line_height: Some(17.5),
                 ..Default::default()
@@ -846,8 +846,8 @@ fn element(ui: &mut egui::Ui, c: &Resume) -> egui::Response {
             p.layout_job(job)
         });
         (
-            une_ligne(p, titre, semi, couleurs::ENCRE, dedans),
-            une_ligne(p, &meta, FontId::proportional(12.0), couleurs::ENCRE_3, dedans),
+            une_ligne(p, titre, semi, pan.encre, dedans),
+            une_ligne(p, &meta, FontId::proportional(12.0), pan.encre_3, dedans),
             extrait,
         )
     };
@@ -862,19 +862,18 @@ fn element(ui: &mut egui::Ui, c: &Resume) -> egui::Response {
     let (rect, _) = ui.allocate_exact_size(vec2(largeur, hauteur), Sense::hover());
     let rep = ui.interact(rect, id_de(Element::Conversation(&c.id)), Sense::click());
     if ui.is_rect_visible(rect) {
-        let (fond, bord) =
-            if rep.hovered() { (lavis(), couleurs::ACCENT) } else { (couleurs::SURFACE_2, couleurs::FILET) };
+        let (fond, bord) = if rep.hovered() { (lavis(pan), pan.accent) } else { (pan.groupe, pan.filet) };
         let p = ui.painter();
         p.rect(rect, 10.0, fond, Stroke::new(1.0, bord), StrokeKind::Inside);
         let x = rect.left() + 12.0;
         let mut y = rect.top() + 9.0;
         let h = g_titre.size().y;
-        p.galley(pos2(x, y), g_titre, couleurs::ENCRE);
+        p.galley(pos2(x, y), g_titre, pan.encre);
         y += h + 2.0;
         let h = g_meta.size().y;
-        p.galley(pos2(x, y), g_meta, couleurs::ENCRE_3);
+        p.galley(pos2(x, y), g_meta, pan.encre_3);
         if let Some(g) = g_extrait {
-            p.galley(pos2(x, y + h + 3.0), g, couleurs::ENCRE_2);
+            p.galley(pos2(x, y + h + 3.0), g, pan.encre_2);
         }
         anneau(ui, &rep, rect, 10.0);
     }
@@ -889,7 +888,8 @@ fn message(ui: &mut egui::Ui, texte: &str) {
     ui.add_space(20.0);
     ui.vertical_centered(|ui| {
         ui.set_max_width(ui.available_width() - 12.0);
-        ui.add(egui::Label::new(RichText::new(texte).size(13.5).color(couleurs::ENCRE_3)).selectable(false));
+        let encre = natif::panneau(ui).encre_3;
+        ui.add(egui::Label::new(RichText::new(texte).size(13.5).color(encre)).selectable(false));
     });
     ui.add_space(20.0);
 }
@@ -901,7 +901,8 @@ fn issue(ui: &mut egui::Ui, sorte: &str) {
     ui.add_space(-16.0);
     ui.horizontal(|ui| {
         ui.add_space(34.0);
-        ui.add(egui::Label::new(RichText::new(texte).size(11.5).color(couleurs::ENCRE_3)).selectable(false));
+        let encre = natif::panneau(ui).encre_3;
+        ui.add(egui::Label::new(RichText::new(texte).size(11.5).color(encre)).selectable(false));
     });
     ui.add_space(2.0);
 }

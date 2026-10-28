@@ -13,6 +13,7 @@
 //!
 //! [`Ecran::abonner`]: crate::ecran::Ecran::abonner
 
+pub(crate) mod graphiques;
 pub(crate) mod pieces;
 pub(crate) mod portrait;
 pub(crate) mod profils;
@@ -90,6 +91,96 @@ pub mod couleurs {
     ];
 }
 
+/// Les couleurs des panneaux qui s'ouvrent par-dessus la fenêtre — les réglages, l'historique, le menu des profils — et
+/// de ce qu'on y touche : celles du thème sombre, ou celles du thème « Constructo AI », blanches comme les cartes de
+/// son tableau de bord. Un panneau prend celles de son `Ui` ([`panneau`]) ; dans le thème clair, la fenêtre lui donne
+/// ses visuels ([`theme::visuels_du_panneau`]).
+#[derive(Clone, Copy)]
+pub(crate) struct Panneau {
+    /// Le panneau : son fond, son filet, son ombre proche et sa large.
+    pub(crate) fond: Color32,
+    pub(crate) filet: Color32,
+    pub(crate) ombres: [egui::Shadow; 2],
+    /// Un groupe de rangées, une touche du clavier ; la piste d'un choix en segments et sa case choisie ; un survol.
+    pub(crate) groupe: Color32,
+    pub(crate) piste: Color32,
+    pub(crate) choisi: Color32,
+    pub(crate) survol: Color32,
+    /// Le texte, le secondaire, le discret.
+    pub(crate) encre: Color32,
+    pub(crate) encre_2: Color32,
+    pub(crate) encre_3: Color32,
+    /// Un filet plus marqué (un bouton cerné, un interrupteur éteint, un champ) ; l'accent.
+    pub(crate) filet_fort: Color32,
+    pub(crate) accent: Color32,
+    /// Le texte d'un bouton plein ; le rouge d'une erreur et de « Quitter Eve » ; le fond d'un champ.
+    pub(crate) sur_plein: Color32,
+    pub(crate) crit: Color32,
+    pub(crate) champ: Color32,
+}
+
+/// Le thème sombre : les couleurs de l'Eve de Constructo AI ([`couleurs`]), l'ombre de ses panneaux
+/// (`--ombre-panneau` : une proche et nette, une large et douce).
+pub(crate) const PANNEAU_SOMBRE: Panneau = Panneau {
+    fond: couleurs::SURFACE,
+    filet: couleurs::FILET,
+    ombres: [
+        egui::Shadow { offset: [0, 2], blur: 6, spread: 0, color: Color32::from_black_alpha(100) },
+        egui::Shadow { offset: [0, 16], blur: 44, spread: 0, color: Color32::from_black_alpha(150) },
+    ],
+    groupe: couleurs::SURFACE_2,
+    piste: couleurs::SURFACE_2,
+    choisi: couleurs::PILULE,
+    survol: Color32::from_rgba_premultiplied(12, 12, 12, 12),
+    encre: couleurs::ENCRE,
+    encre_2: couleurs::ENCRE_2,
+    encre_3: couleurs::ENCRE_3,
+    filet_fort: couleurs::FILET_FORT,
+    accent: couleurs::ACCENT,
+    sur_plein: couleurs::SUR_PLEIN,
+    crit: couleurs::CRIT,
+    champ: couleurs::FOND,
+};
+
+/// Le thème « Constructo AI » : blanc, le filet froid de ses cartes et leurs ombres teintées de marine
+/// ([`theme::ombre_marine`]), les gris d'ardoise de ses tableaux de bord (le groupe : `slate-50`, la piste : `-100`, le
+/// filet fort : `-300`, le discret : `-500`), son bleu primaire.
+pub(crate) const PANNEAU_CLAIR: Panneau = Panneau {
+    fond: Color32::WHITE,
+    filet: theme::erp::FILET_DE_CARTE,
+    ombres: [
+        egui::Shadow {
+            offset: [0, 2],
+            blur: 6,
+            spread: 0,
+            color: Color32::from_rgba_unmultiplied_const(15, 35, 80, 22),
+        },
+        egui::Shadow {
+            offset: [0, 16],
+            blur: 44,
+            spread: 0,
+            color: Color32::from_rgba_unmultiplied_const(15, 35, 80, 52),
+        },
+    ],
+    groupe: Color32::from_rgb(0xF8, 0xFA, 0xFC),
+    piste: Color32::from_rgb(0xF1, 0xF5, 0xF9),
+    choisi: Color32::WHITE,
+    survol: Color32::from_black_alpha(10),
+    encre: theme::erp::TITRE,
+    encre_2: theme::erp::ARDOISE_2,
+    encre_3: Color32::from_rgb(0x64, 0x74, 0x8B),
+    filet_fort: Color32::from_rgb(0xCB, 0xD5, 0xE1),
+    accent: theme::erp::PRIMAIRE,
+    sur_plein: Color32::WHITE,
+    crit: theme::erp::DANGER_ENCRE,
+    champ: Color32::WHITE,
+};
+
+/// Les couleurs d'un panneau dans ce `Ui` : claires dans un `Ui` aux visuels clairs.
+pub(crate) fn panneau(ui: &egui::Ui) -> &'static Panneau {
+    if ui.visuals().dark_mode { &PANNEAU_SOMBRE } else { &PANNEAU_CLAIR }
+}
+
 /// Les icônes de Windows : Segoe Fluent Icons (Windows 11), ou Segoe MDL2 Assets (Windows 10), qui a les mêmes
 /// points de code.
 pub mod icones {
@@ -109,6 +200,8 @@ pub mod icones {
     pub const COURRIEL: char = '\u{E715}';
     pub const PIECE: char = '\u{E723}';
     pub const COPIER: char = '\u{E8C8}';
+    /// La flèche vers le bas (Down) : le bas de la conversation.
+    pub const EN_BAS: char = '\u{E74B}';
     /// Les boutons de la fenêtre : les glyphes de ceux de Windows (ChromeMinimize, ChromeMaximize, ChromeRestore,
     /// ChromeClose).
     pub const REDUIRE: char = '\u{E921}';
@@ -237,6 +330,21 @@ pub(crate) struct Fenetre {
     etat: Value,
     rapport: Sender<Evt>,
     saisie: String,
+    /// La demande reprise par ↑ dans la saisie : combien de demandes en arrière (1 : la dernière), et son texte — elle
+    /// ne vaut plus dès qu'on la change ([`Fenetre::champ_de_saisie`]).
+    reprise: Option<(usize, String)>,
+    /// La hauteur du champ de la saisie à la dernière image : sa rangée y centre ses boutons.
+    hauteur_de_la_saisie: f32,
+    /// Le bouton du bas du fil vient d'être cliqué : le fil y redescend à l'image suivante.
+    au_bas_du_fil: bool,
+    /// La note du tableau de bord qu'on écrit (ou qu'on vient de refermer : sa carte garde son texte le temps que le
+    /// chef le publie) ; la carte épinglée qu'on vient voir de la conversation (son id, depuis quand, si elle a déjà
+    /// défilé sous les yeux).
+    note: Option<tableau::NoteOuverte>,
+    /// Ce que la fenêtre a dit au chef d'elle-même : devant (la personne la regarde) ou non — le chef ne montre une
+    /// notification de Windows que si elle ne l'est pas.
+    devant_dit: Option<bool>,
+    epingle_a_montrer: Option<(String, f64, bool)>,
     /// Le portrait d'Eve (le thème « Constructo AI »), à la place de l'orbe quand il y en a un.
     portrait: portrait::Portrait,
     /// Le numéro de la dernière phrase mal entendue mise dans la saisie (`a_corriger` de l'état), et la saisie qui
@@ -347,6 +455,12 @@ impl Fenetre {
             etat: Value::Null,
             rapport,
             saisie: String::new(),
+            reprise: None,
+            hauteur_de_la_saisie: 0.0,
+            au_bas_du_fil: false,
+            note: None,
+            devant_dit: None,
+            epingle_a_montrer: None,
             portrait: portrait::Portrait::nouveau(crate::reglages::dossier_local()),
             corrigee: 0,
             saisie_au_clavier: false,
@@ -697,6 +811,8 @@ impl Fenetre {
         let lignes = self.etat.get("fil").and_then(Value::as_array);
         let en_cours = self.etat.pointer("/en_cours/texte").and_then(Value::as_str).filter(|t| !t.trim().is_empty());
         let reflechit = self.etat.get("etat").and_then(Value::as_str) == Some("reflexion");
+        // Le bouton du bas, cliqué à l'image d'avant : le fil y redescend (en douceur), et s'y tient de nouveau.
+        let descendre = std::mem::take(&mut self.au_bas_du_fil);
         // Les cartes dessinées dans les bulles, et les gestes qu'un clic y demande (rendus au chef après le fil).
         let (cartes, mut gestes) = (&mut self.cartes, Vec::new());
         let zone = ui.max_rect();
@@ -738,7 +854,26 @@ impl Fenetre {
                 points_de_suspension(ui);
             }
             ui.add_space(8.0);
+            if descendre {
+                ui.scroll_to_cursor(Some(Align::BOTTOM));
+            }
         });
+        // Remontée loin dans la conversation (plus de 160 points du bas), un bouton rond, au bas du fil, y ramène ; il
+        // vient et s'en va en fondu.
+        let reste = sortie.content_size.y - sortie.state.clamped_offset().y - sortie.inner_rect.height();
+        let montre = ui.ctx().animate_bool_with_time(egui::Id::unique("aller-en-bas-se-montre"), reste > 160.0, 0.15);
+        if montre > 0.0 {
+            let rect =
+                egui::Rect::from_center_size(egui::pos2(zone.center().x, zone.bottom() - 30.0), vec2(38.0, 38.0));
+            let rep = ui.interact(rect, egui::Id::unique("aller-en-bas-du-fil"), Sense::click());
+            bouton_du_bas(ui, rect, rep.hovered(), montre, style);
+            let rep =
+                rep.on_hover_text("Aller au bas de la conversation").on_hover_cursor(egui::CursorIcon::PointingHand);
+            if rep.clicked() {
+                self.au_bas_du_fil = true;
+                ui.ctx().request_repaint();
+            }
+        }
         if sortie.state.clamped_offset().y > 1.0 {
             let fondu = egui::Rect::from_min_size(zone.left_top(), vec2(zone.width(), 22.0));
             match style {
@@ -749,6 +884,13 @@ impl Fenetre {
             }
         }
         for g in gestes {
+            // « Voir au tableau de bord », sous une carte épinglée : la fenêtre s'y rend elle-même.
+            if g.action == "voir_epingle" {
+                self.centre_ouvert = true;
+                let id = g.valeur.as_str().unwrap_or("").to_string();
+                self.epingle_a_montrer = Some((id, ui.input(|i| i.time), false));
+                continue;
+            }
             self.geste(g.action, g.valeur);
         }
     }
@@ -768,23 +910,22 @@ impl Fenetre {
             .inner_margin(Margin::same(6))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    ui.set_min_height(self.hauteur_de_la_saisie);
                     ui.spacing_mut().item_spacing.x = 6.0;
                     self.bouton_micro(ui);
                     self.trombone(ui, &pieces::SOMBRE);
                     let largeur = (ui.available_width() - 42.0).max(60.0);
-                    let champ = ui.add(
-                        egui::TextEdit::singleline(&mut self.saisie)
-                            .id(id)
-                            .frame(egui::Frame::new())
-                            .margin(Margin::symmetric(6, 9))
-                            .font(FontId::proportional(14.5))
-                            .hint_text("Écris ta demande à Eve…")
-                            .desired_width(largeur),
-                    );
+                    let allure = AllureDuChamp {
+                        police: FontId::proportional(14.5),
+                        encre: None,
+                        indice: "Écris ta demande à Eve…".into(),
+                        marge: Margin::symmetric(6, 9),
+                        largeur,
+                    };
+                    let (champ, entree) = self.champ_de_saisie(ui, id, allure);
                     if std::mem::take(&mut self.saisie_au_clavier) {
                         champ.request_focus();
                     }
-                    let entree = champ.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     let pret = !self.saisie.trim().is_empty();
                     if (bouton_envoyer(ui, pret).clicked() || entree) && pret {
                         let t = std::mem::take(&mut self.saisie).trim().to_string();
@@ -799,11 +940,108 @@ impl Fenetre {
             if bouton(ui, Some(icones::ARRETER), "Arrêter", Bouton::Plat).on_hover_text("Eve se tait").clicked() {
                 self.geste("arreter", Value::Null);
             }
-            if bouton(ui, Some(icones::NOUVELLE), "Nouvelle conversation", Bouton::Plat).clicked() {
+            let nouvelle = bouton(ui, Some(icones::NOUVELLE), "Nouvelle conversation", Bouton::Plat);
+            if nouvelle.on_hover_text("Ctrl+N").clicked() {
                 self.geste("nouvelle", Value::Null);
             }
         });
         ui.add_space(10.0);
+    }
+
+    /// Ce que montre la saisie (l'essai de la fenêtre le vérifie).
+    pub(crate) fn texte_de_la_saisie(&self) -> &str {
+        &self.saisie
+    }
+
+    /// Les demandes de la personne dans la conversation (les lignes « toi » du fil que publie le chef), de la première
+    /// à la dernière.
+    fn demandes_du_fil(&self) -> Vec<String> {
+        let lignes = self.etat.get("fil").and_then(Value::as_array);
+        lignes
+            .map(|l| l.iter().filter(|x| x["de"] == "toi").filter_map(|x| x["texte"].as_str()).map(str::to_string))
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+
+    /// Le champ de la saisie, dans les deux thèmes : sur plusieurs lignes — Maj+Entrée va à la ligne, Entrée envoie —,
+    /// il grandit avec le texte jusqu'à [`LIGNES_DE_LA_SAISIE`], puis défile. ↑ dans un champ vide, ou qui montre
+    /// encore une demande reprise, reprend les demandes de la conversation, de la dernière à la première ; ↓ revient
+    /// vers la plus récente, puis au champ vide. Rend sa réponse, et si Entrée vient de l'envoyer.
+    fn champ_de_saisie(&mut self, ui: &mut egui::Ui, id: egui::Id, allure: AllureDuChamp) -> (egui::Response, bool) {
+        let focus = ui.memory(|m| m.has_focus(id));
+        if self.reprise.as_ref().is_some_and(|(_, t)| *t != self.saisie) {
+            self.reprise = None;
+        }
+        // Les touches se prennent avant le champ : il les verrait, ↑ et ↓ pour bouger son curseur. Une touche avec
+        // Maj ne compte pas (egui la prendrait pour la même) : Maj+Entrée va à la ligne, Maj+↑ choisit du texte.
+        let prendre = |ui: &mut egui::Ui, touche: egui::Key| {
+            ui.input_mut(|i| {
+                let avant = i.events.len();
+                i.events.retain(|e| {
+                    !matches!(e, egui::Event::Key { key, pressed: true, modifiers, .. }
+                        if *key == touche && modifiers.is_none())
+                });
+                i.events.len() < avant
+            })
+        };
+        if focus && (self.saisie.is_empty() || self.reprise.is_some()) {
+            let haut = prendre(ui, egui::Key::ArrowUp);
+            let bas = !haut && self.reprise.is_some() && prendre(ui, egui::Key::ArrowDown);
+            if haut || bas {
+                let demandes = self.demandes_du_fil();
+                let avant = self.reprise.as_ref().map_or(0, |(k, _)| *k);
+                let k = if haut { (avant + 1).min(demandes.len()) } else { avant.saturating_sub(1) };
+                match k.checked_sub(1).and_then(|r| demandes.len().checked_sub(r + 1)).map(|i| &demandes[i]) {
+                    Some(t) => {
+                        self.saisie = t.clone();
+                        self.reprise = Some((k, t.clone()));
+                    }
+                    None => {
+                        self.saisie.clear();
+                        self.reprise = None;
+                    }
+                }
+                // Le curseur au bout de la demande reprise : on la complète, ou Entrée la renvoie.
+                let mut etat = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+                let fin = egui::text::CCursor::end_of_str(&self.saisie);
+                etat.cursor.set_char_range(Some(egui::text::CCursorRange::one(fin)));
+                etat.store(ui.ctx(), id);
+            }
+        }
+        let envoyer = focus && prendre(ui, egui::Key::Enter);
+        // Sa hauteur : celle de son texte, d'une ligne à six — donnée à la zone qui défile, qui en prendrait sinon 64 au
+        // moins ; la rangée de la saisie la lit à l'image suivante pour y centrer ses boutons.
+        let marges = f32::from(allure.marge.top) + f32::from(allure.marge.bottom);
+        let interieur = (allure.largeur - f32::from(allure.marge.left) - f32::from(allure.marge.right)).max(20.0);
+        let p = ui.painter();
+        let ligne = p.layout_no_wrap("Ag".to_string(), allure.police.clone(), Color32::WHITE).size().y;
+        let texte = p.layout(self.saisie.clone(), allure.police.clone(), Color32::WHITE, interieur).size().y;
+        let hauteur = texte.clamp(ligne, ligne * LIGNES_DE_LA_SAISIE) + marges;
+        self.hauteur_de_la_saisie = hauteur;
+        // Sa marge dans son cadre : egui ne prend pas `margin` d'un champ qui a le sien.
+        let mut champ = egui::TextEdit::multiline(&mut self.saisie)
+            .id(id)
+            .frame(egui::Frame::new().inner_margin(allure.marge))
+            .font(allure.police)
+            .hint_text(allure.indice)
+            .desired_rows(1)
+            .desired_width(allure.largeur)
+            .return_key(egui::KeyboardShortcut::new(egui::Modifiers::SHIFT, egui::Key::Enter));
+        if let Some(c) = allure.encre {
+            champ = champ.text_color(c);
+        }
+        // Sans la marge des zones qui défilent (celle de leurs barres, dans le thème) : le champ garde sa largeur, et
+        // l'envoi sa place à côté de lui.
+        let rep = ui.scope(|ui| {
+            ui.spacing_mut().scroll.content_margin = Margin::ZERO;
+            let defile = egui::ScrollArea::vertical()
+                .id_salt(("defilement-de-la-saisie", id))
+                .min_scrolled_height(hauteur)
+                .max_height(hauteur);
+            defile.show(ui, |ui| ui.add(champ)).inner
+        });
+        (rep.inner, envoyer)
     }
 
     /// Le micro, à tenir comme la touche (ou l'orbe, dessinée avant lui à chaque image) : la parole part quand il se
@@ -1003,22 +1241,19 @@ impl Fenetre {
         // Il entre en glissant de 8 points, comme la page (`panneau-entre`).
         let haut = self.bouton_reglages.bottom() + 8.0 + 8.0 * (1.0 - ouverture);
         let hauteur_max = (ecran.bottom() - haut - 14.0).max(160.0);
+        let clair = self.theme_constructo(ctx);
         let zone = egui::Area::new(egui::Id::unique("panneau-des-reglages"))
             .order(egui::Order::Foreground)
             .fixed_pos(egui::pos2(ecran.right() - 14.0 - large, haut))
             .show(ctx, |ui| {
+                if clair {
+                    theme::visuels_du_panneau(ui.visuals_mut());
+                }
+                let p = panneau(ui);
                 ui.multiply_opacity(ouverture);
-                egui::Frame::new()
-                    .fill(couleurs::SURFACE)
-                    .stroke((1.0, couleurs::FILET))
-                    .corner_radius(14)
-                    .shadow(egui::Shadow {
-                        offset: [0, 10],
-                        blur: 30,
-                        spread: 0,
-                        color: Color32::from_black_alpha(110),
-                    })
-                    .show(ui, |ui| {
+                egui::Frame::new().fill(p.fond).stroke((1.0, p.filet)).corner_radius(14).shadow(p.ombres[1]).show(
+                    ui,
+                    |ui| {
                         ui.set_width(large);
                         self.tete_des_reglages(ui);
                         egui::ScrollArea::vertical().max_height(hauteur_max - 52.0).show(ui, |ui| {
@@ -1026,7 +1261,8 @@ impl Fenetre {
                                 .inner_margin(Margin { left: 14, right: 14, top: 0, bottom: 14 })
                                 .show(ui, |ui| self.corps_des_reglages(ui, maintenant));
                         });
-                    });
+                    },
+                );
             });
         // Un clic dehors les ferme ; pas celui du bouton de la barre, qui les a déjà basculés, ni un clic dans une liste
         // qu'ils ont ouverte (celle des voix déborde du panneau, sur sa propre couche, au-dessus).
@@ -1052,6 +1288,7 @@ impl Fenetre {
         let echap = ctx.input(|i| i.key_pressed(egui::Key::Escape));
         let qui = self.champ("qui").to_string();
         let place = self.place_du_fil.expand2(vec2(6.0, 0.0));
+        let clair = self.theme_constructo(ctx);
         let Some(h) = self.historique.as_mut() else { return };
         if accord || (echap && h.echap()) {
             self.historique = None;
@@ -1064,6 +1301,9 @@ impl Fenetre {
             .constrain(false)
             .fade_in(false)
             .show(ctx, |ui| {
+                if clair {
+                    theme::visuels_du_panneau(ui.visuals_mut());
+                }
                 ui.scope_builder(egui::UiBuilder::new().max_rect(place), |ui| h.dessiner(ui, &qui, cartes)).inner
             })
             .inner;
@@ -1087,13 +1327,14 @@ impl Fenetre {
 
     /// La tête du panneau des réglages : le ruban, « Réglages », le bouton qui ferme.
     fn tete_des_reglages(&mut self, ui: &mut egui::Ui) {
+        let p = panneau(ui);
         egui::Frame::new().inner_margin(Margin { left: 14, right: 9, top: 9, bottom: 8 }).show(ui, |ui| {
             ui.horizontal(|ui| {
                 let (ruban, _) = ui.allocate_exact_size(vec2(5.0, 20.0), Sense::hover());
-                ui.painter().rect_filled(ruban, 2.5, couleurs::ACCENT);
+                ui.painter().rect_filled(ruban, 2.5, p.accent);
                 ui.add_space(4.0);
                 let titre = RichText::new("Réglages").family(FontFamily::Name(GRAS.into())).size(16.0);
-                ui.label(titre.color(couleurs::ENCRE));
+                ui.label(titre.color(p.encre));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if bouton_fermer(ui).on_hover_text("Fermer (Échap)").clicked() {
                         self.reglages_ouverts = false;
@@ -1102,11 +1343,12 @@ impl Fenetre {
             });
         });
         let (trait_, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
-        ui.painter().rect_filled(trait_, 0.0, couleurs::FILET);
+        ui.painter().rect_filled(trait_, 0.0, p.filet);
     }
 
     /// Le corps du panneau des réglages, dans l'ordre de la page.
     fn corps_des_reglages(&mut self, ui: &mut egui::Ui, maintenant: f64) {
+        let p = panneau(ui);
         ui.spacing_mut().item_spacing.y = 0.0;
         // La voix : la liste des voix du poste et la sourdine.
         rubrique(ui, "Voix");
@@ -1123,16 +1365,17 @@ impl Fenetre {
             None => "Choisis une voix".to_string(),
         };
         ui.add_enabled_ui(!liste.is_empty(), |ui| {
-            egui::ComboBox::from_id_salt("voix-d-eve").width(ui.available_width()).selected_text(affichee).show_ui(
-                ui,
-                |ui| {
+            egui::ComboBox::from_id_salt("voix-d-eve")
+                .width(ui.available_width())
+                .selected_text(affichee)
+                .popup_style(style_de_la_liste(ui))
+                .show_ui(ui, |ui| {
                     for (nom, id) in &liste {
                         if ui.selectable_label(*id == choisie, nom).clicked() && *id != choisie {
                             self.geste("voix", Value::String(id.clone()));
                         }
                     }
-                },
-            );
+                });
         });
         ui.add_space(8.0);
         let aide = "Eve ne parle plus à voix haute : elle répond par écrit et vous écoute toujours";
@@ -1173,10 +1416,10 @@ impl Fenetre {
             groupe(ui, |ui| {
                 ui.add_space(9.0);
                 let detail = constructo["detail"].as_str().unwrap_or("");
-                ui.label(RichText::new(detail).size(13.5).color(couleurs::ENCRE_2));
+                ui.label(RichText::new(detail).size(13.5).color(p.encre_2));
                 if !erreur.is_empty() {
                     ui.add_space(4.0);
-                    ui.label(RichText::new(erreur).size(13.5).color(couleurs::CRIT));
+                    ui.label(RichText::new(erreur).size(13.5).color(p.crit));
                 }
                 ui.add_space(9.0);
                 ui.horizontal_wrapped(|ui| {
@@ -1186,7 +1429,7 @@ impl Fenetre {
                             (_, true) => "Réessayer",
                             _ => "Se connecter à Constructo AI",
                         };
-                        if bouton(ui, None, texte, Bouton::Plein(couleurs::ACCENT)).clicked() {
+                        if bouton(ui, None, texte, Bouton::Plein(p.accent)).clicked() {
                             self.geste("constructo_connecter", Value::Null);
                         }
                     }
@@ -1238,6 +1481,9 @@ impl Fenetre {
         groupe(ui, |ui| {
             self.interrupteur_de(ui, "Toujours devant les autres fenêtres", "devant", true, None, maintenant);
             self.interrupteur_de(ui, "Démarrer avec Windows", "demarrage", false, None, maintenant);
+            let quand =
+                "Quand la fenêtre n'est pas devant : un rappel, une réponse longue finie, un accord qu'Eve attend";
+            self.interrupteur_de(ui, "Notifications de Windows", "notifications", false, Some(quand), maintenant);
             let aide = "Sur ce poste seulement, par personne";
             self.interrupteur_de(
                 ui,
@@ -1255,12 +1501,12 @@ impl Fenetre {
             rubrique(ui, "Version");
             groupe(ui, |ui| {
                 ui.add_space(9.0);
-                ui.label(RichText::new(format!("Eve {texte}")).size(13.5).color(couleurs::ENCRE_2));
+                ui.label(RichText::new(format!("Eve {texte}")).size(13.5).color(p.encre_2));
                 if let Some(precedente) = version["precedente"].as_str() {
                     ui.add_space(9.0);
                     if version["relance"].as_bool().unwrap_or(false) {
                         let attente = "Eve redémarre à la fin de sa réponse.";
-                        ui.label(RichText::new(attente).size(13.5).color(couleurs::ENCRE_2));
+                        ui.label(RichText::new(attente).size(13.5).color(p.encre_2));
                     } else if bouton(
                         ui,
                         None,
@@ -1285,11 +1531,11 @@ impl Fenetre {
                 ui.spacing_mut().item_spacing.x = 3.0;
                 for (i, t) in raccourci.split('+').enumerate() {
                     if i > 0 {
-                        ui.label(RichText::new("+").size(12.5).color(couleurs::ENCRE_2));
+                        ui.label(RichText::new("+").size(12.5).color(p.encre_2));
                     }
                     touche_de_clavier(ui, t);
                 }
-                ui.label(RichText::new(" affiche ou cache Eve, de n'importe où").size(12.5).color(couleurs::ENCRE_2));
+                ui.label(RichText::new(" affiche ou cache Eve, de n'importe où").size(12.5).color(p.encre_2));
             });
         }
         ui.add_space(10.0);
@@ -1327,7 +1573,7 @@ impl Fenetre {
         }
         let aide = "Opus et l'effort max réfléchissent plus loin, mais répondent plus lentement et coûtent plus cher. Eve \
                     change entre deux demandes ; la conversation continue, et ses agents prennent le même cerveau.";
-        ui.label(RichText::new(aide).size(12.0).color(couleurs::ENCRE_3));
+        ui.label(RichText::new(aide).size(12.0).color(panneau(ui).encre_3));
     }
 
     /// Une rangée d'interrupteur des réglages : sa valeur (tenue quatre secondes après un clic), et le geste `reglage`
@@ -1501,8 +1747,19 @@ impl eframe::App for Fenetre {
                 self.saisie_au_clavier = true;
             }
         }
+        // La note qu'on écrit au tableau de bord se dit au chef une demi-seconde après sa dernière frappe ; en quittant,
+        // tout de suite.
+        let maintenant = ctx.input(|i| i.time);
+        self.suivre_la_note(maintenant);
+        // Devant ou non (au premier plan, pas réduite) : dit au chef à chaque changement, pour ses notifications.
+        let devant = ctx.input(|i| i.viewport().focused.unwrap_or(true) && !i.viewport().minimized.unwrap_or(false));
+        if self.devant_dit != Some(devant) {
+            self.devant_dit = Some(devant);
+            self.geste("premier_plan", Value::Bool(devant));
+        }
         if ctx.input(|i| i.viewport().close_requested()) && !self.fermee {
             self.fermee = true;
+            self.fermer_la_note(maintenant);
             self.geste("quitter", Value::Null);
         }
         // La barre d'espace tenue hors de la saisie parle, comme la touche (l'aide le dit) ; pas les réglages ni
@@ -1516,10 +1773,14 @@ impl eframe::App for Fenetre {
             self.espace = espace;
             self.geste(if espace { "parler_debut" } else { "parler_fin" }, Value::Null);
         }
+        // Ctrl+N : une nouvelle conversation, comme son bouton sous la saisie — de partout, la saisie comprise.
+        let nouvelle = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::N);
+        if ctx.input_mut(|i| i.consume_shortcut(&nouvelle)) {
+            self.geste("nouvelle", Value::Null);
+        }
         // Les touches du tableau, hors de la saisie et des réglages : H le mode propre (le réseau seul), F le plein
         // écran, A la musique, S les sons, D la démonstration, J la journée rejouée, E le mode économe, R la rotation
         // automatique. Le thème « Constructo AI » n'a pas de tableau : pas de touches.
-        let maintenant = ctx.input(|i| i.time);
         let constructo = self.theme_constructo(&ctx);
         if libre && !constructo {
             let touche = |k: egui::Key| ctx.input(|i| i.key_pressed(k));
@@ -1734,12 +1995,11 @@ pub(crate) fn bouton(ui: &mut egui::Ui, code: Option<char>, texte: &str, sorte: 
     if ui.is_rect_visible(rect) {
         let (survol, enfonce) = (rep.hovered(), rep.is_pointer_button_down_on());
         let rien = Color32::TRANSPARENT;
+        let pan = panneau(ui);
         let (fond, bord, encre) = match sorte {
-            Bouton::Plat => (
-                if survol { Color32::from_white_alpha(12) } else { rien },
-                rien,
-                if survol { couleurs::ENCRE } else { couleurs::ENCRE_2 },
-            ),
+            Bouton::Plat => {
+                (if survol { pan.survol } else { rien }, rien, if survol { pan.encre } else { pan.encre_2 })
+            }
             Bouton::Plein(c) => (
                 match (enfonce, survol) {
                     (true, _) => melange(c, Color32::BLACK, 0.15),
@@ -1747,11 +2007,9 @@ pub(crate) fn bouton(ui: &mut egui::Ui, code: Option<char>, texte: &str, sorte: 
                     _ => c,
                 },
                 rien,
-                couleurs::SUR_PLEIN,
+                pan.sur_plein,
             ),
-            Bouton::Cerne => {
-                (if survol { Color32::from_white_alpha(10) } else { rien }, couleurs::FILET_FORT, couleurs::ENCRE)
-            }
+            Bouton::Cerne => (if survol { pan.survol } else { rien }, pan.filet_fort, pan.encre),
             Bouton::Barre(actif) => (
                 match (actif, survol) {
                     (_, true) => Color32::from_white_alpha(30),
@@ -1778,6 +2036,19 @@ pub(crate) fn bouton(ui: &mut egui::Ui, code: Option<char>, texte: &str, sorte: 
 /// Une valeur changée dans les réglages reste affichée ce temps-là, le temps que le chef la publie (pas de clignotement).
 const TENUE: f64 = 4.0;
 
+/// Le champ de la saisie grandit jusqu'à ce nombre de lignes ; au-delà, il défile.
+const LIGNES_DE_LA_SAISIE: f32 = 6.0;
+
+/// L'allure du champ de la saisie dans un thème ([`Fenetre::champ_de_saisie`]) : sa police, son encre (sans elle, celle
+/// des visuels), son indice, sa marge, sa largeur.
+pub(crate) struct AllureDuChamp {
+    pub(crate) police: FontId,
+    pub(crate) encre: Option<Color32>,
+    pub(crate) indice: egui::WidgetText,
+    pub(crate) marge: Margin,
+    pub(crate) largeur: f32,
+}
+
 /// La valeur d'un réglage : celle changée ici depuis moins de [`TENUE`], sinon celle que publie le chef
 /// (`reglages.<clé>`, `reglages.alertes.<sorte>` ; le mot d'éveil, à défaut, `eveil`) ; `None` s'il n'en dit rien.
 fn valeur_reglage(etat: &Value, tenus: &HashMap<String, (bool, f64)>, cle: &str, maintenant: f64) -> Option<bool> {
@@ -1798,17 +2069,28 @@ fn valeur_reglage(etat: &Value, tenus: &HashMap<String, (bool, f64)>, cle: &str,
 fn rubrique(ui: &mut egui::Ui, texte: &str) {
     ui.add_space(12.0);
     let titre = RichText::new(texte.to_uppercase()).family(FontFamily::Name(GRAS.into())).size(11.0);
-    ui.label(titre.extra_letter_spacing(1.0).color(couleurs::ENCRE_3));
+    ui.label(titre.extra_letter_spacing(1.0).color(panneau(ui).encre_3));
     ui.add_space(5.0);
+}
+
+/// Le style d'une liste qui s'ouvre d'un panneau (celle des voix) : sur sa propre couche, elle prendrait les visuels de
+/// la fenêtre ; dans le thème clair, elle prend ceux de son panneau.
+fn style_de_la_liste(ui: &egui::Ui) -> egui::style::StyleModifier {
+    if ui.visuals().dark_mode {
+        egui::style::StyleModifier::default()
+    } else {
+        egui::style::StyleModifier::from(|s: &mut egui::Style| theme::visuels_du_panneau(&mut s.visuals))
+    }
 }
 
 /// Un choix en segments, comme la page (`.segments`, eve.html : 415-427), dans les couleurs du panneau des réglages :
 /// des cases de même largeur dans un cadre, celle qui est choisie en pilule, avec son ombre et son filet (aucune, si
 /// `choisi` n'en est pas une). `id` le distingue des autres choix du panneau. Rend la case cliquée.
 fn segments(ui: &mut egui::Ui, id: &str, choix: &[&str], choisi: usize) -> Option<usize> {
+    let pan = panneau(ui);
     let (cadre, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
-    let filet = Stroke::new(1.0, couleurs::FILET);
-    ui.painter().rect(cadre, 11.0, couleurs::SURFACE_2, filet, egui::StrokeKind::Inside);
+    let filet = Stroke::new(1.0, pan.filet);
+    ui.painter().rect(cadre, 11.0, pan.piste, filet, egui::StrokeKind::Inside);
     let n = choix.len().max(1) as f32;
     let dedans = cadre.shrink(4.0);
     let l = (dedans.width() - 3.0 * (n - 1.0)) / n;
@@ -1820,11 +2102,11 @@ fn segments(ui: &mut egui::Ui, id: &str, choix: &[&str], choisi: usize) -> Optio
         let rep = ui.interact(r, egui::Id::unique(("segment", id, k)), Sense::click());
         let p = ui.painter();
         if k == choisi {
-            let ombre = egui::Shadow { offset: [0, 1], blur: 2, spread: 0, color: Color32::from_black_alpha(60) };
+            let ombre = egui::Shadow { offset: [0, 1], blur: 2, spread: 0, color: pan.ombres[0].color };
             p.add(ombre.as_shape(r, 8));
-            p.rect(r, 8.0, couleurs::PILULE, filet, egui::StrokeKind::Outside);
+            p.rect(r, 8.0, pan.choisi, filet, egui::StrokeKind::Outside);
         }
-        let encre = if k == choisi || rep.hovered() { couleurs::ENCRE } else { couleurs::ENCRE_2 };
+        let encre = if k == choisi || rep.hovered() { pan.encre } else { pan.encre_2 };
         p.text(r.center(), Align2::CENTER_CENTER, *mot, police.clone(), encre);
         if rep.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
             clic = Some(k);
@@ -1835,9 +2117,10 @@ fn segments(ui: &mut egui::Ui, id: &str, choix: &[&str], choisi: usize) -> Optio
 
 /// Un groupe de rangées des réglages (la page : `.groupe`) : un fond un peu plus clair, un filet, des coins arrondis.
 fn groupe(ui: &mut egui::Ui, contenu: impl FnOnce(&mut egui::Ui)) {
+    let p = panneau(ui);
     egui::Frame::new()
-        .fill(couleurs::SURFACE_2)
-        .stroke((1.0, couleurs::FILET))
+        .fill(p.groupe)
+        .stroke((1.0, p.filet))
         .corner_radius(11)
         .inner_margin(Margin::symmetric(12, 0))
         .show(ui, |ui| {
@@ -1857,20 +2140,21 @@ fn rangee_interrupteur(
     id: egui::Id,
 ) -> egui::Response {
     let largeur = ui.available_width();
-    let encre = if valeur.is_some() { couleurs::ENCRE } else { couleurs::ENCRE_3 };
+    let pan = panneau(ui);
+    let encre = if valeur.is_some() { pan.encre } else { pan.encre_3 };
     let galley = ui.painter().layout(texte.to_string(), FontId::proportional(14.0), encre, largeur - 40.0 - 14.0);
     let hauteur = (galley.size().y + 10.0).max(34.0);
     let sens = if valeur.is_some() { Sense::click() } else { Sense::hover() };
     let (rect, rep) = ui.allocate_exact_size(vec2(largeur, hauteur), sens);
     let p = ui.painter();
     if !premier {
-        p.hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.0, couleurs::FILET));
+        p.hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.0, pan.filet));
     }
     p.galley(egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0), galley, encre);
     let t = ui.ctx().animate_bool_with_time(id, valeur.unwrap_or(false), 0.18);
     let opacite = if valeur.is_some() { 1.0 } else { 0.45 };
     let pilule = egui::Rect::from_center_size(egui::pos2(rect.right() - 20.0, rect.center().y), vec2(40.0, 24.0));
-    p.rect_filled(pilule, 12.0, melange(couleurs::FILET_FORT, couleurs::ACCENT, t).gamma_multiply(opacite));
+    p.rect_filled(pilule, 12.0, melange(pan.filet_fort, pan.accent, t).gamma_multiply(opacite));
     let x = egui::lerp(pilule.left() + 12.0..=pilule.right() - 12.0, t);
     p.circle_filled(egui::pos2(x, pilule.center().y), 8.5, Color32::WHITE.gamma_multiply(opacite));
     if valeur.is_some() { rep.on_hover_cursor(egui::CursorIcon::PointingHand) } else { rep }
@@ -1878,23 +2162,25 @@ fn rangee_interrupteur(
 
 /// Une touche du clavier, dessinée comme une touche : un petit cadre, son nom.
 fn touche_de_clavier(ui: &mut egui::Ui, nom: &str) {
+    let p = panneau(ui);
     egui::Frame::new()
-        .fill(couleurs::SURFACE_2)
-        .stroke((1.0, couleurs::FILET_FORT))
+        .fill(p.groupe)
+        .stroke((1.0, p.filet_fort))
         .corner_radius(4)
         .inner_margin(Margin::symmetric(5, 1))
-        .show(ui, |ui| ui.label(semi(nom, 11.5).color(couleurs::ENCRE)));
+        .show(ui, |ui| ui.label(semi(nom, 11.5).color(p.encre)));
 }
 
 /// Le bouton qui ferme un panneau : un × de 32 sur 32, un fond et un filet au survol.
 fn bouton_fermer(ui: &mut egui::Ui) -> egui::Response {
+    let pan = panneau(ui);
     let (rect, rep) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::click());
     let survol = rep.hovered();
     let p = ui.painter();
     if survol {
-        p.rect(rect, 8.0, couleurs::SURFACE_2, Stroke::new(1.0, couleurs::FILET), egui::StrokeKind::Inside);
+        p.rect(rect, 8.0, pan.groupe, Stroke::new(1.0, pan.filet), egui::StrokeKind::Inside);
     }
-    let encre = if survol { couleurs::ENCRE } else { couleurs::ENCRE_2 };
+    let encre = if survol { pan.encre } else { pan.encre_2 };
     let icone = FontId::new(12.0, FontFamily::Name(ICONES.into()));
     p.text(rect.center(), Align2::CENTER_CENTER, icones::NON, icone, encre);
     rep.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -1902,17 +2188,15 @@ fn bouton_fermer(ui: &mut egui::Ui) -> egui::Response {
 
 /// « Quitter Eve », au bas des réglages : toute la largeur, en rouge ; au survol, un filet et un fond rouges.
 fn bouton_quitter(ui: &mut egui::Ui) -> egui::Response {
+    let pan = panneau(ui);
     let (rect, rep) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::click());
     let survol = rep.hovered();
-    let (fond, bord) = if survol {
-        (couleurs::CRIT.gamma_multiply(0.10), couleurs::CRIT)
-    } else {
-        (Color32::TRANSPARENT, couleurs::FILET_FORT)
-    };
+    let (fond, bord) =
+        if survol { (pan.crit.gamma_multiply(0.10), pan.crit) } else { (Color32::TRANSPARENT, pan.filet_fort) };
     let p = ui.painter();
     p.rect(rect, 9.0, fond, Stroke::new(1.0, bord), egui::StrokeKind::Inside);
     let police = FontId::new(13.0, FontFamily::Name(SEMI.into()));
-    p.text(rect.center(), Align2::CENTER_CENTER, "Quitter Eve", police, couleurs::CRIT);
+    p.text(rect.center(), Align2::CENTER_CENTER, "Quitter Eve", police, pan.crit);
     rep.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -1934,7 +2218,31 @@ fn bouton_envoyer(ui: &mut egui::Ui, pret: bool) -> egui::Response {
         FontId::new(15.0, FontFamily::Name(ICONES.into())),
         encre,
     );
-    rep.on_hover_text("Envoyer (Entrée)").on_hover_cursor(egui::CursorIcon::PointingHand)
+    rep.on_hover_text(AIDE_DE_L_ENVOI).on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// La bulle du bouton d'envoi, dans les deux thèmes.
+pub(crate) const AIDE_DE_L_ENVOI: &str = "Envoyer (Entrée) · Maj+Entrée : à la ligne · ↑ : reprendre une demande";
+
+/// Le bouton qui ramène au bas de la conversation : un rond, sa flèche vers le bas, dans les couleurs du fil — celles
+/// d'un panneau (sombre ou clair, son accent pour la flèche), ou celles du tableau HTML dans le flux ; une ombre, plus
+/// marquée au survol ; `montre` : son fondu (0 à 1).
+fn bouton_du_bas(ui: &egui::Ui, rect: egui::Rect, survol: bool, montre: f32, style: Style) {
+    let p = panneau(ui);
+    let (fond, filet, encre) =
+        if style == Style::Flux { (hud::FLUX, hud::BORD, hud::CYAN) } else { (p.fond, p.filet_fort, p.accent) };
+    let peintre = ui.painter();
+    let ombre = egui::Shadow {
+        offset: [0, if survol { 4 } else { 2 }],
+        blur: if survol { 14 } else { 8 },
+        spread: 0,
+        color: p.ombres[0].color.gamma_multiply(montre),
+    };
+    peintre.add(ombre.as_shape(rect, 19));
+    let fond = if survol { melange(fond, encre, 0.08) } else { fond };
+    peintre.circle(rect.center(), 19.0, fond.gamma_multiply(montre), Stroke::new(1.0, filet.gamma_multiply(montre)));
+    let fleche = FontId::new(15.0, FontFamily::Name(ICONES.into()));
+    peintre.text(rect.center(), Align2::CENTER_CENTER, icones::EN_BAS, fleche, encre.gamma_multiply(montre));
 }
 
 /// Une pastille d'état de la barre : un point de couleur et son nom. Rend sa place.
@@ -2240,6 +2548,12 @@ fn barre_de_titre(cc: &eframe::CreationContext<'_>) -> bool {
     ok
 }
 
+/// L'icône de la fenêtre en PNG : celle des notifications de Windows (`notifications.rs`).
+pub(crate) fn png_de_l_icone() -> Option<Vec<u8>> {
+    let icone = icone_de_fenetre()?;
+    crate::cartes::png_rgba(icone.width, icone.height, &icone.rgba).ok()
+}
+
 /// L'icône de la fenêtre et de la barre des tâches : le logo blanc sur un carré marine aux coins arrondis.
 fn icone_de_fenetre() -> Option<egui::IconData> {
     const N: usize = 64;
@@ -2348,6 +2662,12 @@ pub(crate) struct Ligne<'a> {
     pub(crate) en_cours: bool,
     /// Sous une réponse de Claude : ce que son tour a pris (« 12 s · 0,04 $ · Sonnet 5.5, moyen ») ; vide ailleurs.
     pub(crate) tour: &'a str,
+}
+
+/// Une ligne du fil en bulle, dans le thème de son `Ui` : claire ([`theme::bulle`]) dans un `Ui` aux visuels clairs
+/// (l'historique ouvert dans le thème « Constructo AI »), sombre sinon ([`bulle`]).
+pub(crate) fn bulle_du_theme(ui: &mut egui::Ui, l: &Ligne<'_>, cartes: &mut Cartes, gestes: &mut Vec<Geste>) {
+    if ui.visuals().dark_mode { bulle(ui, l, cartes, gestes) } else { theme::bulle(ui, l, cartes, gestes) }
 }
 
 /// Une ligne du fil : la personne à droite, Eve à gauche (avec sa petite orbe), Eve-même (le système) au centre, une

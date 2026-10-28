@@ -83,10 +83,8 @@ impl Cerveau {
             consigne.push_str("\n\n");
             consigne.push_str(&consigne_constructo());
         }
-        if l.espace.constructo {
-            consigne.push_str("\n\n");
-            consigne.push_str(&consigne_du_tableau(&crate::reglages::dossier_local()));
-        }
+        consigne.push_str("\n\n");
+        consigne.push_str(&consigne_du_tableau(&crate::reglages::dossier_local(), l.espace.constructo));
         consigne.push_str("\n\n");
         consigne.push_str(&consigne_des_profils(&l.profil, &l.dossier, &l.dossier_d_eve));
         consigne.push_str("\n\n");
@@ -632,20 +630,56 @@ pub fn consigne_des_prononciations() -> String {
 /// La ligne qui ouvre la partie « TABLEAU DE BORD » de la consigne.
 const ENTETE_TABLEAU: &str = "TABLEAU DE BORD";
 
-/// La partie « TABLEAU DE BORD » de la consigne, que reçoit une Eve à qui Constructo AI est permis : sa fenêtre montre
-/// déjà l'entreprise, qu'elle lit elle-même dans l'ERP (`entreprise.rs`), et sa dernière lecture est dans
-/// `entreprise.json` du dossier local (`local`) — Claude y répond à une question d'ensemble sans rappeler l'ERP. Elle
-/// vit avec le programme qui écrit ce fichier, et n'en recopie rien.
-pub fn consigne_du_tableau(local: &Path) -> String {
+/// La partie « TABLEAU DE BORD » de la consigne, que reçoit toute Eve : sa fenêtre est aussi un tableau de bord, où
+/// Claude épingle ses cartes — une carte « epingle » de sa réponse, que le chef range dans `epingles.json` du dossier
+/// local (`local` ; [`crate::epingles`]) — à côté des notes de la personne ; et, quand Constructo AI lui est permis
+/// (`constructo`), l'entreprise, qu'elle lit elle-même dans l'ERP (`entreprise.rs`) et dont la dernière lecture est dans
+/// `entreprise.json` — Claude y répond à une question d'ensemble sans rappeler l'ERP. Elle vit avec le programme qui
+/// dessine ces cartes et écrit ces fichiers, et n'en recopie rien.
+pub fn consigne_du_tableau(local: &Path, constructo: bool) -> String {
+    let entreprise = if constructo {
+        format!(
+            "\n- Il montre déjà l'entreprise, qu'Eve lit elle-même dans Constructo AI toutes les dix minutes : les \
+             chiffres, les alertes, les chantiers en cours, les factures en retard, le pipeline, les soumissions, les \
+             factures des fournisseurs, les achats en route, les heures des employés, l'agenda partagé, les comptes en \
+             banque. Sa dernière lecture est dans {fichier} (du JSON ; son heure : lu_a) : pour une question d'ensemble \
+             (« où en est l'entreprise ? », « qui n'a pas d'heures vendredi ? »), lis-le d'abord, sans appeler l'ERP ; \
+             pour un détail, ou un chiffre à la minute près, prends l'outil de Constructo AI.",
+            fichier = local.join(crate::entreprise::FICHIER).display()
+        )
+    } else {
+        String::new()
+    };
     format!(
         "{ENTETE_TABLEAU}\n\
-         - La fenêtre d'Eve montre déjà l'entreprise, qu'elle lit elle-même dans Constructo AI toutes les dix \
-         minutes : les chiffres, les alertes, les chantiers en cours, les factures en retard, le pipeline, les \
-         soumissions, les factures des fournisseurs, les achats en route, les heures des employés, l'agenda partagé, \
-         les comptes en banque. Sa dernière lecture est dans {fichier} (du JSON ; son heure : lu_a) : pour une \
-         question d'ensemble (« où en est l'entreprise ? », « qui n'a pas d'heures vendredi ? »), lis-le d'abord, \
-         sans appeler l'ERP ; pour un détail, ou un chiffre à la minute près, prends l'outil de Constructo AI.",
-        fichier = local.join(crate::entreprise::FICHIER).display()
+         - La fenêtre d'Eve est aussi un tableau de bord (dans son thème « Constructo AI ») : la maison{et}, et ce \
+         qu'on y épingle — les notes de la personne, et tes cartes.{entreprise}\n\
+         - Tu peux y épingler n'importe quelle carte : quand la personne le demande (« mets-le au tableau de bord », \
+         « fais-moi un suivi de mes soumissions »), ou quand une réponse gagne à rester sous ses yeux. Dis en une phrase \
+         ce que tu épingles, puis, après les trois tirets, la carte : ```carte {{\"type\":\"epingle\",\"id\":\"soumissions\",\
+         \"titre\":\"Soumissions du mois\",\"sorte\":\"chiffres\",…}}``` — une carte par bloc, un id court, en \
+         minuscules et tirets.\n\
+         - Ses sortes : note (\"texte\" : des lignes, la première est son titre ; « - » en tête fait une puce) ; liste \
+         (\"rangees\" : [{{\"tete\":\"Échue\",\"teinte\":\"rouge\",\"texte\":\"Facture 1043, Tremblay\",\
+         \"valeur\":\"34 jours\",\"detail\":\"relancée le 12\"}}], ou de simples textes) ; chiffres (\"chiffres\" : \
+         [{{\"valeur\":\"48\",\"libelle\":\"Soumissions envoyées\",\"ecart\":\"+6 depuis septembre\"}}], six au plus ; \
+         \"bon\":\"baisse\" quand une baisse est une bonne nouvelle) ; tableau (\"colonnes\", \"lignes\", \"pied\", comme la \
+         carte tableau) ; graphique (\"forme\" : lignes ou aires pour une évolution, barres pour comparer, \
+         horizontales pour des noms longs, empilees pour les parts de chaque catégorie, anneau pour les parts d'un tout, \
+         six au plus ; \"etiquettes\" : l'axe, ou les parts ; \"series\" : [{{\"nom\":\"2026\",\"valeurs\":[182,205,231]}}], \
+         huit au plus, une seule sans nom ; \"unite\" : $, k$, h, % ; \"souligne\" : le nom de la série qui compte, les \
+         autres en gris ; une seule unité par graphique — deux mesures, deux graphiques) ; dessin (\"svg\" : le SVG \
+         entier, ses attributs entre apostrophes, d'environ 360 de large).\n\
+         - Facultatifs : \"teinte\" (bleu, vert, rouge, ambre, violet, indigo, sarcelle, orange, gris), \"vue\" \
+         (entreprise ou famille ; sans elle, partout), \"mention\" (une ligne grise sous la carte : sa source, sa date), \
+         \"source\" (pour toi : d'où viennent ses données, et comment la refaire).\n\
+         - Une carte qui revient avec le même id remplace l'autre : c'est ainsi qu'elle se met à jour (« Actualiser », \
+         dans son menu, te le demande) ; ```carte {{\"type\":\"epingle\",\"id\":\"…\",\"retirer\":true}}``` la retire.\n\
+         - Ce qui y est épinglé est dans {fichier} (une liste JSON ; les notes de la personne y sont, \"de\":\"personne\") : \
+         lis-le quand on t'en parle. N'y écris pas toi-même : passe par une carte, même pour récrire une note à la \
+         demande de la personne.",
+        et = if constructo { ", l'entreprise" } else { "" },
+        fichier = local.join(crate::epingles::FICHIER).display()
     )
 }
 
@@ -932,18 +966,35 @@ mod essais {
         assert!(!c.contains("  "), "les lignes se suivent sans blancs doublés :\n{c}");
     }
 
-    /// La partie « TABLEAU DE BORD » dit ce que montre la fenêtre et où est sa dernière lecture, sans rien en recopier.
+    /// La partie « TABLEAU DE BORD » dit ce qui s'épingle et comment, où sont les cartes épinglées ; avec Constructo AI,
+    /// ce que la fenêtre montre de l'entreprise et où est sa dernière lecture — sans rien recopier de l'une ni de
+    /// l'autre. Ses exemples se lisent comme des cartes.
     #[test]
     fn la_consigne_du_tableau_de_bord() {
         let local = Path::new(r"C:\Users\Sam\AppData\Local\Eve\specialistes\essai");
-        let c = consigne_du_tableau(local);
-        assert!(c.starts_with("TABLEAU DE BORD\n- La fenêtre d'Eve montre déjà l'entreprise"), "{c}");
-        for attendu in
-            [r"C:\Users\Sam\AppData\Local\Eve\specialistes\essai\entreprise.json", "lu_a", "sans appeler l'ERP"]
-        {
+        let c = consigne_du_tableau(local, true);
+        assert!(c.starts_with("TABLEAU DE BORD\n- La fenêtre d'Eve est aussi un tableau de bord"), "{c}");
+        for attendu in [
+            r"C:\Users\Sam\AppData\Local\Eve\specialistes\essai\entreprise.json",
+            "lu_a",
+            "sans appeler l'ERP",
+            r"C:\Users\Sam\AppData\Local\Eve\specialistes\essai\epingles.json",
+            "\"retirer\":true",
+        ] {
             assert!(c.contains(attendu), "{attendu} manque :\n{c}");
         }
-        assert!(!c.contains("  ") && !c.contains('$'), "ni blancs doublés ni montant :\n{c}");
+        // Les unités d'un graphique s'y nomment (« $, k$ ») ; un montant — un chiffre devant elles —, jamais.
+        let montant = c.match_indices('$').any(|(i, _)| {
+            c[..i].trim_end_matches([' ', '\u{a0}', '\u{202f}', 'k', 'M', 'G']).ends_with(|x: char| x.is_ascii_digit())
+        });
+        assert!(!c.contains("  ") && !montant, "ni blancs doublés ni montant :\n{c}");
+        let sans = consigne_du_tableau(local, false);
+        assert!(sans.contains("epingles.json") && !sans.contains("entreprise.json") && !sans.contains("l'entreprise,"));
+        // Les deux cartes d'exemple sont du JSON (« … » mis à part).
+        let liste = c.split("(\"rangees\" : ").nth(1).and_then(|x| x.split(", ou de").next()).unwrap();
+        assert!(serde_json::from_str::<serde_json::Value>(liste).is_ok(), "{liste}");
+        let chiffres = c.split("(\"chiffres\" : ").nth(1).and_then(|x| x.split(", six au plus").next()).unwrap();
+        assert!(serde_json::from_str::<serde_json::Value>(chiffres).is_ok(), "{chiffres}");
     }
 
     /// La partie « CONSTRUCTO AI » que donne Eve est celle de la consigne du kit, entière, sans gabarit à remplir.

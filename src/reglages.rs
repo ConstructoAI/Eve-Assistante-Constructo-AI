@@ -100,6 +100,10 @@ pub struct Reglages {
     /// Ce que montre le tableau de bord du thème « Constructo AI » ([`VUES_DU_TABLEAU`]) : « tout » (l'entreprise et la
     /// famille côte à côte), « entreprise » ou « famille ». Il se choisit en haut du tableau et vaut tout de suite.
     pub vue_du_tableau: String,
+    /// L'ordre des cartes de ce tableau de bord, que la personne a donné en les déplaçant : leurs clés
+    /// (`theme::Liste::cle`), de la première à la dernière ; vide : l'ordre d'office (ce qui presse d'abord). Une
+    /// carte qu'il ne nomme pas garde sa place d'office. Il vaut tout de suite.
+    pub ordre_du_tableau: Vec<String>,
     /// Le dossier de la comptabilité du ménage, celui de son tableau de bord (`tableau\donnees.json`, sa forme dans
     /// `tableau\format-donnees.md`) ; vide : aucune. Nommée, elle seule donne à la fenêtre l'encaisse et les échéances
     /// fiscales, à la place de `activite\budget.js` et des échéances « fiscal » d'`activite\echeances.js`, ses copies
@@ -114,6 +118,9 @@ pub struct Reglages {
     pub alertes: Alertes,
     /// Toujours devant les autres fenêtres.
     pub devant: bool,
+    /// Les notifications de Windows, quand la fenêtre n'est pas devant : un rappel qui sonne, une réponse longue finie,
+    /// un accord qu'Eve attend (`notifications.rs`).
+    pub notifications: bool,
     /// Reprendre les derniers échanges au démarrage (la mémoire d'un jour à l'autre, propre à chaque personne).
     pub memoire: bool,
     /// Garder l'historique des conversations (sur le poste, par personne : `historique\<Prénom>\`).
@@ -252,11 +259,13 @@ impl Default for Reglages {
             fenetre_native: false,
             theme: "centre".into(),
             vue_du_tableau: "tout".into(),
+            ordre_du_tableau: Vec::new(),
             comptabilite: String::new(),
             interruption: true,
             sourdine: false,
             alertes: Alertes::default(),
             devant: false,
+            notifications: true,
             memoire: true,
             historique: true,
             prechauffage: true,

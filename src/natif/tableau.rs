@@ -4,7 +4,8 @@
 //! à 15 h 40 ») et le bouton qui la relit ; une rangée de tuiles de chiffres (six au plus) ; puis des cartes en
 //! listes, en maçonnerie sur trois colonnes ([`theme::maconnerie`]), les plus importantes d'abord ([`rang`]). « Tout »
 //! mêle l'entreprise et la maison ; « Entreprise » et « Famille » ne gardent que l'une. Une carte sans données ne se
-//! montre pas.
+//! montre pas. La personne déplace les cartes à la souris : leur ordre est le sien (le réglage `ordre_du_tableau`,
+//! posé sur l'ordre d'office : [`theme::ranger`]), jusqu'à « Ordre d'office ».
 //!
 //! Chaque carte a la même grammaire ([`theme::Liste`]) : une tête (la pastille de son icône, son titre, une pilule de
 //! compte teintée selon l'urgence), des rangées séparées d'un filet (un mot de tête en couleur — rouge pour ce qui est
@@ -43,8 +44,10 @@ use eframe::egui::{
 };
 use serde_json::Value;
 
-use super::theme::{self, BoutonErp, Chiffre, ECART, Liste, Rangee, erp, pictos};
-use super::{Fenetre, ICONES, SEMI, TENUE};
+use super::theme::{
+    self, Action, BoutonErp, Chiffre, Clic, ECART, LigneDeMenu, Liste, PetitChiffre, Rangee, erp, pictos,
+};
+use super::{Fenetre, ICONES, SEMI, TENUE, graphiques};
 use crate::meteo::{self, Bulletin};
 use crate::reglages::VUES_DU_TABLEAU;
 use crate::services::{Erreurs, Etat, Niveau, Releve, Sorte};
@@ -62,6 +65,9 @@ pub(crate) mod rang {
     /// Ce qui presse en ligne : un incident chez Claude, GitHub ou Render, des erreurs de Render dans la dernière
     /// heure, un paiement de Stripe échoué depuis un jour.
     pub const EN_LIGNE_QUI_PRESSE: u8 = 2;
+    /// Ce qu'on a épinglé (les notes de la personne, les cartes d'Eve) : juste après ce qui presse en ligne — elles
+    /// s'ajoutent les dernières —, sous les yeux.
+    pub const EPINGLES: u8 = 2;
     pub const DECISION: u8 = 3;
     pub const JOURNEE: u8 = 4;
     pub const METEO: u8 = 5;
@@ -632,7 +638,9 @@ fn liste_de_l_agenda(agenda: &[Value], m: &Maintenant) -> Liste {
 /// en détail ; tout le retard dans la pilule, en rouge.
 fn liste_des_factures(factures: &[Value], total: Option<f64>) -> Liste {
     let total = total.unwrap_or_else(|| factures.iter().filter_map(|f| nombre(f, "solde")).sum());
-    let mut l = Liste::nouvelle("Factures en retard", pictos::RETARD, erp::ROUGE).pilule(dollars(total), erp::ROUGE);
+    let mut l = Liste::nouvelle("Factures en retard", pictos::RETARD, erp::ROUGE)
+        .pilule(dollars(total), erp::ROUGE)
+        .actions(&[Action::Relance]);
     for f in factures.iter().take(RANGEES) {
         let jours = nombre(f, "jours").unwrap_or(0.0);
         let client = Some(texte_de(f, "client")).filter(|c| !c.is_empty()).unwrap_or("Client");
@@ -703,7 +711,8 @@ fn statut_de_soumission(statut: &str) -> String {
 fn liste_des_soumissions(soumissions: &[Value]) -> Liste {
     let titre = "Soumissions client";
     let combien = soumissions.len().to_string();
-    let mut l = Liste::nouvelle(titre, pictos::DEVIS, erp::INDIGO).pilule(combien, erp::INDIGO);
+    let mut l =
+        Liste::nouvelle(titre, pictos::DEVIS, erp::INDIGO).pilule(combien, erp::INDIGO).actions(&[Action::Suivi]);
     for s in soumissions.iter().take(RANGEES) {
         let modifie = texte_de(s, "modifie");
         let modifie =
@@ -928,8 +937,9 @@ fn liste_des_factures_recues(factures: &[Value]) -> Liste {
 /// valeur à droite ; le client, ce qu'ils attendent et depuis quand en détail ; leur nombre dans la pilule.
 fn liste_des_devis(devis: &[Value], combien: Option<f64>) -> Liste {
     let combien = combien.map_or(devis.len(), |c| c.round().max(0.0) as usize);
-    let mut l =
-        Liste::nouvelle("Devis en attente", pictos::DEVIS, erp::INDIGO).pilule(combien.to_string(), erp::INDIGO);
+    let mut l = Liste::nouvelle("Devis en attente", pictos::DEVIS, erp::INDIGO)
+        .pilule(combien.to_string(), erp::INDIGO)
+        .actions(&[Action::Suivi]);
     for d in devis.iter().take(RANGEES) {
         let statut = match texte_de(d, "statut").to_lowercase().as_str() {
             "envoye" | "envoyé" => "envoyé".to_string(),
@@ -1043,7 +1053,7 @@ fn liste_de_la_meteo(b: &Bulletin, ville: &str, m: &Maintenant) -> Option<Liste>
         _ => pictos::NUAGE,
     };
     let maintenant = format!("{}\u{a0}°C", meteo::arrondi(b.temperature));
-    let mut l = Liste::nouvelle(titre, icone, erp::BLEU).pilule(maintenant, erp::BLEU);
+    let mut l = Liste::nouvelle(titre, icone, erp::BLEU).pilule(maintenant, erp::BLEU).cle("meteo");
     let aujourdhui = m.aujourdhui();
     let degres = |t: Option<f64>| t.map_or("—".to_string(), |t| format!("{}°", meteo::arrondi(t)));
     for j in b.jours.iter().take(3) {
@@ -1540,7 +1550,187 @@ enum Carte {
     Invitation,
     PremiereLecture,
     Erreur(String),
+    /// Une carte épinglée (`epingles.json`, que publie le chef) : sa clé dans l'ordre de la personne, et son objet.
+    Epingle {
+        cle: String,
+        carte: Value,
+    },
 }
+
+impl Carte {
+    /// Ce qui la nomme dans l'ordre de la personne : la clé de sa liste ; un état de l'entreprise prend la place de
+    /// ses cartes, sous un seul nom.
+    fn cle(&self) -> &str {
+        match self {
+            Carte::Liste(l) => &l.cle,
+            Carte::Epingle { cle, .. } => cle,
+            _ => "constructo-ai",
+        }
+    }
+}
+
+/// Une note ouverte au tableau de bord (on l'écrit) : son id, son texte tel qu'on le tape, l'heure de la dernière
+/// frappe pas encore dite au chef, si elle doit prendre le clavier à la prochaine image ; refermée, l'heure où elle
+/// l'a été — sa carte garde ce texte le temps que le chef le publie.
+pub(super) struct NoteOuverte {
+    pub(super) id: String,
+    pub(super) texte: String,
+    pub(super) frappe: Option<f64>,
+    pub(super) clavier: bool,
+    pub(super) fermee: Option<f64>,
+}
+
+/// Une note se dit au chef une demi-seconde après sa dernière frappe (et quand on la quitte) ; une carte qu'on vient
+/// voir de la conversation reste soulignée deux secondes.
+const PAUSE_DE_LA_NOTE: f64 = 0.6;
+const MONTREE: f64 = 2.0;
+
+/// Les lignes du menu d'une carte épinglée : une note se modifie, une carte d'Eve s'actualise ; on parle de l'une
+/// comme de l'autre à Eve ; on les retire (un second clic le confirme).
+const MODIFIER: &str = "Modifier";
+const ACTUALISER: &str = "Actualiser";
+const VOIR_LES_DONNEES: &str = "Voir les données";
+const VOIR_LE_GRAPHIQUE: &str = "Voir le graphique";
+const EN_PARLER: &str = "En parler à Eve";
+const RETIRER: &str = "Retirer";
+
+/// Un graphique offre aussi sa vue en tableau (`en_tableau` : elle se montre), où chaque valeur se lit sans survol.
+fn lignes_du_menu(sorte: &str, en_tableau: bool) -> Vec<LigneDeMenu> {
+    let mut lignes = vec![if sorte == "note" {
+        LigneDeMenu { icone: pictos::MODIFIER, mot: MODIFIER, a_confirmer: false }
+    } else {
+        LigneDeMenu { icone: pictos::RELIRE, mot: ACTUALISER, a_confirmer: false }
+    }];
+    if sorte == "graphique" {
+        lignes.push(if en_tableau {
+            LigneDeMenu { icone: pictos::GRAPHIQUE, mot: VOIR_LE_GRAPHIQUE, a_confirmer: false }
+        } else {
+            LigneDeMenu { icone: crate::cartes::pictos::TABLEAU, mot: VOIR_LES_DONNEES, a_confirmer: false }
+        });
+    }
+    lignes.push(LigneDeMenu { icone: pictos::PARLER, mot: EN_PARLER, a_confirmer: false });
+    lignes.push(LigneDeMenu { icone: pictos::RETIRER, mot: RETIRER, a_confirmer: true });
+    lignes
+}
+
+/// Le graphique `id` se montre-t-il en tableau (son menu : « Voir les données ») ?
+fn graphique_en_tableau(ctx: &egui::Context, id: &str) -> bool {
+    ctx.data(|d| d.get_temp::<bool>(egui::Id::unique(("graphique-en-tableau", id)))).unwrap_or(false)
+}
+
+/// L'icône et la teinte d'office d'une sorte de carte épinglée (la carte peut dire sa teinte).
+fn allure_de_la_sorte(sorte: &str) -> (char, erp::Teinte) {
+    match sorte {
+        "note" => (pictos::NOTE, erp::JAUNE),
+        "liste" => (pictos::LISTE, erp::BLEU),
+        "chiffres" => (pictos::CALCUL, erp::VERT),
+        "tableau" => (crate::cartes::pictos::TABLEAU, erp::INDIGO),
+        "graphique" => (pictos::GRAPHIQUE, erp::VIOLET),
+        "dessin" => (crate::cartes::pictos::DESSIN, erp::SARCELLE),
+        _ => (crate::cartes::pictos::EPINGLE, erp::GRIS),
+    }
+}
+
+/// Le titre d'une note : sa première ligne (sans sa puce), ou « Nouvelle note ».
+fn titre_de_la_note(texte: &str) -> String {
+    let premiere = texte.trim().lines().next().unwrap_or("").trim();
+    let premiere = premiere.trim_start_matches(['-', '•', '*']).trim();
+    if premiere.is_empty() { "Nouvelle note".into() } else { premiere.into() }
+}
+
+/// Une ligne du texte d'une note : « - », « • » ou « * » en tête, une puce et son retrait ; sinon, le texte.
+fn lignes_de_note(ui: &mut egui::Ui, ligne: &str) {
+    let l = ligne.trim_end();
+    let puce = l.trim_start().strip_prefix(['-', '•', '*']).filter(|r| r.starts_with(' '));
+    let corps = RichText::new(puce.map_or(l, str::trim)).size(14.0).color(erp::TEXTE);
+    if puce.is_none() {
+        if l.trim().is_empty() {
+            ui.add_space(4.0);
+        } else {
+            ui.add(egui::Label::new(corps).wrap().selectable(false));
+        }
+        return;
+    }
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.label(RichText::new("•").size(14.0).color(erp::TEXTE_2));
+        ui.add(egui::Label::new(corps).wrap().selectable(false));
+    });
+}
+
+/// Une valeur d'une carte épinglée, en texte : une chaîne telle quelle, un nombre tel qu'écrit.
+fn valeur_en_texte(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        x => x.to_string(),
+    }
+}
+
+/// La liste d'une carte épinglée : ses `rangees` (un texte ; ou un objet — son mot de `tete`, dans l'encre de sa
+/// `teinte`, son `texte`, sa `valeur` à droite, son `detail` gris), trente au plus.
+fn liste_de_l_epingle(c: &Value, titre: &str, icone: char, teinte: erp::Teinte) -> Liste {
+    let mut l = Liste::nouvelle(titre, icone, teinte);
+    for r in c["rangees"].as_array().into_iter().flatten().take(30) {
+        let rangee = match r {
+            Value::Object(_) => {
+                let encre = r["teinte"].as_str().and_then(erp::nommee).map_or(erp::TITRE, |t| t.encre);
+                Rangee::nouvelle(&valeur_en_texte(&r["tete"]), encre, &valeur_en_texte(&r["texte"]))
+                    .a_droite(valeur_en_texte(&r["valeur"]))
+                    .detail(&[valeur_en_texte(&r["detail"])])
+            }
+            x => Rangee::nouvelle("", erp::TITRE, &valeur_en_texte(x)),
+        };
+        l.rangees.push(rangee);
+    }
+    l
+}
+
+/// Les chiffres d'une carte épinglée : chacun sa `valeur`, son `libelle`, son `ecart` et le sens qui est bon (`bon` :
+/// « hausse » d'office, ou « baisse »), six au plus.
+fn chiffres_de_l_epingle(c: &Value) -> Vec<PetitChiffre> {
+    let texte = |x: &Value, cles: &[&str]| {
+        cles.iter().map(|k| valeur_en_texte(&x[*k])).find(|t| !t.is_empty()).unwrap_or_default()
+    };
+    c["chiffres"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(6)
+        .map(|x| PetitChiffre {
+            valeur: texte(x, &["valeur"]),
+            etiquette: texte(x, &["libelle", "etiquette"]),
+            ecart: texte(x, &["ecart", "tendance"]),
+            baisse_bonne: eve::parole::normaliser(x["bon"].as_str().unwrap_or("")) == "baisse",
+        })
+        .collect()
+}
+
+/// La ligne grise sous une carte épinglée : sa `mention` (« Source : Constructo AI ») ; sans elle, pour une carte
+/// d'Eve, quand elle l'a épinglée ou mise à jour.
+fn mention_de_l_epingle(c: &Value) -> String {
+    let mention = valeur_en_texte(&c["mention"]);
+    if !mention.trim().is_empty() || c["de"] == "personne" || c["sorte"] == "note" {
+        return mention;
+    }
+    let a = c["mis_a_jour"].as_str().unwrap_or("");
+    match crate::rappels::heure_ecrite(a.get(..16).unwrap_or(a)) {
+        Some(a) => format!("Mise à jour par Eve {}", quand_de_la_mise_a_jour(&a)),
+        None => "Épinglée par Eve".into(),
+    }
+}
+
+/// Quand une carte d'Eve a été mise à jour, comme on le dit : « à 9 h 12 », « demain à 9 h », « le 27 octobre ».
+fn quand_de_la_mise_a_jour(a: &str) -> String {
+    let jour = crate::journal::date();
+    match crate::rappels::heure_dite(a, &jour) {
+        h if h.starts_with(|c: char| c.is_ascii_digit()) => format!("à {h}"),
+        h => h,
+    }
+}
+
+/// L'ordre des cartes qu'on vient de donner d'un geste, tenu le temps que le chef le publie.
+const ORDRE_TENU: &str = "ordre-du-tableau-donne-d-un-geste";
 
 impl Fenetre {
     /// La vue du tableau de bord : celle que publie le chef, ou celle qu'on vient de choisir d'un clic, tenue le temps
@@ -1553,6 +1743,54 @@ impl Fenetre {
         }
     }
 
+    /// L'ordre des cartes que la personne a donné en les déplaçant : celui que publie le chef, ou celui qu'on vient de
+    /// donner d'un geste, tenu le temps qu'il le publie.
+    fn ordre_du_tableau(&self, ctx: &egui::Context) -> Vec<String> {
+        let maintenant = ctx.input(|i| i.time);
+        match ctx.data(|d| d.get_temp::<(Vec<String>, f64)>(egui::Id::unique(ORDRE_TENU))) {
+            Some((ordre, quand)) if maintenant - quand < TENUE => ordre,
+            _ => self.etat["ordre_du_tableau"]
+                .as_array()
+                .map(|l| l.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Ce qu'on a choisi dans le menu d'une rangée (`k`) d'une carte : une demande à Eve, envoyée comme si on l'avait
+    /// écrite (elle s'affiche dans la conversation) — une relance, un suivi, « c'est fait », en parler —, ou un rappel
+    /// pour demain matin, que le chef pose sans Claude. Une relance, un suivi : un brouillon, jamais envoyé.
+    fn agir(&self, l: &Liste, k: usize, action: Action) {
+        let Some(r) = l.rangees.get(k) else { return };
+        let (titre, quoi) = (l.titre.as_str(), theme::texte_de_rangee(r));
+        let demande = match action {
+            Action::Relance => format!(
+                "Prépare une relance courtoise pour cette facture en retard (« {titre} », au tableau de bord) : {quoi}. \
+                 Fais-en un brouillon, ne l'envoie pas."
+            ),
+            Action::Suivi => format!(
+                "Prépare un suivi pour cette soumission (« {titre} », au tableau de bord) : {quoi}. Fais-en un \
+                 brouillon, ne l'envoie pas."
+            ),
+            Action::Fait => format!(
+                "C'est fait (« {titre} », au tableau de bord) : {quoi}. Mets le tableau de bord à jour : retire-le, \
+                 ou passe-le à sa prochaine date s'il revient."
+            ),
+            Action::Demander => format!("Parlons de ceci, au tableau de bord (« {titre} ») : {quoi}"),
+            Action::RappelDemain => {
+                self.geste("rappel_demain", Value::String(format!("{titre} : {quoi}")));
+                return;
+            }
+        };
+        self.geste("texte", Value::String(demande));
+    }
+
+    /// Un ordre donné d'un geste : tenu ici, et dit au chef, qui l'inscrit dans `reglages.json`.
+    fn donner_l_ordre(&self, ctx: &egui::Context, ordre: Vec<String>) {
+        let maintenant = ctx.input(|i| i.time);
+        ctx.data_mut(|d| d.insert_temp(egui::Id::unique(ORDRE_TENU), (ordre.clone(), maintenant)));
+        self.geste("ordre_du_tableau", Value::from(ordre));
+    }
+
     /// Le tableau de bord sous sa bannière : la rangée du choix et de la fraîcheur ; le bandeau d'une lecture manquée
     /// ou d'une liaison perdue ; les tuiles des chiffres ; les cartes en maçonnerie.
     pub(super) fn page_du_tableau(&mut self, ui: &mut egui::Ui, aujourdhui: &str, heure: &str) {
@@ -1562,11 +1800,10 @@ impl Fenetre {
         let m = Maintenant::du_poste();
         let vue = if liaison == Liaison::Absente { Vue::Famille } else { self.vue_du_tableau(ui.ctx()) };
         let (entreprise, famille) = (vue != Vue::Famille, vue != Vue::Entreprise);
-        if liaison != Liaison::Absente {
-            let f = entreprise.then(|| fraicheur(liaison, lecture.as_ref(), &m));
-            self.rangee_du_choix(ui, vue, f.as_ref(), liaison);
-            ui.add_space(14.0);
-        }
+        let ordre_des_cartes = self.ordre_du_tableau(ui.ctx());
+        let f = (entreprise && liaison != Liaison::Absente).then(|| fraicheur(liaison, lecture.as_ref(), &m));
+        self.rangee_du_choix(ui, vue, f.as_ref(), liaison, !ordre_des_cartes.is_empty());
+        ui.add_space(14.0);
         let lue = lecture.as_ref().and_then(|l| l.as_ref().ok()).filter(|v| a_des_chiffres(v)).cloned();
         // Le bandeau : une lecture manquée (les chiffres d'avant restent), ou une liaison perdue (ils pâlissent).
         let mut pales = false;
@@ -1658,40 +1895,75 @@ impl Fenetre {
             let en_ligne = listes_en_ligne(self.releve.as_ref(), self.montants.as_ref(), &m);
             cartes.extend(en_ligne.into_iter().map(|(r, l)| (r, false, Carte::Liste(l))));
         }
+        // Ce qu'on a épinglé, dans la vue qu'il dit.
+        cartes.extend(self.epingles_de_la_vue(entreprise, famille).into_iter().map(|c| (rang::EPINGLES, false, c)));
         cartes.sort_by_key(|(r, _, _)| *r);
+        theme::ranger(&mut cartes, |(_, _, c)| c.cle(), &ordre_des_cartes);
+        let cles: Vec<String> = cartes.iter().map(|(_, _, c)| c.cle().to_string()).collect();
         let colonnes = theme::colonnes_pour(ui.available_width());
-        theme::maconnerie(ui, colonnes, cartes.len(), |ui, k| {
+        let deplacement = theme::maconnerie(ui, colonnes, &cles, |ui, k| {
             let (_, pale, carte) = &cartes[k];
             if *pale {
                 ui.multiply_opacity(0.55);
             }
             match carte {
                 // Une rangée qui ouvre une page (un service et sa page d'état) : le chef l'ouvre, `https://` seulement.
-                Carte::Liste(l) => {
-                    if let Some(page) = theme::carte_liste(ui, l) {
-                        self.geste("ouvrir_lien", Value::String(page));
-                    }
-                }
+                Carte::Liste(l) => match theme::carte_liste(ui, l) {
+                    Some(Clic::Page(page)) => self.geste("ouvrir_lien", Value::String(page)),
+                    Some(Clic::Action(a, k)) => self.agir(l, k, a),
+                    None => {}
+                },
                 Carte::Invitation => self.invitation(ui, liaison),
                 Carte::PremiereLecture => premiere_lecture(ui),
                 Carte::Erreur(raison) => self.carte_d_erreur(ui, raison),
+                Carte::Epingle { carte, .. } => self.carte_epinglee(ui, carte),
             }
         });
+        // Une carte lâchée ailleurs : l'ordre de ce qui se voit, puis celui des cartes d'une autre vue (ou sans
+        // données aujourd'hui), qui gardent le leur.
+        if let Some(d) = deplacement {
+            let mut neuf = cles.clone();
+            let carte = neuf.remove(d.de);
+            neuf.insert(d.vers.min(neuf.len()), carte);
+            neuf.extend(ordre_des_cartes.into_iter().filter(|c| !cles.contains(c)));
+            self.donner_l_ordre(ui.ctx(), neuf);
+        }
     }
 
     /// La rangée au-dessus de tout (le filtre des tableaux de bord : un seul, au-dessus de ce qu'il touche) : le choix
     /// de la vue en segments ; à droite, quand l'entreprise se montre, l'heure de sa dernière lecture et le bouton qui
     /// la relit (reliée seulement ; une roue pendant qu'Eve lit).
-    fn rangee_du_choix(&mut self, ui: &mut egui::Ui, vue: Vue, f: Option<&Fraicheur>, liaison: Liaison) {
+    fn rangee_du_choix(
+        &mut self,
+        ui: &mut egui::Ui,
+        vue: Vue,
+        f: Option<&Fraicheur>,
+        liaison: Liaison,
+        ordre_donne: bool,
+    ) {
         let largeur = ui.available_width();
         let (rangee, _) = ui.allocate_exact_size(vec2(largeur, 38.0), Sense::hover());
         let mut gauche = ui.new_child(UiBuilder::new().max_rect(rangee).layout(Layout::left_to_right(Align::Center)));
-        if let Some(choisie) = segments_du_tableau(&mut gauche, vue)
+        if liaison != Liaison::Absente
+            && let Some(choisie) = segments_du_tableau(&mut gauche, vue)
             && choisie != vue
         {
             let maintenant = ui.input(|i| i.time);
             ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique(VUE_TENUE), (choisie.rang(), maintenant)));
             self.geste("vue_du_tableau", Value::String(VUES_DU_TABLEAU[choisie.rang()].0.into()));
+        }
+        // De quoi épingler une carte : une note, tout de suite ; ou une demande à Eve, qui épingle n'importe quoi.
+        if liaison != Liaison::Absente {
+            gauche.add_space(10.0);
+        }
+        self.bouton_ajouter(&mut gauche);
+        // Les cartes déplacées : de quoi revenir à l'ordre d'office (ce qui presse en tête).
+        if ordre_donne {
+            gauche.add_space(10.0);
+            let rep = theme::bouton_erp(&mut gauche, Some(pictos::RELIRE), "Ordre d'office", BoutonErp::Fantome);
+            if rep.on_hover_text("Les cartes reprennent leur place d'office : ce qui presse en tête").clicked() {
+                self.donner_l_ordre(ui.ctx(), Vec::new());
+            }
         }
         let Some(f) = f else { return };
         let reste = (rangee.right() - gauche.min_rect().right() - 16.0).max(0.0);
@@ -1703,6 +1975,296 @@ impl Fenetre {
         }
         droite.add_space(10.0);
         mise_a_jour_dite(&mut droite, f, reste - 50.0);
+    }
+
+    /// Les cartes épinglées de la vue : celles que publie le chef (`epingles`, la plus récente en tête), dans la vue
+    /// qu'elles disent (sans vue, partout) ; la note qu'on écrit par-dessus la sienne, ou en tête avant que le chef la
+    /// publie ; une note qu'on vient de vider ne se montre plus.
+    fn epingles_de_la_vue(&self, entreprise: bool, famille: bool) -> Vec<Carte> {
+        let mut liste: Vec<Value> = self.etat["epingles"].as_array().cloned().unwrap_or_default();
+        if let Some(n) = &self.note {
+            match liste.iter_mut().find(|c| c["id"] == n.id.as_str()) {
+                Some(c) => c["texte"] = Value::String(n.texte.clone()),
+                None => liste
+                    .insert(0, serde_json::json!({ "id": n.id, "sorte": "note", "de": "personne", "texte": n.texte })),
+            }
+            if n.fermee.is_some() && n.texte.trim().is_empty() {
+                liste.retain(|c| c["id"] != n.id.as_str());
+            }
+        }
+        liste
+            .into_iter()
+            .filter(|c| match eve::parole::normaliser(c["vue"].as_str().unwrap_or("")).as_str() {
+                "entreprise" => entreprise,
+                "famille" => famille,
+                _ => true,
+            })
+            .map(|c| Carte::Epingle { cle: format!("epingle-{}", c["id"].as_str().unwrap_or("")), carte: c })
+            .collect()
+    }
+
+    /// Une carte épinglée : sa tête (la pastille de sa sorte, son titre, le menu « ⋯ »), ce que sa sorte montre — une
+    /// note, une liste, des chiffres, un tableau, un dessin —, sa mention grise. Une note s'écrit sur place : un clic
+    /// sur elle l'ouvre. Venue de la conversation (« Voir au tableau de bord »), elle défile sous les yeux, soulignée
+    /// un moment.
+    fn carte_epinglee(&mut self, ui: &mut egui::Ui, c: &Value) {
+        let id = c["id"].as_str().unwrap_or("").to_string();
+        let sorte = c["sorte"].as_str().unwrap_or("note");
+        let (icone, teinte) = allure_de_la_sorte(sorte);
+        let teinte = c["teinte"].as_str().and_then(erp::nommee).unwrap_or(teinte);
+        let texte = c["texte"].as_str().unwrap_or("").to_string();
+        let ouverte = self.note.as_ref().is_some_and(|n| n.id == id && n.fermee.is_none());
+        let titre = match sorte {
+            "note" => titre_de_la_note(&texte),
+            _ => c["titre"].as_str().filter(|t| !t.trim().is_empty()).unwrap_or("Carte").to_string(),
+        };
+        let en_tableau = graphique_en_tableau(ui.ctx(), &id);
+        let lignes = lignes_du_menu(sorte, en_tableau);
+        let mut choisie = None;
+        let mut clic = None;
+        theme::carte(ui, Some(teinte.pastel), 0.0, |ui| {
+            let (ligne, tete) = theme::tete_avec_menu(ui, &titre, icone, teinte, &id, &lignes);
+            choisie = ligne;
+            match sorte {
+                "note" => self.corps_de_note(ui, &id, &texte, ouverte, tete),
+                "liste" => clic = theme::corps_de_liste(ui, &liste_de_l_epingle(c, &titre, icone, teinte)),
+                "chiffres" => theme::chiffres_de_carte(ui, &chiffres_de_l_epingle(c)),
+                "tableau" => self.cartes.tableau_seul(ui, &c.to_string()),
+                // Un graphique, ou sa vue en tableau (son menu passe de l'un à l'autre).
+                "graphique" => match graphiques::Graphique::de(c) {
+                    Ok(g) if en_tableau => self.cartes.tableau_seul(ui, &g.en_tableau()),
+                    Ok(g) => graphiques::graphique(ui, &g, &id),
+                    Err(raison) => {
+                        ui.add(egui::Label::new(RichText::new(raison).size(13.0).color(erp::TEXTE_2)).wrap());
+                    }
+                },
+                "dessin" => {
+                    if let Some(g) = self.cartes.dessin_seul(ui, c["svg"].as_str().unwrap_or("")) {
+                        self.geste(g.action, g.valeur);
+                    }
+                }
+                _ => {
+                    let quoi = format!("Eve ne sait pas encore dessiner une carte « {sorte} ».");
+                    ui.add(egui::Label::new(RichText::new(quoi).size(13.0).color(erp::TEXTE_2)).wrap());
+                }
+            }
+            let mention = mention_de_l_epingle(c);
+            if !mention.is_empty() {
+                ui.add_space(2.0);
+                ui.add(
+                    egui::Label::new(RichText::new(mention).size(12.0).color(erp::TEXTE_3)).wrap().selectable(false),
+                );
+            }
+        });
+        let rect = ui.min_rect();
+        let liste = || liste_de_l_epingle(c, &titre, icone, teinte);
+        match clic {
+            Some(Clic::Page(page)) => self.geste("ouvrir_lien", Value::String(page)),
+            Some(Clic::Action(a, k)) => self.agir(&liste(), k, a),
+            None => {}
+        }
+        if let Some(k) = choisie {
+            self.agir_sur_l_epingle(ui.ctx(), c, &titre, lignes[k].mot);
+        }
+        self.montrer_si_demandee(ui, &id, rect);
+    }
+
+    /// Le texte d'une note sous son titre (sa première ligne) : fermée, ses autres lignes (« - » en tête : une puce), et
+    /// un clic sur elle ou sur son titre (`tete`) l'ouvre ; ouverte, le champ où on l'écrit tout entière, qui prend le
+    /// clavier — Échap ou un clic ailleurs la referme.
+    fn corps_de_note(&mut self, ui: &mut egui::Ui, id: &str, texte: &str, ouverte: bool, tete: Rect) {
+        let maintenant = ui.input(|i| i.time);
+        if ouverte && let Some(n) = self.note.as_mut() {
+            let champ = egui::TextEdit::multiline(&mut n.texte)
+                .id(egui::Id::unique(("note-du-tableau", id)))
+                .desired_width(f32::INFINITY)
+                .desired_rows(3)
+                .font(FontId::proportional(14.0))
+                .text_color(erp::TEXTE)
+                .hint_text("Écris ta note… Sa première ligne est son titre.")
+                .frame(
+                    egui::Frame::new()
+                        .fill(Color32::WHITE)
+                        .stroke((1.0, erp::PRIMAIRE))
+                        .corner_radius(8)
+                        .inner_margin(egui::Margin::symmetric(10, 8)),
+                );
+            let rep = ui.add(champ);
+            if std::mem::take(&mut n.clavier) {
+                rep.request_focus();
+            }
+            if rep.changed() {
+                n.frappe = Some(maintenant);
+            }
+            if rep.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                rep.surrender_focus();
+            }
+            if rep.lost_focus() {
+                self.fermer_la_note(maintenant);
+            }
+            let aide = "Elle s'enregistre seule. Échap ou un clic ailleurs : c'est fini.";
+            ui.add(egui::Label::new(RichText::new(aide).size(11.5).color(erp::TEXTE_3)).wrap().selectable(false));
+            return;
+        }
+        let debut = ui.cursor().min;
+        let corps: Vec<&str> = texte.trim().lines().skip(1).collect();
+        let corps: Vec<&str> = corps.iter().copied().skip_while(|l| l.trim().is_empty()).collect();
+        if texte.trim().is_empty() {
+            let vide = "Une note vide : clique pour l'écrire.";
+            ui.add(egui::Label::new(RichText::new(vide).size(13.5).color(erp::TEXTE_3)).wrap().selectable(false));
+        }
+        for ligne in &corps {
+            lignes_de_note(ui, ligne);
+        }
+        let corps = Rect::from_min_max(debut, pos2(debut.x + ui.available_width(), ui.min_rect().bottom()));
+        let mut ouvrir = false;
+        for (k, place) in [tete, corps].into_iter().enumerate().filter(|(_, r)| r.height() > 0.0) {
+            let rep = ui.interact(place, egui::Id::unique(("ouvrir-la-note", id, k)), Sense::click());
+            ouvrir |= rep.on_hover_cursor(egui::CursorIcon::Text).on_hover_text("Modifier la note").clicked();
+        }
+        if ouvrir {
+            self.ouvrir_la_note(id, texte, maintenant);
+        }
+    }
+
+    /// Ouvre la note `id` (son texte) : la note déjà ouverte se referme d'abord.
+    pub(super) fn ouvrir_la_note(&mut self, id: &str, texte: &str, maintenant: f64) {
+        if self.note.as_ref().is_some_and(|n| n.id == id && n.fermee.is_none()) {
+            return;
+        }
+        self.fermer_la_note(maintenant);
+        self.note = Some(NoteOuverte { id: id.into(), texte: texte.into(), frappe: None, clavier: true, fermee: None });
+    }
+
+    /// Une note neuve, en tête du tableau de bord, qui prend le clavier ; rien ne s'écrit tant qu'elle est vide.
+    fn ajouter_une_note(&mut self, maintenant: f64) {
+        let millis = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis());
+        self.ouvrir_la_note(&format!("note-{millis}"), "", maintenant);
+    }
+
+    /// La note qu'on quitte : ce que le chef n'en sait pas encore part (vide, elle s'en va du tableau de bord) ; sa
+    /// carte garde son texte le temps qu'il le publie.
+    pub(super) fn fermer_la_note(&mut self, maintenant: f64) {
+        let Some(n) = self.note.as_mut().filter(|n| n.fermee.is_none()) else { return };
+        n.fermee = Some(maintenant);
+        let (id, texte, frappe) = (n.id.clone(), n.texte.clone(), n.frappe.take());
+        let publiee = self.etat["epingles"].as_array().is_some_and(|l| l.iter().any(|c| c["id"] == id.as_str()));
+        if texte.trim().is_empty() {
+            if publiee {
+                self.geste("epingle_retirer", Value::String(id));
+            }
+        } else if frappe.is_some() || !publiee {
+            self.geste("epingle_note", serde_json::json!({ "id": id, "texte": texte }));
+        }
+    }
+
+    /// À chaque image : la note ouverte se dit au chef une demi-seconde après sa dernière frappe ; une note refermée
+    /// s'oublie dès que le chef publie son texte (ou qu'il l'a retirée), au plus tard après le temps de tenue.
+    pub(super) fn suivre_la_note(&mut self, maintenant: f64) {
+        let Some(n) = self.note.as_mut() else { return };
+        if n.fermee.is_none() && n.frappe.is_some_and(|f| maintenant - f >= PAUSE_DE_LA_NOTE) {
+            n.frappe = None;
+            let (id, texte) = (n.id.clone(), n.texte.clone());
+            if !texte.trim().is_empty() {
+                self.geste("epingle_note", serde_json::json!({ "id": id, "texte": texte }));
+            }
+            return;
+        }
+        let Some(fermee) = n.fermee else { return };
+        let publiee = self.etat["epingles"].as_array().and_then(|l| l.iter().find(|c| c["id"] == n.id.as_str()));
+        let rendue = match publiee {
+            Some(c) => c["texte"].as_str() == Some(n.texte.as_str()),
+            None => n.texte.trim().is_empty(),
+        };
+        if rendue || maintenant - fermee > TENUE {
+            self.note = None;
+        }
+    }
+
+    /// Ce qu'on a choisi dans le menu d'une carte épinglée (`mot`, sa ligne) : la modifier (une note), l'actualiser ou
+    /// en parler (une demande à Eve, comme si on l'avait écrite), la retirer.
+    fn agir_sur_l_epingle(&mut self, ctx: &egui::Context, c: &Value, titre: &str, mot: &str) {
+        let maintenant = ctx.input(|i| i.time);
+        let id = c["id"].as_str().unwrap_or("").to_string();
+        let texte = c["texte"].as_str().unwrap_or("");
+        match mot {
+            MODIFIER => self.ouvrir_la_note(&id, texte, maintenant),
+            VOIR_LES_DONNEES | VOIR_LE_GRAPHIQUE => {
+                let cle = egui::Id::unique(("graphique-en-tableau", id.as_str()));
+                ctx.data_mut(|d| d.insert_temp(cle, mot == VOIR_LES_DONNEES));
+            }
+            ACTUALISER => {
+                let source = c["source"].as_str().filter(|s| !s.trim().is_empty()).map(|s| format!(" ({s})"));
+                let demande = format!(
+                    "Actualise la carte « {titre} » du tableau de bord (id {id}) : refais-la d'après sa source{}, puis \
+                     renvoie-la avec le même id.",
+                    source.unwrap_or_default()
+                );
+                self.geste("texte", Value::String(demande));
+            }
+            EN_PARLER if c["sorte"] == "note" => {
+                self.geste(
+                    "texte",
+                    Value::String(format!("Parlons de ma note du tableau de bord (id {id}) : {texte}")),
+                );
+            }
+            EN_PARLER => {
+                self.geste(
+                    "texte",
+                    Value::String(format!("Parlons de la carte « {titre} » du tableau de bord (id {id}).")),
+                );
+            }
+            _ => {
+                if self.note.as_ref().is_some_and(|n| n.id == id) {
+                    self.note = None;
+                }
+                self.geste("epingle_retirer", Value::String(id));
+            }
+        }
+    }
+
+    /// La carte qu'on vient voir de la conversation (`voir_epingle`) : à sa première image, elle défile au milieu de la
+    /// vue ; un anneau de l'accent la souligne, puis s'efface.
+    fn montrer_si_demandee(&mut self, ui: &mut egui::Ui, id: &str, rect: Rect) {
+        let maintenant = ui.input(|i| i.time);
+        let Some((voulue, depuis, defile)) = self.epingle_a_montrer.as_mut() else { return };
+        if voulue != id {
+            return;
+        }
+        if !*defile {
+            *defile = true;
+            *depuis = maintenant;
+            ui.scroll_to_rect(rect, Some(Align::Center));
+        }
+        let age = maintenant - *depuis;
+        if age > MONTREE {
+            self.epingle_a_montrer = None;
+            return;
+        }
+        let alpha = (1.0 - (age / MONTREE) as f32).clamp(0.0, 1.0);
+        let anneau = Stroke::new(2.5, erp::PRIMAIRE.gamma_multiply(alpha));
+        ui.painter().rect_stroke(rect.expand(3.0), 17.0, anneau, StrokeKind::Outside);
+        ui.ctx().request_repaint();
+    }
+
+    /// « Ajouter », dans la rangée du haut : son menu offre une note (tout de suite, qui prend le clavier) ou une
+    /// demande à Eve — la saisie commence la phrase, et Eve épingle ce qu'on lui demande.
+    fn bouton_ajouter(&mut self, ui: &mut egui::Ui) {
+        let id = Some(egui::Id::unique("ajouter-une-carte"));
+        let rep = theme::bouton_erp_nomme(ui, id, Some(pictos::AJOUTER), "Ajouter", BoutonErp::Secondaire);
+        let rep = rep.on_hover_text("Ajouter une carte au tableau de bord : une note, ou ce que tu demandes à Eve");
+        let lignes = [
+            LigneDeMenu { icone: pictos::NOTE, mot: "Une note", a_confirmer: false },
+            LigneDeMenu { icone: pictos::PARLER, mot: "Demander une carte à Eve…", a_confirmer: false },
+        ];
+        match theme::menu_du_bouton(&rep, "ajouter-une-carte", &lignes, false) {
+            Some(0) => self.ajouter_une_note(ui.input(|i| i.time)),
+            Some(_) => {
+                self.saisie = "Épingle au tableau de bord ".into();
+                self.saisie_au_clavier = true;
+            }
+            None => {}
+        }
     }
 
     /// L'invitation à relier Eve à Constructo AI : ce que le tableau montrera, et le bouton qui ouvre la page de

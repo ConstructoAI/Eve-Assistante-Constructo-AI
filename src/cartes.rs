@@ -158,8 +158,9 @@ const PAGE_ENCRE_3: Color32 = Color32::from_rgb(0x5F, 0x6B, 0x79);
 const PAGE_BARRE: Color32 = Color32::from_rgb(0xEE, 0xF1, 0xF4);
 const PAGE_FILET: Color32 = Color32::from_rgb(0xDC, 0xE1, 0xE7);
 
-/// Les icônes des cartes qui ne sont pas déjà dans `natif::icones` (Segoe Fluent Icons).
-mod pictos {
+/// Les icônes des cartes qui ne sont pas déjà dans `natif::icones` (Segoe Fluent Icons) ; le tableau de bord prend
+/// les mêmes pour les cartes qu'on y épingle.
+pub(crate) mod pictos {
     pub const TABLEAU: char = '\u{E80A}';
     pub const IMAGE: char = '\u{EB9F}';
     pub const PDF: char = '\u{EA90}';
@@ -169,6 +170,8 @@ mod pictos {
     /// La palette d'un dessin, la disquette d'« Enregistrer ».
     pub const DESSIN: char = '\u{E790}';
     pub const ENREGISTRER: char = '\u{E74E}';
+    /// L'épingle d'une carte épinglée au tableau de bord.
+    pub const EPINGLE: char = '\u{E718}';
 }
 
 // ---- Ce que rend une carte, et ce qui dure ------------------------------------------------------------------------
@@ -276,6 +279,9 @@ impl Cartes {
                         ui.add(egui::Label::new(RichText::new(texte.as_str()).size(13.5).color(encre)).wrap());
                     });
                 }
+                Some(Carte::Epingle { id, titre, retiree }) => {
+                    geste = cadre(ui, pictos::EPINGLE, titre, "Tableau de bord", None, |ui| epingle(ui, id, *retiree));
+                }
             }
             ui.add_space(2.0);
         });
@@ -299,13 +305,48 @@ impl Cartes {
             if fini {
                 let d = dessins.entry(cle).or_insert_with(|| Dessin::nouveau(svg, temps));
                 d.vu = temps;
-                geste = carte_dessin(ui, cle, d, lecture, local, enregistre, id);
+                geste = carte_dessin(ui, cle, d, lecture, local, enregistre, id, true);
             } else {
                 en_preparation(ui, "Dessin en préparation…");
             }
             ui.add_space(2.0);
         });
         geste
+    }
+
+    /// Le tableau d'une carte `json` (ses `colonnes`, ses `lignes`, son `pied`) sans son cadre ni sa tête : dans une
+    /// carte du tableau de bord, qui a les siens.
+    pub fn tableau_seul(&mut self, ui: &mut egui::Ui, json: &str) {
+        let temps = ui.input(|i| i.time);
+        self.ranger(ui.ctx(), temps);
+        let cle = empreinte_du_texte(json);
+        let modele = self.modeles.entry(cle).or_insert_with(|| Modele {
+            carte: serde_json::from_str::<Value>(json)
+                .ok()
+                .and_then(|v| v.as_object().map(|d| Carte::Tableau(lire_tableau(d)))),
+            vu: 0.0,
+            mesures: None,
+            mises_en_page: Vec::new(),
+        });
+        modele.vu = temps;
+        let id = ui.scope_id().with(("tableau-seul", cle));
+        let Modele { carte, mesures, mises_en_page, .. } = modele;
+        match carte {
+            Some(Carte::Tableau(t)) => tableau(ui, t, mesures, mises_en_page, id),
+            _ => vide(ui, "Tableau illisible."),
+        }
+    }
+
+    /// Le dessin `svg` sans son cadre : dans une carte du tableau de bord. Rend le geste qu'un clic demande.
+    pub fn dessin_seul(&mut self, ui: &mut egui::Ui, svg: &str) -> Option<Geste> {
+        let temps = ui.input(|i| i.time);
+        self.ranger(ui.ctx(), temps);
+        let cle = empreinte_du_texte(svg);
+        let id = ui.scope_id().with(("dessin-seul", cle));
+        let Cartes { dessins, lecture, local, enregistre, .. } = self;
+        let d = dessins.entry(cle).or_insert_with(|| Dessin::nouveau(svg, temps));
+        d.vu = temps;
+        carte_dessin(ui, cle, d, lecture, local, enregistre, id, false)
     }
 
     /// Une fois par image : ce que le fil de lecture a rendu devient des textures, et ce qu'on ne voit plus s'oublie.
@@ -368,6 +409,13 @@ enum Carte {
     Rappel {
         a: String,
         texte: String,
+    },
+    /// Une carte que Claude a épinglée au tableau de bord (le chef l'a mise dans `epingles.json`), ou retirée : son id,
+    /// son titre. Elle se dessine là-bas ; ici, ce qui s'est fait.
+    Epingle {
+        id: String,
+        titre: String,
+        retiree: bool,
     },
 }
 
@@ -506,6 +554,12 @@ fn lire_carte(json: &str) -> Option<Carte> {
             Carte::Apercu(CarteApercu { titre, sorte: sorte_de_fichier(&nom), chemin, nom })
         }
         "rappel" => Carte::Rappel { a: champ("a"), texte: champ("texte") },
+        "epingle" => {
+            let (titre, donne) = (champ("titre"), champ("id"));
+            let id = crate::natif::theme::cle_de(if donne.trim().is_empty() { &titre } else { &donne });
+            let retiree = d.get("retirer").and_then(Value::as_bool) == Some(true);
+            Carte::Epingle { titre: ou(titre, if retiree { "Carte" } else { "Carte sans titre" }), id, retiree }
+        }
         _ => return None,
     })
 }
@@ -539,6 +593,8 @@ pub fn en_texte(json: &str) -> Option<String> {
         Carte::Brouillon(b) => format!("{}\nÀ : {}\nObjet : {}\n\n{}", b.titre, b.a, b.objet, b.extrait),
         Carte::Apercu(c) => format!("{} : {}", c.titre, c.chemin),
         Carte::Rappel { a, texte } => format!("Rappel, {} : {texte}", quand_du_rappel(&a)),
+        Carte::Epingle { titre, retiree: false, .. } => format!("{titre} (épinglée au tableau de bord)"),
+        Carte::Epingle { titre, retiree: true, .. } => format!("{titre} (retirée du tableau de bord)"),
     })
 }
 
@@ -638,8 +694,10 @@ fn colonnes_a_droite(lignes: &[Vec<String>], pieds: &[Vec<String>], n: usize) ->
 /// « (45,00 $) », « 8 h », « 2026 », « 12 km », « 3,5 m² », « 17 Ko »… Un signe, un dollar devant, des chiffres,
 /// des espaces (insécables comprises), des points, des virgules et des apostrophes, puis une unité.
 fn ressemble_a_un_nombre(v: &str) -> bool {
-    const UNITES: [&str; 16] =
-        ["$", "%", "h", "min", "j", "km", "kg", "m²", "m2", "pi²", "pi2", "pi", "po", "ko", "mo", "go"];
+    // Les milliers, les millions et les milliards de dollars comme on les écrit au Québec (« 12 k$ », « 1,2 M$ »).
+    const UNITES: [&str; 19] = [
+        "$", "k$", "m$", "g$", "%", "h", "min", "j", "km", "kg", "m²", "m2", "pi²", "pi2", "pi", "po", "ko", "mo", "go",
+    ];
     let blanc = |c: char| c.is_whitespace() || c == '\u{feff}';
     let s = v.trim_matches(blanc);
     let s = s.strip_prefix('(').unwrap_or(s);
@@ -1712,6 +1770,7 @@ impl Dessin {
 /// toute la conversation visible au plus ; « Ouvrir en grand » (le programme du poste, par un fichier du dossier
 /// local) et « Enregistrer » (la boîte « Enregistrer sous » de Windows, en PNG ou en SVG). Le dessin se rend dans le
 /// fil des aperçus, à la largeur où il s'affiche, quand il est à l'écran ou presque.
+#[allow(clippy::too_many_arguments)]
 fn carte_dessin(
     ui: &mut egui::Ui,
     cle: u64,
@@ -1720,9 +1779,11 @@ fn carte_dessin(
     local: &Path,
     enregistre: &Arc<Mutex<Option<(u64, String)>>>,
     id: egui::Id,
+    encadre: bool,
 ) -> Option<Geste> {
     let (mut ouvrir, mut enregistrer, mut copier) = (false, false, false);
-    cadre(ui, pictos::DESSIN, &d.titre, "", None, |ui| {
+    let titre = d.titre.clone();
+    let mut corps = |ui: &mut egui::Ui| {
         let dispo = ui.available_width();
         let taille = match &d.etat {
             EtatDessin::Image { intrinseque, .. } => remplir(*intrinseque, vec2(dispo, haut_max(ui))),
@@ -1747,8 +1808,9 @@ fn carte_dessin(
             EtatDessin::Image { texture, .. } => {
                 ouvrir = image(ui, texture, taille, false, true, id);
                 ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
+                // Dans une carte étroite (le tableau de bord), les boutons passent à la ligne.
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
                     ouvrir |= bouton_lien(ui, pictos::OUVRIR, "Ouvrir en grand").clicked();
                     enregistrer = bouton_lien(ui, pictos::ENREGISTRER, "Enregistrer").clicked();
                     copier = bouton_lien(ui, icones::COPIER, "Copier l'image").clicked();
@@ -1768,7 +1830,12 @@ fn carte_dessin(
                 }
             }
         }
-    });
+    };
+    if encadre {
+        cadre(ui, pictos::DESSIN, &titre, "", None, corps);
+    } else {
+        corps(ui);
+    }
     if enregistrer {
         enregistrer_le_dessin(&d.titre, d.svg.clone(), cle, enregistre.clone(), ui.ctx().clone());
     }
@@ -1786,6 +1853,25 @@ fn carte_dessin(
             None
         }
     }
+}
+
+/// Une carte épinglée au tableau de bord, dans la conversation : ce qui s'est fait ; dans le thème clair, où le tableau
+/// de bord se voit, de quoi aller la voir (le geste `voir_epingle`, que la fenêtre prend pour elle).
+fn epingle(ui: &mut egui::Ui, id: &str, retiree: bool) -> Option<Geste> {
+    let t = teintes(ui);
+    let texte = if retiree { "Retirée du tableau de bord." } else { "Épinglée au tableau de bord." };
+    ui.add(egui::Label::new(RichText::new(texte).size(13.5).color(t.encre)).wrap());
+    if retiree {
+        return None;
+    }
+    if ui.visuals().dark_mode {
+        let ou = "Le tableau de bord se voit dans le thème « Constructo AI » (Réglages, Thème).";
+        ui.add(egui::Label::new(RichText::new(ou).size(12.0).color(t.encre_3)).wrap());
+        return None;
+    }
+    ui.add_space(4.0);
+    let voir = bouton_lien(ui, pictos::EPINGLE, "Voir au tableau de bord").clicked();
+    voir.then(|| Geste { action: "voir_epingle", valeur: Value::String(id.to_string()) })
 }
 
 /// La largeur d'un rendu, en pixels : celle qu'il prend à l'écran, arrondie au palier du dessus, dans la limite des
@@ -2739,7 +2825,7 @@ mod essais {
         for oui in [
             "937,05 $", "(45,00 $)", "-12 %", "8 h", "2026", "1 204,50 $", "1\u{a0}204,50\u{a0}$", "1\u{202f}204",
             "12 km", "3,5 m²", "45 PI2", "17 Ko", "$ 45", "− 3", "+2", "1'000", "9013623395", " 42 ", "30 min",
-            "2,5 j",
+            "2,5 j", "182\u{a0}k$", "1,2 M$", "3 G$",
         ] {
             assert!(ressemble_a_un_nombre(oui), "{oui}");
         }

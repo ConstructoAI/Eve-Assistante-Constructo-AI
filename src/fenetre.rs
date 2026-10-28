@@ -61,6 +61,17 @@ pub fn montrer() {
     imp::montrer();
 }
 
+/// Écrit une valeur texte dans le registre de la personne (`HKCU\cle`, la clé créée au besoin) : l'inscription d'Eve
+/// auprès de Windows pour ses notifications (`notifications.rs`).
+pub(crate) fn ecrire_au_registre(cle: &str, nom: &str, texte: &str) -> Result<(), String> {
+    imp::ecrire_valeur(cle, nom, texte)
+}
+
+/// Efface du registre de la personne la clé `HKCU\cle` et ce qu'elle contient ; absente, rien.
+pub(crate) fn effacer_du_registre(cle: &str) -> Result<(), String> {
+    imp::effacer_cle(cle)
+}
+
 /// Toujours devant les autres fenêtres, ou non. La fenêtre peut ne pas exister encore (Edge s'ouvre) : un fil réessaie
 /// quelques secondes.
 pub fn premier_plan(oui: bool) {
@@ -271,7 +282,7 @@ mod imp {
         WIN32_ERROR,
     };
     use windows::Win32::System::Registry::{
-        HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW,
+        HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegDeleteTreeW, RegGetValueW, RegSetKeyValueW,
     };
     use windows::Win32::System::Threading::{
         AttachThreadInput, GetCurrentThreadId, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -582,6 +593,16 @@ mod imp {
         e.ok().map_err(|erreur| format!("le registre refuse d'écrire « {nom} » ({erreur})"))
     }
 
+    /// Efface HKCU\`cle`, ses sous-clés et ses valeurs ; absente : pas une erreur.
+    pub(super) fn effacer_cle(cle: &str) -> Result<(), String> {
+        let cle_l = large(cle);
+        // SAFETY : une chaîne UTF-16 terminée par un zéro, qui vit pendant l'appel.
+        match unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, PCWSTR(cle_l.as_ptr())) } {
+            ERROR_FILE_NOT_FOUND => Ok(()),
+            e => e.ok().map_err(|erreur| format!("le registre refuse d'effacer « {cle} » ({erreur})")),
+        }
+    }
+
     /// Retire une valeur de HKCU\`cle` ; absente (ou la clé absente) : pas une erreur.
     pub(super) fn supprimer_valeur(cle: &str, nom: &str) -> Result<(), String> {
         let (cle_l, nom_l) = (large(cle), large(nom));
@@ -647,6 +668,10 @@ mod imp {
     }
 
     pub(super) fn supprimer_valeur(_cle: &str, _nom: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    pub(super) fn effacer_cle(_cle: &str) -> Result<(), String> {
         Ok(())
     }
 

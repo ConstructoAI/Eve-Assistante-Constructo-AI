@@ -77,6 +77,19 @@ LUI PARLER
 · Dans sa fenêtre : un lien s'ouvre d'un clic ; « Copier » sous chaque réponse (un tableau se colle en colonnes dans
   Excel) ; une capture d'écran se colle (Ctrl+V) comme une pièce jointe ; sous chaque réponse, sa durée et son coût.
   Une phrase mal entendue ne part pas : Eve le dit, et la met dans la saisie, à corriger.
+· La saisie va à la ligne avec Maj+Entrée ; la flèche du haut reprend tes demandes ; Ctrl+N ouvre une conversation
+  neuve. Remontée loin dans la conversation, un bouton rond t'en ramène au bas.
+· Dans le thème clair de Constructo AI, sa fenêtre est aussi un tableau de bord. Ses cartes se déplacent à la souris
+  (« Ordre d'office » les remet) ; un clic sur une rangée offre ce qu'on en fait : une relance, un suivi, « c'est
+  fait », en parler à Eve, te le rappeler demain. « Ajouter » y épingle une note à toi (sa première ligne est son
+  titre ; elle s'enregistre seule), ou ce que tu demandes à Eve : une liste, des chiffres, un tableau, un dessin, un
+  graphique — des lignes, des aires, des colonnes, des barres, un anneau ; au survol, ses valeurs ; « Voir les
+  données », dans son menu, le montre en tableau. « Actualiser », dans le menu d'une carte d'Eve, la lui fait
+  refaire ; « Retirer » l'enlève (un second clic le confirme). Ce qui y est épinglé vit dans epingles.json, dans son
+  dossier local.
+· Quand sa fenêtre n'est pas devant, un rappel qui sonne, une réponse longue qu'elle a finie ou un accord qu'elle
+  attend s'annoncent aussi par une notification de Windows ; un clic ramène sa fenêtre. Réglages, Sur ce poste,
+  « Notifications de Windows » les coupe.
 · Une conversation par jour : un redémarrage dans la journée reprend celle du jour ; chaque matin, une neuve.
 · Eve vient avec son visage : son portrait et ses poses (programme\portrait du kit, que l'installateur pose chez chaque
   spécialiste), qui prennent la place de l'orbe dans le thème clair de Constructo AI. Réglages › Thème › Portrait d'Eve

@@ -39,12 +39,14 @@ use crate::cerveau::{self, Cerveau, Lancement};
 use crate::connexion::{self, EnCours, Etat as Connexion, Lien, Refus, Retour};
 use crate::ecran::{self, Ecran};
 use crate::entreprise::{self, Entreprise, Lecture, Panne};
+use crate::epingles::{self, Epingles};
 use crate::fenetre;
 use crate::historique::{self, Entree};
 use crate::journal;
 use crate::memoire::{self, Echange};
 use crate::micro::{self, Micro};
 use crate::mise_a_jour::{self, Empeche, Relance};
+use crate::notifications::Notifications;
 use crate::oreille::Demande;
 use crate::profils::{self, Laisse, Laisses};
 use crate::rappels::{self, Rappels};
@@ -227,10 +229,12 @@ const EMOTION_DUREE: Duration = Duration::from_secs(90);
 const AU_CHAUD_APRES: Duration = Duration::from_secs(50 * 60);
 const FIL_MAX: usize = 80;
 /// Les interrupteurs des réglages de la fenêtre (le geste `reglage`) : seuls ceux-là s'y changent, jamais un privilège.
-const INTERRUPTEURS: [&str; 9] = [
+const INTERRUPTEURS: [&str; 10] = [
     "eveil", "interruption", "sourdine", "alertes.suspects", "alertes.factures", "alertes.pieces",
-    "alertes.rendez_vous", "devant", "historique",
+    "alertes.rendez_vous", "devant", "historique", "notifications",
 ];
+/// Une réponse de plus de tant, finie quand la fenêtre n'est pas devant, se dit par une notification de Windows.
+const NOTIFIER_APRES: Duration = Duration::from_secs(8);
 
 /// Comment Eve nomme, à voix haute et dans son fil, celle qui travaille derrière elle : l'Adjointe de la trousse, ou
 /// Claude là où le dossier porte sa propre consigne (une Eve qui n'est pas celle d'Entrepreneur Général).
@@ -525,6 +529,13 @@ pub struct Chef {
     /// Les rappels et les minuteries (`rappels.json` du dossier local), et la dernière fois qu'on les a regardés.
     rappels: Rappels,
     rappels_vus: Option<Instant>,
+    /// Les cartes épinglées au tableau de bord (`epingles.json` du dossier local) : les notes de la personne, celles
+    /// de Claude ; relues avec les rappels, une fois par seconde.
+    epingles: Epingles,
+    /// Les notifications de Windows, et si la fenêtre est devant (elle le dit ; sans elle — la page d'Edge —, on la croit
+    /// devant : pas de notification).
+    notifications: Notifications,
+    fenetre_devant: bool,
     /// La panne de Claude vue dans le tour (sa sorte : « rate_limit », « overloaded », « reseau »…), dite à sa fin ; un
     /// nouvel essai de l'API déjà dit dans le tour.
     panne: String,
@@ -719,6 +730,7 @@ impl Chef {
         let lien = Lien::du_poste();
         let connexion = if espace.constructo { lien.charger() } else { Connexion::default() };
         let claude = cerveau::trouver_claude();
+        let notifications = Notifications::demarrer(nom_affiche(), &dossier_local(), rapport.clone());
         let micro = match Micro::ouvrir() {
             Ok(m) => {
                 journal::ecrire(&format!("micro : {}", m.nom));
@@ -786,6 +798,9 @@ impl Chef {
             annulations: Annulations::nouvelles(dossier_local().join("annuler")),
             rappels: Rappels::ouvrir(&dossier_local()),
             rappels_vus: None,
+            epingles: Epingles::ouvrir(&dossier_local()),
+            notifications,
+            fenetre_devant: true,
             panne: String::new(),
             reessai_dit: false,
             limite: None,
@@ -1167,6 +1182,30 @@ impl Chef {
             // Ce que montre le tableau de bord (« Tout », « Entreprise », « Famille »), choisi en haut du tableau.
             ("vue_du_tableau", Some(v)) if crate::reglages::VUES_DU_TABLEAU.iter().any(|x| x.0 == v) => {
                 self.changer_reglage("vue_du_tableau", json!(v))
+            }
+            // « Me le rappeler demain », choisi dans le menu d'une rangée du tableau de bord : un rappel à 9 h demain,
+            // posé sans Claude, dit au fil.
+            ("rappel_demain", Some(t)) if !t.trim().is_empty() => self.rappeler_demain(t.trim()),
+            // Une note du tableau de bord, telle que la personne vient de l'écrire (son id, que donne la fenêtre, et
+            // son texte) ; une carte retirée de son menu.
+            ("epingle_note", _) => {
+                let (id, texte) = (valeur["id"].as_str().unwrap_or(""), valeur["texte"].as_str().unwrap_or(""));
+                if let Err(e) = self.epingles.noter(id, texte, &journal::date_et_heure()) {
+                    self.systeme(&format!("La note ne s'enregistre pas : {e}."));
+                }
+            }
+            // La fenêtre devant ou non (ses notifications) ; une notification cliquée ramène la fenêtre.
+            ("premier_plan", _) => self.fenetre_devant = valeur.as_bool().unwrap_or(true),
+            ("notification", _) => fenetre::montrer(),
+            ("epingle_retirer", Some(id)) => match self.epingles.retirer(id) {
+                Ok(_) => journal::ecrire(&format!("carte retirée du tableau de bord : {id}")),
+                Err(e) => self.systeme(&format!("La carte ne se retire pas : {e}.")),
+            },
+            // L'ordre des cartes du tableau de bord, donné en les déplaçant : leurs clés (vide : l'ordre d'office).
+            ("ordre_du_tableau", _) => {
+                let cles: Vec<&str> = valeur.as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                let cles: Vec<&str> = cles.into_iter().filter(|c| !c.is_empty() && c.len() <= 80).take(200).collect();
+                self.changer_reglage("ordre_du_tableau", json!(cles))
             }
             // Un profil, choisi dans le menu de la barre ou dans les réglages (son nom ; celui d'office y ramène).
             ("profil", Some(nom)) => self.choisir_le_profil(nom),
@@ -3167,12 +3206,20 @@ impl Chef {
                 if let Some(l) = self.fil.last_mut() {
                     l.tour = tour;
                 }
+                // Une réponse longue — ou le compte rendu d'un agent, qui a travaillé en arrière-plan : un tour sans
+                // demande —, finie pendant qu'on était ailleurs : une notification de Windows, ce qui s'en dit.
+                let longue = self.debut_tour.is_some_and(|d| d.elapsed() >= NOTIFIER_APRES);
+                if longue || demande.is_none() {
+                    let dit = parole::pour_la_voix(&affiche);
+                    self.notifier("Réponse prête", if dit.trim().is_empty() { &affiche } else { &dit });
+                }
                 // Ses pages pour la voix : la première vient de se dire (en sourdine, « répète » la dira).
                 self.pages = parole::pages_pour_la_voix(&affiche);
                 self.page = 1;
-                // Les rappels que Claude a posés : ses cartes « rappel », dans rappels.json.
+                // Ce que les cartes de Claude posent : ses rappels (rappels.json), ce qu'il épingle au tableau de bord
+                // (epingles.json).
                 for json in crate::natif::cartes_de(&affiche) {
-                    self.poser_un_rappel_de_claude(&json);
+                    self.prendre_la_carte_de_claude(&json);
                 }
             }
             if !a_parle {
@@ -3336,6 +3383,7 @@ impl Chef {
             }
             Decision::Confirmer { quoi, detail } => {
                 journal::ecrire(&format!("accord demandé : {quoi} — {}", garde::ecourter(&detail, 300)));
+                self.notifier("Eve attend ton accord", &majuscule(&quoi));
                 let premiere = self.attentes.is_empty();
                 self.numero_accord += 1;
                 self.attentes.push_back(Attente {
@@ -4240,13 +4288,60 @@ impl Chef {
         }
     }
 
-    /// Une carte « rappel » de Claude (`{"type":"rappel","a":"AAAA-MM-JJ HH:MM","texte":"…"}`) : posée dans
-    /// rappels.json. Sa réponse a déjà dit l'heure ; une carte fausse va au journal.
-    fn poser_un_rappel_de_claude(&mut self, json: &str) {
-        let Ok(v) = serde_json::from_str::<Value>(json).or_else(|_| json5::from_str::<Value>(json)) else { return };
-        if v["type"] != "rappel" {
-            return;
+    /// Une notification de Windows (`titre`, `texte`), si la personne les veut et que la fenêtre n'est pas devant : sous
+    /// ses yeux, Eve se voit et s'entend déjà.
+    fn notifier(&self, titre: &str, texte: &str) {
+        if self.reglages.notifications && !self.fenetre_devant {
+            self.notifications.montrer(titre, texte);
         }
+    }
+
+    /// Un rappel pour demain à 9 h (« Me le rappeler demain », au tableau de bord) : posé, et dit au fil.
+    fn rappeler_demain(&mut self, texte: &str) {
+        let texte: String = texte.chars().take(300).collect();
+        let demain = parole::Quand::A { heure: 9, minute: 0, demain: true };
+        let Some(a) = rappels::heure_du_rappel(demain, &journal::date_et_heure()) else { return };
+        match self.rappels.poser(a.clone(), texte.clone(), false) {
+            Ok(_) => {
+                journal::ecrire(&format!("rappel posé du tableau de bord, {a} : {texte}"));
+                self.systeme(&format!("Rappel {} : {texte}", rappels::heure_dite(&a, &journal::date())));
+            }
+            Err(e) => self.systeme(&format!("Le rappel ne se pose pas : {e}")),
+        }
+    }
+
+    /// Une carte d'une réponse de Claude : un rappel ([`Chef::poser_un_rappel_de_claude`]), une carte épinglée au
+    /// tableau de bord ([`Chef::epingler`]) ; les autres ne posent rien.
+    fn prendre_la_carte_de_claude(&mut self, json: &str) {
+        let Ok(v) = serde_json::from_str::<Value>(json).or_else(|_| json5::from_str::<Value>(json)) else { return };
+        match &v["type"] {
+            Value::String(t) if t == "rappel" => self.poser_un_rappel_de_claude(&v, json),
+            Value::String(t) if t == "epingle" => self.epingler(v),
+            _ => {}
+        }
+    }
+
+    /// Une carte « epingle » de Claude : posée au tableau de bord (ou retirée) dans epingles.json ; sa réponse l'a
+    /// déjà dite. Ce qu'elle fait va au journal ; un refus aussi, et au fil.
+    fn epingler(&mut self, v: Value) {
+        let Value::Object(carte) = v else { return };
+        match self.epingles.epingler(carte, &journal::date_et_heure()) {
+            Ok(epingles::Fait::Posee { id, titre, neuve }) => {
+                let quoi = if neuve { "épinglée" } else { "mise à jour" };
+                journal::ecrire(&format!("carte {quoi} au tableau de bord par Claude : {id} ({titre})"));
+            }
+            Ok(epingles::Fait::Retiree { id, .. }) => journal::ecrire(&format!("carte retirée par Claude : {id}")),
+            Ok(epingles::Fait::Absente(id)) => journal::ecrire(&format!("carte à retirer déjà absente : {id}")),
+            Err(e) => {
+                journal::ecrire(&format!("carte de Claude non épinglée : {e}"));
+                self.systeme(&format!("La carte ne s'épingle pas au tableau de bord : {e}."));
+            }
+        }
+    }
+
+    /// Une carte « rappel » de Claude (`{"type":"rappel","a":"AAAA-MM-JJ HH:MM","texte":"…"}`, `json` tel
+    /// qu'il l'a écrite) : posée dans rappels.json. Sa réponse a déjà dit l'heure ; une carte fausse va au journal.
+    fn poser_un_rappel_de_claude(&mut self, v: &Value, json: &str) {
         let texte = v["texte"].as_str().unwrap_or("").trim();
         let texte = if texte.is_empty() { "c'est l'heure." } else { texte };
         match v["a"].as_str().and_then(rappels::heure_ecrite) {
@@ -4266,6 +4361,8 @@ impl Chef {
         }
         self.rappels_vus = Some(maintenant);
         self.rappels.relire();
+        // Les cartes épinglées aussi (on a pu récrire leur fichier à la main) : la fenêtre les reçoit à la publication.
+        self.epingles.relire();
         let heure = journal::date_et_heure();
         for r in self.rappels.sonner(&heure) {
             let mut phrase = r.phrase();
@@ -4277,6 +4374,10 @@ impl Chef {
             journal::ecrire(&format!("rappel sonné : {phrase}"));
             self.son(Son::Alerte);
             self.ajouter("alerte", phrase.clone(), Vec::new());
+            match phrase.strip_prefix("Rappel : ") {
+                Some(texte) => self.notifier("Rappel", texte),
+                None => self.notifier("Minuterie", &phrase),
+            }
             self.dire_a_voix_haute(&phrase);
         }
     }
@@ -4407,6 +4508,22 @@ impl Chef {
             "precedente": self.precedente,
             "relance": self.relance.is_some() || self.relance_dite.is_some(),
         });
+        // Les réglages de la fenêtre, à part : l'état entier, d'un seul json!, dépasserait la limite de récursion du
+        // compilateur.
+        let reglages = json!({
+            "eveil": self.reglages.eveil,
+            "interruption": self.reglages.interruption,
+            "sourdine": self.reglages.sourdine,
+            "alertes": { "suspects": a.suspects, "factures": a.factures, "pieces": a.pieces, "rendez_vous": a.rendez_vous },
+            "devant": self.reglages.devant,
+            "notifications": self.reglages.notifications,
+            "demarrage": self.demarrage_windows,
+            "historique": self.reglages.historique,
+            "raccourci": "Ctrl+Alt+E",
+            // Le cerveau : la rubrique « Cerveau » des réglages coche ceux qu'Eve offre (reglages::MODELES, EFFORTS).
+            "modele": self.reglages.modele,
+            "effort": self.reglages.effort,
+        });
         let s = json!({
             "etat": etat,
             "libelle": libelle,
@@ -4417,6 +4534,9 @@ impl Chef {
             "qui": self.reglages.qui,
             "theme": self.reglages.theme,
             "vue_du_tableau": self.reglages.vue_du_tableau,
+            "ordre_du_tableau": self.reglages.ordre_du_tableau,
+            // Les cartes épinglées au tableau de bord, la plus récente en tête.
+            "epingles": self.epingles.liste(),
             // La comptabilité que lit la fenêtre (l'encaisse, les échéances fiscales) : son dossier, ou rien.
             "comptabilite": self.reglages.comptabilite,
             "nom": crate::reglages::nom_affiche(),
@@ -4442,19 +4562,7 @@ impl Chef {
                 .collect::<Vec<_>>(),
             "en_cours": if self.en_cours.trim().is_empty() || self.prechauffage { Value::Null } else { json!({ "texte": self.en_cours }) },
             "voix": { "liste": self.voix_liste, "choisie": self.voix_choisie },
-            "reglages": {
-                "eveil": self.reglages.eveil,
-                "interruption": self.reglages.interruption,
-                "sourdine": self.reglages.sourdine,
-                "alertes": { "suspects": a.suspects, "factures": a.factures, "pieces": a.pieces, "rendez_vous": a.rendez_vous },
-                "devant": self.reglages.devant,
-                "demarrage": self.demarrage_windows,
-                "historique": self.reglages.historique,
-                "raccourci": "Ctrl+Alt+E",
-                // Le cerveau : la rubrique « Cerveau » des réglages coche ceux qu'Eve offre (reglages::MODELES, EFFORTS).
-                "modele": self.reglages.modele,
-                "effort": self.reglages.effort,
-            },
+            "reglages": reglages,
             "eveil": self.reglages.eveil,
             "touche": self.reglages.touche().1,
             "camera": self.camera,

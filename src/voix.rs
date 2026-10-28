@@ -619,11 +619,12 @@ impl Douceur {
             // par seconde, le double d'un débit naturel, et Whisper n'y comprenait plus rien (mesuré ; à l'écoute :
             // « robotique… ou trop vite »). Le calme de `noise_scale` rend la voix plus nette sans l'aplatir, mesuré
             // deux fois : le 2026-10-26 (huit phrases, trois tirages), l'oreille d'Eve en entendait 5,6 % des mots de
-            // travers à 0,45, contre 10,6 % à 0,667 ; le 2026-10-28 (trente réponses, deux et trois tirages, par la
-            // chaîne du studio), 8,0 % à 0,35 contre 13,0 % à 0,45 sur celles qui n'ont pas de nombres (-0,8 ± 0,4
-            // mot par réponse), la mélodie un peu plus vive (3,9 demi-tons d'écart, contre 3,75), le même débit, la
-            // même note d'un juge automatique (UTMOS22). Les aigus adoucis : la chaîne du studio, à la place d'un
-            // passe-bas qui étouffait la voix ([`studio::Chaine::DOUCE`]).
+            // travers à 0,45, contre 10,6 % à 0,667 ; le 2026-10-28 (trente réponses, trois ou quatre tirages de
+            // chaque, par la chaîne du studio), sur les dix-huit qui n'ont pas de nombres : 9,7 % à 0,35, contre
+            // 13,6 % à 0,45 (-0,6 ± 0,4 mot par réponse) et 12,8 % à 0,25 (+0,5 ± 0,2 : plus bas n'est pas mieux,
+            // même si un juge automatique, UTMOS22, préfère encore un peu 0,25) ; à 0,35, la mélodie un peu plus
+            // vive (3,9 demi-tons d'écart, contre 3,75), le même débit. Les aigus adoucis : la chaîne du studio, à la
+            // place d'un passe-bas qui étouffait la voix ([`studio::Chaine::DOUCE`]).
             1 => Douceur { bruit: 0.35, rythme: 0.8, silence: 0.35, chaine: Some(studio::Chaine::DOUCE) },
             // Plus calme encore que la douceur 1.
             _ => Douceur { bruit: 0.30, rythme: 0.8, silence: 0.40, chaine: Some(studio::Chaine::PLUS_DOUCE) },

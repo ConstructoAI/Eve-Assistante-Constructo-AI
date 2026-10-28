@@ -1243,28 +1243,32 @@ pub fn demande_le_cout(dit: &str) -> bool {
 }
 
 /// La personne demande-t-elle d'annuler la dernière modification de fichiers ? « Annule » seul, ou « annule ça »,
-/// arrête ce qui est en cours ([`est_un_arret`]) : il faut dire ce qu'on annule.
+/// arrête ce qui est en cours ([`est_un_arret`]) : il faut dire ce qu'on annule. Une phrase courte seulement (dix
+/// mots au plus, le nom d'Eve et la politesse ôtés) : une demande plus longue, ou un texte collé, qui parle de
+/// « revenir en arrière » ou de « remettre comme avant » va à Claude — elle ne défait pas des fichiers.
 pub fn demande_d_annuler(dit: &str) -> bool {
     let n = normaliser(dit);
-    [
-        "annule la derniere modification",
-        "annule ta derniere modification",
-        "annule la modification",
-        "annule tes modifications",
-        "annule le dernier changement",
-        "annule tes changements",
-        "annule ce que tu viens de faire",
-        "defais ca",
-        "defais le",
-        "defais la derniere modification",
-        "remets comme avant",
-        "remets le comme avant",
-        "remets la comme avant",
-        "remets les comme avant",
-        "reviens en arriere",
-    ]
-    .iter()
-    .any(|e| contient(&n, e))
+    let n = sans_politesse(&n);
+    n.split_whitespace().count() <= 10
+        && [
+            "annule la derniere modification",
+            "annule ta derniere modification",
+            "annule la modification",
+            "annule tes modifications",
+            "annule le dernier changement",
+            "annule tes changements",
+            "annule ce que tu viens de faire",
+            "defais ca",
+            "defais le",
+            "defais la derniere modification",
+            "remets comme avant",
+            "remets le comme avant",
+            "remets la comme avant",
+            "remets les comme avant",
+            "reviens en arriere",
+        ]
+        .iter()
+        .any(|e| contient(n, e))
 }
 
 /// La personne demande-t-elle d'arrêter ce qui est en cours ? Une phrase courte seulement : « arrête de chercher les
@@ -2192,6 +2196,16 @@ mod essais {
         assert!(demande_d_annuler("Défais ça"));
         assert!(!demande_d_annuler("Annule ça"));
         assert!(est_un_arret("Annule ça"));
+        // Le nom d'Eve et la politesse ne comptent pas ; une longue demande, ou un texte collé, va à Claude.
+        assert!(demande_d_annuler("Eve, annule la dernière modification que tu viens de faire, s'il te plaît"));
+        assert!(!demande_d_annuler(
+            "Pour la soumission du garage, reviens en arrière sur le prix du béton et refais le total avec les taxes"
+        ));
+        assert!(!demande_d_annuler(
+            "Notes de la réunion :
+- le client dit : remets comme avant la cloison du sous-sol
+- le plâtrier jeudi"
+        ));
     }
 
     use super::*;

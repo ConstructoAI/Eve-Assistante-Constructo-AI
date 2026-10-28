@@ -3230,10 +3230,12 @@ const QUI_D_ESSAI: &str = "Essai";
 /// recherche, rien qui corresponde, une conversation et sa suite, le retour, ce qui a mal fini, Échap, la réouverture,
 /// une personne sans historique, les cartes, la reprise, une fenêtre étroite, le clic dehors, le clavier — avec une
 /// capture PNG à chaque étape dans DOSSIER, puis ferme la fenêtre ; ses clics, ses frappes et sa molette sont des
-/// événements d'egui donnés à cette fenêtre seule.
+/// événements d'egui donnés à cette fenêtre seule. `--clair` : le panneau dans le thème « Constructo AI », comme la
+/// fenêtre le pose dans ce thème (ses visuels, ses bulles claires), sur le bleu pâle de son fond.
 pub fn historique(args: &[String]) -> i32 {
     let captures =
         args.iter().position(|a| a == "--captures").and_then(|i| args.get(i + 1)).map(std::path::PathBuf::from);
+    let clair = args.iter().any(|a| a == "--clair");
     let dossier = args
         .iter()
         .enumerate()
@@ -3282,6 +3284,7 @@ pub fn historique(args: &[String]) -> i32 {
             pointeur: egui::Pos2::ZERO,
             captures,
             a_capturer: Vec::new(),
+            clair,
         }))
     });
     match eframe::run_native(titre, options, creer) {
@@ -3625,6 +3628,8 @@ struct EssaiDeLHistorique {
     pointeur: egui::Pos2,
     captures: Option<std::path::PathBuf>,
     a_capturer: Vec<&'static str>,
+    /// Le thème « Constructo AI » (`--clair`).
+    clair: bool,
 }
 
 impl EssaiDeLHistorique {
@@ -3767,7 +3772,12 @@ impl eframe::App for EssaiDeLHistorique {
                 });
             });
         // La conversation, dessous : ce que le panneau recouvre, et une saisie pour la ressemblance.
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(couleurs::SURFACE)).show(ui, |ui| {
+        let fond = if self.clair { crate::natif::theme::erp::FOND_2 } else { couleurs::SURFACE };
+        let clair = self.clair;
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(fond)).show(ui, |ui| {
+            if clair {
+                crate::natif::theme::visuels_du_panneau(ui.visuals_mut());
+            }
             let r = ui.max_rect();
             let colonne = egui::Rect::from_center_size(r.center(), vec2(r.width().min(800.0), r.height()));
             let colonne = colonne.shrink2(vec2(16.0, 0.0));
@@ -3794,7 +3804,7 @@ impl eframe::App for EssaiDeLHistorique {
                     ("eve", "Avec plaisir.", "09:31"),
                 ] {
                     let ligne = Ligne { de, texte, heure, ancien: false, pieces: &[], en_cours: false, tour: "" };
-                    natif::bulle(ui, &ligne, cartes, &mut gestes);
+                    natif::bulle_du_theme(ui, &ligne, cartes, &mut gestes);
                 }
             });
             let champ = saisie.shrink2(vec2(0.0, 10.0));
@@ -3814,6 +3824,9 @@ impl eframe::App for EssaiDeLHistorique {
                 .constrain(false)
                 .fade_in(false)
                 .show(&ctx, |ui| {
+                    if clair {
+                        crate::natif::theme::visuels_du_panneau(ui.visuals_mut());
+                    }
                     ui.scope_builder(UiBuilder::new().max_rect(place), |ui| h.dessiner(ui, qui, cartes)).inner
                 })
                 .inner;
@@ -7512,6 +7525,7 @@ impl ChefDesPieces {
                         let efface = i.is_some_and(|i| std::fs::remove_file(&self.pieces.remove(i).2).is_ok());
                         self.recus.push(RecuDesPieces::Retrait { id: id.to_string(), efface });
                     }
+                    ("premier_plan", _) => {}
                     ("piece_erreur", Some(e)) => {
                         self.fil.push(Self::ligne("systeme", e, "", &[]));
                         self.recus.push(RecuDesPieces::Refus(e.to_string()));
@@ -8110,6 +8124,18 @@ pub fn profils(args: &[String]) -> i32 {
             return 2;
         }
     };
+    // Le tableau de bord du thème clair : les données inventées de l'essai des panneaux (personne de vrai), réécrites
+    // à chaque lancement dans le dossier temporaire.
+    let donnees = std::env::temp_dir().join("eve-essai-profils");
+    let maintenant = crate::journal::horodatage().get(11..).unwrap_or("12-00-00").replace('-', ":");
+    let jour = crate::centre::numero_du_jour(&crate::journal::date());
+    if let Some(jour) = jour
+        && let Err(e) =
+            ecrire_les_panneaux_d_essai(&donnees, jour, seconde_du_jour(&maintenant).unwrap_or(43_200), false)
+    {
+        eprintln!("{} : {e}", donnees.display());
+        return 1;
+    }
     if let Some(c) = &captures
         && let Err(e) = std::fs::create_dir_all(c)
     {
@@ -8143,7 +8169,7 @@ pub fn profils(args: &[String]) -> i32 {
     let (chef_de_l_essai, problemes_de_l_essai, zones_de_l_essai) = (chef.clone(), problemes.clone(), zones.clone());
     let creer: eframe::AppCreator<'_> = Box::new(move |cc| {
         Ok(Box::new(EssaiDesProfils {
-            fenetre: crate::natif::Fenetre::nouvelle(cc, abonnement, rapport, None),
+            fenetre: crate::natif::Fenetre::nouvelle(cc, abonnement, rapport, Some(donnees)),
             chef: chef_de_l_essai,
             parcours: parcours_des_profils(),
             debut: Instant::now(),
@@ -8175,6 +8201,50 @@ pub fn profils(args: &[String]) -> i32 {
             c.choix == ["Estimateur", "Essai", "Designer"],
         ),
         ("aucun autre geste au chef".to_string(), c.autres.iter().all(|a| a == "quitter")),
+        (
+            "la saisie : deux lignes (Maj+Entrée) envoyées d'Entrée, en une seule demande".to_string(),
+            c.textes.first().is_some_and(|t| t == "Ligne un\nLigne deux"),
+        ),
+        ("Ctrl+N : une nouvelle conversation".to_string(), c.nouvelles == 1),
+        (
+            "une note ajoutée au tableau de bord, écrite au clavier, dite au chef d'une seule fois, enregistrée"
+                .to_string(),
+            {
+                let ecrite = "Appeler le plombier\n- demain avant 10 h";
+                let neuves: Vec<&(String, String)> = c.notes.iter().filter(|(id, _)| id != "note-1").collect();
+                neuves.len() == 1
+                    && neuves[0].0.starts_with("note-")
+                    && neuves[0].1 == ecrite
+                    && c.epingles.liste().iter().any(|x| crate::epingles::champ(x, "texte") == ecrite)
+            },
+        ),
+        (
+            "le menu d'une carte d'Eve : « Actualiser » le lui demande, avec son titre et son id".to_string(),
+            c.textes.iter().any(|t| {
+                t.starts_with("Actualise la carte « Soumissions du mois » du tableau de bord (id soumissions)")
+            }),
+        ),
+        (
+            "« Retirer », confirmé d'un second clic : la carte retirée, et elle seule".to_string(),
+            c.retirees == ["a-rappeler"]
+                && !c.epingles.liste().iter().any(|x| crate::epingles::champ(x, "id") == "a-rappeler")
+                && c.epingles.liste().len() == 9,
+        ),
+        (
+            "le menu d'une rangée : « C'est fait » envoie sa demande à Eve, « Me le rappeler demain » pose un rappel"
+                .to_string(),
+            c.textes.get(1).is_some_and(|t| t.starts_with("C'est fait (« Décision du jour », au tableau de bord) :"))
+                && c.rappels.len() == 1
+                && c.rappels[0].starts_with("Décision du jour : "),
+        ),
+        (
+            "le tableau de bord : la décision du jour, tirée et lâchée sur les courriels, va avant eux (un seul ordre)"
+                .to_string(),
+            c.ordres.len() == 1 && {
+                let place = |cle: &str| c.ordre.iter().position(|x| x == cle);
+                place("courriels-non-lus").zip(place("decision-du-jour")).is_some_and(|(c, d)| d + 1 == c)
+            },
+        ),
     ];
     verifications.extend(zones);
     verifications.push(("le parcours va jusqu'au bout".to_string(), problemes.is_empty()));
@@ -8200,8 +8270,22 @@ struct ChefDesProfils {
     actif: String,
     theme: &'static str,
     fil: Vec<Value>,
-    /// Les profils choisis par la fenêtre, dans l'ordre ; ses autres gestes.
+    /// Les profils choisis par la fenêtre, dans l'ordre ; les demandes qu'elle a envoyées (geste `texte`) ; les
+    /// nouvelles conversations (Ctrl+N) ; ses autres gestes.
     choix: Vec<String>,
+    textes: Vec<String>,
+    nouvelles: usize,
+    /// L'ordre des cartes du tableau de bord, que la fenêtre a donné en en déplaçant une, et chacun de ceux reçus.
+    ordre: Vec<String>,
+    ordres: Vec<Vec<String>>,
+    /// Les rappels de demain demandés du tableau de bord (geste `rappel_demain`).
+    rappels: Vec<String>,
+    /// Les cartes épinglées : un vrai magasin (`epingles.json`, dans un dossier temporaire), que la fenêtre tient par
+    /// ses gestes et où Eve épingle les siennes au pas `Epingler` ; les notes reçues (leur id, leur texte), les
+    /// cartes retirées.
+    epingles: crate::epingles::Epingles,
+    notes: Vec<(String, String)>,
+    retirees: Vec<String>,
     autres: Vec<String>,
     fini: bool,
 }
@@ -8212,12 +8296,52 @@ impl ChefDesProfils {
         ChefDesProfils {
             actif: PROFILS_D_ESSAI[0].0.to_string(),
             theme: "centre",
-            fil: vec![
-                serde_json::json!({ "de": "eve", "texte": bonjour, "heure": "09:30", "pieces": [], "ancien": false }),
-            ],
+            // Une conversation assez longue pour défiler (le bouton du bas du fil), puis le mot d'accueil.
+            fil: (1..=12)
+                .flat_map(|n| {
+                    [
+                        serde_json::json!({ "de": "toi", "texte": format!("Une question d'essai, la {n}e."),
+                            "heure": "09:00", "pieces": [] }),
+                        serde_json::json!({ "de": "eve", "texte": format!("La réponse d'essai à la {n}e question."),
+                            "heure": "09:00", "pieces": [], "ancien": false }),
+                    ]
+                })
+                .chain([serde_json::json!({
+                    "de": "eve", "texte": bonjour, "heure": "09:30", "pieces": [], "ancien": false
+                })])
+                .collect(),
             choix: Vec::new(),
+            textes: Vec::new(),
+            nouvelles: 0,
+            ordre: Vec::new(),
+            ordres: Vec::new(),
+            rappels: Vec::new(),
+            epingles: crate::epingles::Epingles::ouvrir(&{
+                let d = std::env::temp_dir().join(format!("eve-essai-profils-epingles-{}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&d);
+                let _ = std::fs::create_dir_all(&d);
+                d
+            }),
+            notes: Vec::new(),
+            retirees: Vec::new(),
             autres: Vec::new(),
             fini: false,
+        }
+    }
+
+    /// Ce qu'Eve épingle au pas `Epingler`, comme si Claude venait de répondre (ses cartes d'essai, la plus récente en
+    /// tête) ; et une note de la personne, écrite plus tôt.
+    fn epingler(&mut self) {
+        let _ = self.epingles.noter("note-1", "Épicerie\n- lait\n- pain\n- œufs", "2026-10-28 08:00:00");
+        for json in CARTES_EPINGLEES_D_ESSAI.iter().rev() {
+            match serde_json::from_str::<Value>(json) {
+                Ok(Value::Object(c)) => {
+                    if let Err(e) = self.epingles.epingler(c, "2026-10-28 09:12:00") {
+                        eprintln!("essai : une carte d'essai ne s'épingle pas : {e}");
+                    }
+                }
+                _ => eprintln!("essai : une carte d'essai ne se lit pas : {json}"),
+            }
         }
     }
 
@@ -8233,6 +8357,30 @@ impl ChefDesProfils {
             }
             ("theme", Some(t)) => {
                 self.theme = crate::reglages::THEMES.iter().find(|x| x.0 == t).map_or("centre", |x| x.0)
+            }
+            ("texte", Some(t)) => {
+                let ligne = serde_json::json!({ "de": "toi", "texte": t, "heure": "09:31", "pieces": [] });
+                self.fil.push(ligne);
+                self.textes.push(t.to_string());
+            }
+            ("nouvelle", _) => self.nouvelles += 1,
+            ("rappel_demain", Some(t)) => self.rappels.push(t.to_string()),
+            ("premier_plan", _) => {}
+            ("epingle_note", _) => {
+                let (id, texte) = (valeur["id"].as_str().unwrap_or(""), valeur["texte"].as_str().unwrap_or(""));
+                if let Err(e) = self.epingles.noter(id, texte, "2026-10-28 09:32:00") {
+                    eprintln!("essai : la note ne s'écrit pas : {e}");
+                }
+                self.notes.push((id.to_string(), texte.to_string()));
+            }
+            ("epingle_retirer", Some(id)) => {
+                let _ = self.epingles.retirer(id);
+                self.retirees.push(id.to_string());
+            }
+            ("ordre_du_tableau", _) => {
+                self.ordre =
+                    valeur.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
+                self.ordres.push(self.ordre.clone());
             }
             _ => self.autres.push(action),
         }
@@ -8250,6 +8398,8 @@ impl ChefDesProfils {
             "niveau": 0.0,
             "qui": "Sam",
             "theme": self.theme,
+            "ordre_du_tableau": self.ordre,
+            "epingles": self.epingles.liste(),
             "nom": PROFILS_D_ESSAI[0].0,
             "profil": self.actif,
             "profils": profils,
@@ -8284,6 +8434,20 @@ impl ChefDesProfils {
         .to_string()
     }
 }
+
+/// Les cartes qu'Eve épingle dans l'essai de la fenêtre (le pas `Epingler`), comme Claude les écrirait d'après la partie
+/// « TABLEAU DE BORD » de sa consigne : des chiffres, une liste, un tableau, un dessin, puis quatre graphiques (des
+/// lignes, des barres horizontales, un anneau, des colonnes empilées). Des données inventées.
+const CARTES_EPINGLEES_D_ESSAI: [&str; 8] = [
+    r#"{"type":"epingle","id":"soumissions","titre":"Soumissions du mois","sorte":"chiffres","source":"ERP, les devis d'octobre","chiffres":[{"valeur":"48","libelle":"Soumissions envoyées","ecart":"+6 depuis septembre"},{"valeur":"31 %","libelle":"Taux de signature","ecart":"−4 points"},{"valeur":"12","libelle":"En attente de réponse","ecart":"−3 depuis lundi","bon":"baisse"}]}"#,
+    r#"{"type":"epingle","id":"a-rappeler","titre":"À rappeler cette semaine","sorte":"liste","teinte":"indigo","rangees":[{"tete":"Lundi","teinte":"bleu","texte":"Marc Gagnon, la cuisine","valeur":"9 h"},{"tete":"Échue","teinte":"rouge","texte":"Facture 1043, Tremblay","valeur":"34 jours","detail":"relancée le 12"},"Commander le gypse du chantier Exempleville"],"mention":"D'après l'agenda et les factures de l'ERP"}"#,
+    r#"{"type":"epingle","id":"heures-semaine","titre":"Heures de la semaine","sorte":"tableau","colonnes":["Employé","Heures","Chantier"],"lignes":[["Alex","38,5","Exempleville"],["Sam","41","Bureau"],["Charlie","22","Exempleville"]],"pied":["Total","101,5",""]}"#,
+    r#"{"type":"epingle","id":"plan-terrasse","titre":"Terrasse arrière","sorte":"dessin","svg":"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 360 200'><title>Terrasse arrière</title><rect x='40' y='30' width='280' height='130' rx='6' fill='#E8D9C4' stroke='#8A6B45' stroke-width='3'/><rect x='150' y='12' width='60' height='18' fill='#9AA8B5'/><text x='180' y='26' font-size='11' text-anchor='middle' fill='#1F2937'>Porte</text><text x='180' y='100' font-size='15' text-anchor='middle' fill='#1F2937'>4,2 m × 3,1 m</text><text x='180' y='188' font-size='11' text-anchor='middle' fill='#605E5C'>Cèdre, 16 pi²</text></svg>"}"#,
+    r#"{"type":"epingle","id":"ventes-mensuelles","titre":"Ventes par mois","sorte":"graphique","forme":"lignes","unite":"k$","etiquettes":["mai","juin","juil.","août","sept.","oct."],"series":[{"nom":"2026","valeurs":[182,205,231,198,244,262]},{"nom":"2025","valeurs":[160,171,190,188,201,215]}],"mention":"Source : Constructo AI"}"#,
+    r#"{"type":"epingle","id":"heures-par-chantier","titre":"Heures par chantier, ce mois-ci","sorte":"graphique","forme":"horizontales","unite":"h","etiquettes":["Rénovation Gagnon","Agrandissement Tremblay","Garage Exempleville","Cuisine Roy"],"valeurs":[124,86,52,31]}"#,
+    r#"{"type":"epingle","id":"depenses","titre":"Dépenses d'octobre","sorte":"graphique","forme":"anneau","unite":"k$","etiquettes":["Main-d'œuvre","Matériaux","Sous-traitants","Équipement","Autres frais"],"valeurs":[182,134,65,35,17]}"#,
+    r#"{"type":"epingle","id":"soumissions-trimestre","titre":"Soumissions par trimestre","sorte":"graphique","forme":"empilees","etiquettes":["T1","T2","T3","T4"],"series":[{"nom":"Signées","valeurs":[8,11,9,6]},{"nom":"En attente","valeurs":[3,4,6,12]},{"nom":"Refusées","valeurs":[5,6,4,2]}]}"#,
+];
 
 /// Le fil du chef de l'essai : ce que la fenêtre envoie, et l'état publié quand il change.
 fn mener_le_chef_des_profils(ecran: &crate::ecran::Ecran, recus: &mpsc::Receiver<Evt>, chef: &Mutex<ChefDesProfils>) {
@@ -8325,23 +8489,48 @@ enum PasDesProfils {
     Theme(&'static str),
     /// La molette sous le pointeur (en points ; négatif : vers le bas).
     Molette(f32),
+    /// Du texte tapé ; une touche avec ses modificateurs (Maj+Entrée, Ctrl+N) ; ce que la saisie doit montrer.
+    Taper(&'static str),
+    ToucheAvec(egui::Key, egui::Modifiers),
+    Saisie(&'static str),
     Capture(&'static str),
+    /// Eve épingle ses cartes au tableau de bord, comme si Claude venait de répondre (le chef de l'essai les pose).
+    Epingler,
     Fin,
 }
 
-/// Ce que vise le pointeur de l'essai : le nom sous « EVE », un profil du menu, un profil des réglages.
+/// Ce que vise le pointeur de l'essai : le nom sous « EVE », un profil du menu, un profil des réglages, le champ de la
+/// saisie (du thème clair), la tête d'une carte du tableau de bord (par sa clé) ; un point de la fenêtre (en points :
+/// la liste des voix, dont egui fait l'identité d'après celle du panneau).
 #[derive(Debug)]
 enum CibleDesProfils {
     Menu,
     DuMenu(&'static str),
     DesReglages(&'static str),
+    ChampDeSaisie,
+    TeteDeCarte(&'static str),
+    DansLeFil,
+    BoutonDuBas,
+    RangeeDeCarte(&'static str, usize),
+    ActionDeRangee(&'static str, usize, &'static str),
+    /// « Ajouter », au-dessus du tableau de bord ; le bouton « ⋯ » d'une carte épinglée (son id) ; une ligne d'un menu
+    /// du tableau de bord (le nom du menu, son rang).
+    BoutonAjouter,
+    MenuDeCarte(&'static str),
+    /// Un point d'une carte épinglée : à tant de points (x, y) du bouton « ⋯ » de sa tête.
+    DansLaCarte(&'static str, f32, f32),
+    LigneDuMenu(&'static str, usize),
+    Point(f32, f32),
 }
 
 /// Le parcours : le menu de la barre (ouvert, survolé, un profil choisi), la rubrique des réglages (celui d'office
-/// choisi), puis le thème « Constructo AI » et son menu (un troisième profil), et ses réglages défilés jusqu'au thème
-/// (le portrait d'Eve, qu'il est seul à montrer).
+/// choisi), puis le thème « Constructo AI » et son menu (un troisième profil), le haut de ses réglages et la liste des
+/// voix, clairs comme lui, et ses réglages défilés jusqu'au thème (le portrait d'Eve, qu'il est seul à montrer).
 fn parcours_des_profils() -> VecDeque<PasDesProfils> {
-    use CibleDesProfils::{DesReglages, DuMenu, Menu};
+    use CibleDesProfils::{
+        ActionDeRangee, BoutonAjouter, BoutonDuBas, ChampDeSaisie, DansLaCarte, DansLeFil, DesReglages, DuMenu,
+        LigneDuMenu, Menu, MenuDeCarte, Point, RangeeDeCarte, TeteDeCarte,
+    };
     use PasDesProfils::*;
     VecDeque::from([
         Touches(&[egui::Key::A, egui::Key::S]),
@@ -8391,11 +8580,158 @@ fn parcours_des_profils() -> VecDeque<PasDesProfils> {
         Capture("09-clair-designer"),
         Reglages(true),
         Pause(1.0),
+        Capture("10-clair-reglages-haut"),
+        // La liste des voix, ouverte d'un clic, refermée d'un autre : elle prend les visuels du panneau.
+        Survol(Point(1032.0, 193.0)),
+        Appuyer,
+        Relacher,
+        Pause(0.6),
+        Capture("11-clair-voix"),
+        Appuyer,
+        Relacher,
+        Pause(0.4),
         Survol(DesReglages("Designer")),
         Molette(-700.0),
         Pause(0.8),
-        Capture("10-clair-reglages"),
+        Capture("12-clair-reglages-bas"),
         Reglages(false),
+        Pause(0.5),
+        // La saisie : deux lignes (Maj+Entrée), envoyées d'Entrée ; ↑ les reprend, ↓ revient au champ vide ; Ctrl+N.
+        Survol(ChampDeSaisie),
+        Appuyer,
+        Relacher,
+        Pause(0.3),
+        Taper("Ligne un"),
+        ToucheAvec(egui::Key::Enter, egui::Modifiers::SHIFT),
+        Taper("Ligne deux"),
+        Pause(0.4),
+        Saisie("Ligne un\nLigne deux"),
+        Capture("13-saisie-deux-lignes"),
+        ToucheAvec(egui::Key::Enter, egui::Modifiers::NONE),
+        Pause(0.8),
+        Saisie(""),
+        ToucheAvec(egui::Key::ArrowUp, egui::Modifiers::NONE),
+        Pause(0.4),
+        Saisie("Ligne un\nLigne deux"),
+        Capture("14-saisie-reprise"),
+        ToucheAvec(egui::Key::ArrowDown, egui::Modifiers::NONE),
+        Pause(0.4),
+        Saisie(""),
+        ToucheAvec(egui::Key::N, egui::Modifiers::COMMAND),
+        Pause(0.6),
+        // Le tableau de bord : la décision du jour, tirée par sa tête, lâchée sur le haut des courriels (avant eux).
+        Capture("15-tableau"),
+        Survol(TeteDeCarte("decision-du-jour")),
+        Appuyer,
+        Pause(0.2),
+        Survol(TeteDeCarte("courriels-non-lus")),
+        Pause(0.5),
+        Capture("16-carte-tiree"),
+        Relacher,
+        Pause(1.0),
+        Capture("17-carte-deplacee"),
+        // Le fil remonté loin : le bouton du bas apparaît ; cliqué, le fil redescend.
+        Survol(DansLeFil),
+        Molette(1200.0),
+        Pause(0.8),
+        Capture("18-fil-remonte"),
+        Survol(BoutonDuBas),
+        Appuyer,
+        Relacher,
+        Pause(1.0),
+        Capture("19-fil-en-bas"),
+        // Le menu d'une rangée de la décision du jour : « C'est fait », puis « Me le rappeler demain ».
+        Survol(RangeeDeCarte("Décision du jour", 0)),
+        Appuyer,
+        Relacher,
+        Pause(0.6),
+        Capture("20-menu-d-une-rangee"),
+        Survol(ActionDeRangee("Décision du jour", 0, "C'est fait")),
+        Appuyer,
+        Relacher,
+        Pause(0.6),
+        Survol(RangeeDeCarte("Décision du jour", 0)),
+        Appuyer,
+        Relacher,
+        Pause(0.6),
+        Survol(ActionDeRangee("Décision du jour", 0, "Me le rappeler demain")),
+        Appuyer,
+        Relacher,
+        Pause(0.8),
+        // Les cartes épinglées : Eve en épingle quatre, et une note de la personne est déjà là ; « Ajouter », « Une
+        // note », écrite au clavier, dite au chef une demi-seconde après sa dernière frappe, refermée d'un clic
+        // ailleurs ; le menu d'une carte d'Eve (« Actualiser ») ; celui d'une autre (« Retirer », un second clic le
+        // confirme).
+        Epingler,
+        Pause(1.2),
+        Capture("21-epingles"),
+        Survol(BoutonAjouter),
+        Appuyer,
+        Relacher,
+        Pause(0.5),
+        Capture("22-menu-ajouter"),
+        Survol(LigneDuMenu("ajouter-une-carte", 0)),
+        Appuyer,
+        Relacher,
+        Pause(0.5),
+        Taper("Appeler le plombier"),
+        ToucheAvec(egui::Key::Enter, egui::Modifiers::NONE),
+        Taper("- demain avant 10 h"),
+        Pause(1.0),
+        Capture("23-note-ouverte"),
+        Survol(ChampDeSaisie),
+        Appuyer,
+        Relacher,
+        Pause(1.0),
+        Capture("24-note-fermee"),
+        Survol(MenuDeCarte("soumissions")),
+        Appuyer,
+        Relacher,
+        Pause(0.5),
+        Capture("25-menu-d-une-carte"),
+        Survol(LigneDuMenu("soumissions", 0)),
+        Appuyer,
+        Relacher,
+        Pause(0.5),
+        Survol(MenuDeCarte("a-rappeler")),
+        Appuyer,
+        Relacher,
+        Pause(0.5),
+        Survol(LigneDuMenu("a-rappeler", 2)),
+        Appuyer,
+        Relacher,
+        Pause(0.5),
+        Capture("26-retirer-pour-de-bon"),
+        Appuyer,
+        Relacher,
+        Pause(1.0),
+        Capture("27-carte-retiree"),
+        // Plus bas, le tableau et le dessin épinglés.
+        Survol(Point(400.0, 600.0)),
+        Molette(-480.0),
+        Pause(1.5),
+        Capture("28-tableau-et-dessin"),
+        // Les graphiques, plus bas encore ; une bulle de survol ; la vue en tableau d'un graphique, et le retour.
+        Survol(Point(400.0, 600.0)),
+        Molette(-380.0),
+        Pause(1.5),
+        Capture("29-graphiques"),
+        Survol(DansLaCarte("ventes-mensuelles", -120.0, 150.0)),
+        Pause(0.6),
+        Capture("30-survol-d-un-graphique"),
+        Survol(MenuDeCarte("ventes-mensuelles")),
+        Appuyer,
+        Relacher,
+        Pause(0.5),
+        Survol(LigneDuMenu("ventes-mensuelles", 1)),
+        Appuyer,
+        Relacher,
+        Pause(0.8),
+        Capture("31-graphique-en-tableau"),
+        Survol(Point(400.0, 600.0)),
+        Molette(-500.0),
+        Pause(1.5),
+        Capture("32-graphiques-suite"),
         Fin,
     ])
 }
@@ -8424,6 +8760,28 @@ impl EssaiDesProfils {
             CibleDesProfils::Menu => crate::natif::profils::id_du_menu_des_profils(),
             CibleDesProfils::DuMenu(nom) => crate::natif::profils::id_du_profil(nom),
             CibleDesProfils::DesReglages(nom) => crate::natif::profils::id_du_profil_des_reglages(nom),
+            CibleDesProfils::ChampDeSaisie => egui::Id::unique("saisie-texte-constructo"),
+            CibleDesProfils::TeteDeCarte(cle) => {
+                let poignee = egui::Id::unique(("carte-du-tableau", *cle));
+                let place = ctx.data(|d| d.get_temp::<egui::Rect>(poignee.with("place")))?;
+                return Some(place.left_top() + egui::vec2(10.0, 8.0));
+            }
+            // Le fil, au-dessus de la saisie.
+            CibleDesProfils::DansLeFil => {
+                let saisie = ctx.read_response(egui::Id::unique("saisie-texte-constructo"))?;
+                return Some(saisie.rect.center() - egui::vec2(0.0, 260.0));
+            }
+            CibleDesProfils::BoutonDuBas => egui::Id::unique("aller-en-bas-du-fil"),
+            CibleDesProfils::RangeeDeCarte(titre, k) => egui::Id::unique(("rangee-de-carte", *titre, *k)),
+            CibleDesProfils::ActionDeRangee(titre, k, mot) => egui::Id::unique(("action-de-rangee", *titre, *k, *mot)),
+            CibleDesProfils::BoutonAjouter => egui::Id::unique("ajouter-une-carte"),
+            CibleDesProfils::MenuDeCarte(id) => egui::Id::unique(("menu-de-carte", *id)),
+            CibleDesProfils::DansLaCarte(id, dx, dy) => {
+                let menu = ctx.read_response(egui::Id::unique(("menu-de-carte", *id)))?;
+                return Some(menu.rect.center() + egui::vec2(*dx, *dy));
+            }
+            CibleDesProfils::LigneDuMenu(cle, k) => egui::Id::unique(("ligne-du-menu", *cle, *k)),
+            CibleDesProfils::Point(x, y) => return Some(egui::pos2(*x, *y)),
         };
         ctx.read_response(id).map(|r| r.rect.center())
     }
@@ -8542,9 +8900,38 @@ impl EssaiDesProfils {
                     });
                     0.1
                 }
+                PasDesProfils::Taper(texte) => {
+                    entree.events.push(egui::Event::Text(texte.to_string()));
+                    0.1
+                }
+                PasDesProfils::ToucheAvec(key, modifiers) => {
+                    for pressed in [true, false] {
+                        entree.events.push(egui::Event::Key {
+                            key,
+                            physical_key: None,
+                            pressed,
+                            repeat: false,
+                            modifiers,
+                        });
+                    }
+                    0.1
+                }
+                PasDesProfils::Saisie(attendu) => {
+                    let vu = self.fenetre.texte_de_la_saisie().to_string();
+                    if vu != attendu {
+                        self.probleme(format!("la saisie montre {vu:?}, au lieu de {attendu:?}"));
+                    }
+                    0.0
+                }
                 PasDesProfils::Capture(nom) => {
                     self.a_capturer.push(nom);
                     0.3
+                }
+                PasDesProfils::Epingler => {
+                    if let Ok(mut c) = self.chef.lock() {
+                        c.epingler();
+                    }
+                    0.0
                 }
                 PasDesProfils::Fin => {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);

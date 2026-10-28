@@ -13,6 +13,7 @@ mod cles;
 mod connexion;
 mod ecran;
 mod entreprise;
+mod epingles;
 mod essais;
 mod fenetre;
 mod filtres;
@@ -27,6 +28,7 @@ mod micro;
 mod mise_a_jour;
 mod musique;
 mod natif;
+mod notifications;
 mod orbe;
 mod oreille;
 mod profils;
@@ -101,6 +103,8 @@ fn main() {
         Some("--essai-portrait") => essais::portrait(&args[1..]),
         Some("--essai-services") => essais::services(&args[1..]),
         Some("--essai-stripe") => essais::stripe(&args[1..]),
+        #[cfg(windows)]
+        Some("--essai-notification") => notifications::essai(&crate::reglages::dossier_local()),
         Some("--essai-son") => essais::son(&reglages, &args[1..]),
         Some("--essai-tour") => essais::tour(&reglages, &args[1..]),
         Some("--aide" | "-h" | "--help") => {
