@@ -33,7 +33,7 @@ const AVANCE_DU_LIMITEUR: f64 = 0.005;
 const RELACHE: f64 = 0.040;
 
 /// La chaîne d'une voix, avant sa mise à niveau : un passe-haut, deux corrections du timbre, le dé-esseur, le grain
-/// des voyelles.
+/// des voyelles, le souffle des pauses.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Chaine {
     /// Le passe-haut (Hz) : sous la voix (la fondamentale de Jessica descend vers 160 Hz), rien qu'un grondement.
@@ -44,6 +44,18 @@ pub(super) struct Chaine {
     aigus: (f64, f64),
     sifflantes: Sifflantes,
     grain: Grain,
+    souffle: Souffle,
+}
+
+/// Le souffle des pauses ([`calmer_le_souffle`]) : un expanseur vers le bas.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Souffle {
+    /// Son seuil : tant de dB sous le niveau actif de la phrase.
+    sous_la_voix: f32,
+    /// Sous le seuil, chaque décibel de moins en ôte `rapport` (3 : l'écart triple).
+    rapport: f32,
+    /// La baisse, au plus (dB).
+    baisse_max: f32,
 }
 
 /// Le grain des voyelles ([`adoucir_le_grain`]) : les aigus d'une voix voisée, baissés.
@@ -75,13 +87,15 @@ impl Chaine {
     /// (au-dessus de 5 kHz, à plus de 18 dB sous le niveau actif de la phrase, 60 % de ce qui dépasse, 6 dB au plus) :
     /// les plus fortes reviennent au niveau qu'elles avaient sous le passe-bas, les autres gardent leur netteté ; le
     /// grain des voyelles, 4 dB plus bas : leurs aigus reviennent où le passe-bas les mettait (de 6 à 11 kHz, 42,9 dB
-    /// sous la trame en médiane ; 39,3 sans lui, 43,5 sous le passe-bas), mais pas leur présence.
+    /// sous la trame en médiane ; 39,3 sans lui, 43,5 sous le passe-bas), mais pas leur présence ; le souffle des
+    /// pauses calmé (sous 28 dB du niveau actif, l'écart triplé, 15 dB au plus).
     pub(super) const DOUCE: Chaine = Chaine {
         passe_haut: 70.0,
         presence: (1800.0, 1.0, 2.5),
         aigus: (6000.0, -3.0),
         sifflantes: Sifflantes { frequence: 5000.0, seuil: -18.0, rapport: 2.5, baisse_max: 6.0 },
         grain: Grain { frequence: 6000.0, baisse: 4.0 },
+        souffle: Souffle { sous_la_voix: 28.0, rapport: 3.0, baisse_max: 15.0 },
     };
 
     /// La douceur 2, plus douce encore : moins de présence, des aigus, des sifflantes et un grain plus bas.
@@ -91,6 +105,7 @@ impl Chaine {
         aigus: (5000.0, -5.0),
         sifflantes: Sifflantes { frequence: 5000.0, seuil: -20.0, rapport: 3.0, baisse_max: 8.0 },
         grain: Grain { frequence: 6000.0, baisse: 6.0 },
+        souffle: Souffle { sous_la_voix: 28.0, rapport: 3.0, baisse_max: 15.0 },
     };
 
     fn traiter(&self, x: &mut [f32], taux: f64) {
@@ -101,6 +116,7 @@ impl Chaine {
         filtrer(x, Biquad::plateau_haut(f, FRAC_1_SQRT_2, g, taux));
         adoucir_les_sifflantes(x, taux, &self.sifflantes);
         adoucir_le_grain(x, taux, &self.grain);
+        calmer_le_souffle(x, taux, &self.souffle);
     }
 }
 
@@ -150,6 +166,25 @@ fn adoucir_le_grain(x: &mut [f32], taux: f64, grain: &Grain) {
     }
     for ((v, h), g) in x.iter_mut().zip(haut).zip(gain) {
         *v += h * (10f32.powf(g / 20.0) - 1.0);
+    }
+}
+
+/// Le souffle des pauses calmé : ce que Piper laisse aux virgules et entre les mots (un bruit 35 à 40 dB sous la
+/// voix) baisse, la voix jamais — sous le seuil, chaque décibel de moins en ôte (rapport - 1) de plus, jusqu'à la
+/// baisse au plus ; il s'ouvre 10 ms avant que la voix revienne (sa consonne garde son attaque) et se referme
+/// lentement (80 ms : une fin de mot s'éteint d'elle-même). Le juge automatique le préfère (+0,030 ± 0,005, sur 26
+/// des trente réponses).
+fn calmer_le_souffle(x: &mut [f32], taux: f64, s: &Souffle) {
+    let Some(actif) = niveau_actif(x, taux) else { return };
+    let (seuil, n) = (actif - s.sous_la_voix, (0.010 * taux).round() as usize);
+    let cible: Vec<f32> = niveaux_glissants(x, n)
+        .into_iter()
+        .map(|l| ((l - seuil) * (s.rapport - 1.0)).clamp(-s.baisse_max, 0.0))
+        .collect();
+    let mut gain = a_venir(&cible, n, true);
+    lisser(&mut gain, taux, 0.080, 0.002);
+    for (v, g) in x.iter_mut().zip(gain) {
+        *v *= 10f32.powf(g / 20.0);
     }
 }
 
@@ -456,6 +491,28 @@ mod essais {
         assert!(s.abs() < 0.1, "le s : {s} dB");
         let v = ecart(&x[milieu.clone()], &avant[milieu]);
         assert!(v.abs() < 0.05, "la voyelle : {v} dB");
+    }
+
+    #[test]
+    fn le_souffle_des_pauses_baisse_et_la_voix_reste() {
+        // Une « voix » (300 Hz), une pause de 200 ms de souffle (un bruit 40 dB sous elle), la voix : la seconde
+        // moitié du souffle baisse de plus de 6 dB ; la voix, même ses 5 premières ms après la pause, ne bouge pas.
+        let (a, m) = ((0.4 * f64::from(TAUX)) as usize, (0.2 * f64::from(TAUX)) as usize);
+        let mut graine = 3u32;
+        let mut x = note(300.0, -16.0, 0.4);
+        x.extend((0..m).map(|_| {
+            graine = graine.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            0.0027 * ((graine >> 8) as f32 / (1 << 24) as f32 * 2.0 - 1.0)
+        }));
+        x.extend(note(300.0, -16.0, 0.4));
+        let avant = x.clone();
+        calmer_le_souffle(&mut x, f64::from(TAUX), &Chaine::DOUCE.souffle);
+        let s = ecart(&x[a + m / 2..a + m], &avant[a + m / 2..a + m]);
+        assert!(s < -6.0, "le souffle : {s} dB");
+        for r in [2_000..8_000, a + m..a + m + 110, a + m + 2_000..a + m + 8_000] {
+            let v = ecart(&x[r.clone()], &avant[r]);
+            assert!(v.abs() < 0.05, "la voix : {v} dB");
+        }
     }
 
     #[test]

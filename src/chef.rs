@@ -81,14 +81,16 @@ pub enum Evt {
     },
     /// L'oreille est prête (ou ne l'est pas).
     Oreille(Result<String, String>),
-    /// Une phrase transcrite ; `continue_` : entendue par l'écoute continue (pendant une demande d'accord, ou après
-    /// « Oui ? »), pas à la touche ; `depuis` : la fin de la parole.
+    /// Une phrase transcrite ; `continue_` : entendue par l'écoute continue (pendant une demande d'accord, après
+    /// « Oui ? », ou à la suite d'une phrase en suspens), pas à la touche ; `depuis` : la fin de la parole ;
+    /// `suite_possible` : entendue pendant que l'oreille cherchait la demande d'après « Eve » (peut-être sa suite).
     Transcrit {
         texte: String,
         secondes_audio: f32,
         secondes_calcul: f32,
         continue_: bool,
         depuis: Instant,
+        suite_possible: bool,
     },
     /// L'écoute continue a entendu « Eve » : la demande se transcrit.
     EveilEntendu,
@@ -183,6 +185,11 @@ const REGROUPER: Duration = Duration::from_secs(2);
 /// Ce que la fenêtre dit pendant que la page de connexion de Constructo AI attend la personne.
 const PAGE_DE_CONNEXION_OUVERTE: &str = "La page de connexion de Constructo AI est ouverte dans ton navigateur : entre \
                                          le courriel et le mot de passe de ton entreprise, puis reviens ici.";
+
+/// L'effort de réflexion d'un propos bref (un salut, un merci, « tu m'entends ? » : [`parole::propos_bref`]), et son
+/// nom sous la réponse : à l'effort max, Claude réfléchissait cinq secondes avant de dire « Salut ! » (le journal de
+/// l'Assistante, le 27 octobre 2026). Le temps d'un tour : l'effort des réglages revient à sa fin.
+const EFFORT_BREF: (&str, &str) = ("low", "bref");
 
 /// Le temps laissé pour dire « je confirme » ; au-delà, l'écriture est refusée.
 const ACCORD_DELAI: Duration = Duration::from_secs(180);
@@ -468,6 +475,14 @@ pub struct Chef {
     transcriptions: u32,
     /// Après « Oui ? » : la phrase suivante est la demande, sans « Eve » devant (jusqu'à cet instant).
     ecoute_suite: Option<Instant>,
+    /// La fin du tour de parole : une phrase dite en suspens (« C'est parti, ») attend sa suite — la touche reprise,
+    /// ou une phrase de plus au micro, sans « Eve » devant ([`parole::FinDeTour`]) ; et la fin de la parole du
+    /// dernier morceau entendu, d'où se comptent les temps de la demande.
+    fin_de_tour: parole::FinDeTour,
+    fin_de_parole: Option<Instant>,
+    /// « Eve » est entendu, et l'oreille cherche encore la demande qui le suit : une phrase entendue d'ici là en est
+    /// peut-être la suite (elle se transcrit, et ne vaut que si cette demande s'arrête en suspens).
+    eveil_en_cours: bool,
     /// Le « Oui ? » en train de se dire (son numéro de parole) : l'écoute de la suite commence quand il est dit.
     oui: Option<u64>,
     /// La fin de la dernière parole d'Eve : le micro reste en sourdine un instant après (l'écho de la pièce).
@@ -593,6 +608,10 @@ pub struct Chef {
     claude_a_suivre: bool,
     /// Le modèle et l'effort de son lancement : s'ils changent dans les réglages, Claude Code repart.
     lance_avec: (String, String),
+    /// L'effort de réflexion en vigueur dans la séance — celui du lancement, ou l'effort bref d'un propos bref
+    /// ([`EFFORT_BREF`]) — et s'il se donne tour par tour (l'ouverture le dit) : le changer garde alors le cache.
+    effort_en_vigueur: String,
+    effort_par_tour: bool,
     /// Les agents que Claude fait travailler en arrière-plan (leur description, `background_tasks_changed`) : la
     /// séance ne s'arrête pas sous eux — ni pour un autre profil, ni pour un autre cerveau, ni pour une mise à jour.
     agents: Vec<String>,
@@ -738,6 +757,9 @@ impl Chef {
             debut_ecoute: None,
             transcriptions: 0,
             ecoute_suite: None,
+            fin_de_tour: parole::FinDeTour::default(),
+            fin_de_parole: None,
+            eveil_en_cours: false,
             oui: None,
             fin_parole: None,
             sourdine_jusqua: None,
@@ -809,6 +831,8 @@ impl Chef {
             laisses: Laisses::default(),
             claude_a_suivre: false,
             lance_avec: (String::new(), String::new()),
+            effort_en_vigueur: String::new(),
+            effort_par_tour: false,
             agents: Vec::new(),
             compte_rendu_attendu: None,
             claude_change_a: maintenant,
@@ -966,7 +990,7 @@ impl Chef {
                 self.oreille_etat = ("erreur", e.clone());
                 self.systeme(&format!("L'oreille ne s'ouvre pas ({e}) : écris tes demandes en bas."));
             }
-            Evt::Transcrit { texte, secondes_audio, secondes_calcul, continue_, depuis } => {
+            Evt::Transcrit { texte, secondes_audio, secondes_calcul, continue_, depuis, suite_possible } => {
                 self.transcriptions = self.transcriptions.saturating_sub(1);
                 journal::ecrire(&format!(
                     "entendu ({secondes_audio:.1} s de parole, {secondes_calcul:.1} s) : {texte}"
@@ -975,6 +999,18 @@ impl Chef {
                 if t.is_empty() {
                     if !continue_ {
                         self.dire("Je n'ai pas compris. Recommence en tenant la touche.");
+                    }
+                } else if suite_possible && !self.fin_de_tour.attend() {
+                    // Entendue pendant que l'oreille cherchait la demande d'après « Eve » : ce n'en est pas la suite
+                    // (la demande était finie) ; une phrase de l'écoute continue comme une autre, qui ne vaut que si
+                    // elle appelle Eve (le téléphone, la télé ne parlent pas à Eve).
+                    match parole::appel_a_eve(&t) {
+                        Some(reste) => {
+                            if let Some(r) = self.passer_l_oreille(reste, secondes_audio, secondes_calcul, depuis) {
+                                self.apres_eve(r, depuis);
+                            }
+                        }
+                        None => journal::ecrire("ignoré : sans « Eve », et la demande d'avant était finie"),
                     }
                 } else if continue_ && !self.attentes.is_empty() && parole::reponse_d_accord(&t).is_none() {
                     // L'écoute continue entend tout (le téléphone, le bureau) : ce qui n'est pas une réponse s'ignore.
@@ -986,11 +1022,12 @@ impl Chef {
                         self.apres_eve(reste, depuis);
                     }
                 } else if let Some(t) = self.passer_l_oreille(t, secondes_audio, secondes_calcul, depuis) {
-                    self.phrase(t, Some(depuis));
+                    self.phrase_dite(t, depuis);
                 }
             }
             Evt::EveilEntendu => {
                 self.transcriptions += 1;
+                self.eveil_en_cours = true;
                 journal::ecrire("« Eve » entendu");
                 // « Eve, … » pendant qu'elle parle : elle se tait aussitôt.
                 if self.parle {
@@ -1004,6 +1041,7 @@ impl Chef {
             }
             Evt::Eveil { demande, depuis } => {
                 self.transcriptions = self.transcriptions.saturating_sub(1);
+                self.eveil_en_cours = false;
                 journal::ecrire(&format!("demande après « Eve » : {demande}"));
                 if let Some(d) = self.passer_l_oreille(parole::nettoyer_transcription(&demande), 0.0, 0.0, depuis) {
                     self.apres_eve(d, depuis);
@@ -1084,7 +1122,14 @@ impl Chef {
         match (action, valeur.as_str()) {
             ("parler_debut", _) => self.parler_debut(),
             ("parler_fin", _) => self.parler_fin(),
-            ("texte", Some(t)) if !t.trim().is_empty() => self.phrase(t.trim().to_string(), None),
+            ("texte", Some(t)) if !t.trim().is_empty() => {
+                // Une phrase dite en suspens attendait sa suite : la voici, tapée.
+                let t = match self.fin_de_tour.oublier() {
+                    Some(avant) => format!("{avant} {}", t.trim()),
+                    None => t.trim().to_string(),
+                };
+                self.phrase(t, None)
+            }
             ("confirmer" | "annuler", _) => {
                 // Le numéro de la demande affichée : un double clic, ou une demande remplacée entre-temps, ne valent
                 // pas pour la suivante.
@@ -2158,7 +2203,8 @@ impl Chef {
             self.systeme("L'oreille n'est pas encore prête : écris ta demande, ou réessaie dans un instant.");
             return;
         }
-        if self.oreille.send(Demande::Commande { audio, continue_: false, depuis: fin }).is_ok() {
+        if self.oreille.send(Demande::Commande { audio, continue_: false, depuis: fin, suite_possible: false }).is_ok()
+        {
             self.transcriptions += 1;
             self.son(Son::Eveil);
         } else {
@@ -2167,10 +2213,10 @@ impl Chef {
     }
 
     /// « Eve, … » entendu (la phrase finie à `depuis`) : la demande qui suit le nom. « Eve » seul : « Oui ? », puis
-    /// l'écoute de la suite.
+    /// l'écoute de la suite — sauf si une phrase en suspens attend déjà la sienne.
     fn apres_eve(&mut self, demande: String, depuis: Instant) {
-        if !demande.is_empty() {
-            self.phrase(demande, Some(depuis));
+        if !demande.is_empty() || self.fin_de_tour.attend() {
+            self.phrase_dite(demande, depuis);
         } else if self.micro.as_ref().is_some_and(Micro::en_parole) {
             // La personne enchaîne déjà : pas de « Oui ? » par-dessus sa phrase.
             self.ecoute_suite = Some(Instant::now() + SUITE_DELAI);
@@ -2183,6 +2229,24 @@ impl Chef {
         } else {
             self.dire("Oui ?");
             self.oui = Some(self.parole_id);
+        }
+    }
+
+    /// Une phrase dite, passée par le garde-fou (sa parole finie à `depuis`) : en suspens, elle attend sa suite
+    /// ([`parole::FinDeTour`]) ; finie, elle part, avec ce qui attendait. Un arrêt et une réponse d'accord partent tout
+    /// de suite (devant un arrêt, ce qui attendait s'oublie).
+    fn phrase_dite(&mut self, t: String, depuis: Instant) {
+        if parole::est_un_arret(&t) || !self.attentes.is_empty() {
+            if self.fin_de_tour.oublier().is_some() {
+                journal::ecrire("la phrase en suspens s'oublie");
+            }
+            self.phrase(t, Some(depuis));
+            return;
+        }
+        self.fin_de_parole = Some(depuis);
+        match self.fin_de_tour.phrase(&t, Instant::now()) {
+            parole::Tour::Part(tout) => self.phrase(tout, Some(depuis)),
+            parole::Tour::Attend => journal::ecrire(&format!("en suspens, la suite attendue : {t}")),
         }
     }
 
@@ -2620,6 +2684,11 @@ impl Chef {
             return;
         }
         let Some(m) = self.en_attente.pop_front() else { return };
+        // Un propos bref se répond sans longue réflexion ; l'effort ne change que s'il se donne tour par tour (le cache
+        // reste : sinon, Claude Code récrirait tout le préfixe en cache, à l'aller et au retour).
+        let bref = self.effort_par_tour && m.pieces.is_empty() && m.demande.as_deref().is_some_and(parole::propos_bref);
+        let effort = if bref { EFFORT_BREF.0.to_string() } else { self.lance_avec.1.clone() };
+        self.donner_l_effort(&effort);
         self.prechauffage = m.demande.is_none();
         self.au_chaud = m.au_chaud;
         self.demande_du_tour = m.demande;
@@ -2637,6 +2706,21 @@ impl Chef {
             self.prechauffage = false;
             self.chrono = None;
             self.systeme(&format!("{} ne répond pas : {e}", self.nommee().le_maj));
+        }
+    }
+
+    /// L'effort de réflexion des tours qui suivent, donné à Claude Code s'il change ([`Cerveau::regler_l_effort`]).
+    fn donner_l_effort(&mut self, effort: &str) {
+        if effort == self.effort_en_vigueur {
+            return;
+        }
+        let Some(c) = &self.cerveau else { return };
+        match c.regler_l_effort(effort) {
+            Ok(()) => {
+                journal::ecrire(&format!("effort du tour : {effort}"));
+                self.effort_en_vigueur = effort.to_string();
+            }
+            Err(e) => journal::ecrire(&format!("l'effort {effort} ne part pas à Claude Code : {e}")),
         }
     }
 
@@ -2665,10 +2749,13 @@ impl Chef {
     fn claude(&mut self, v: &Value) {
         self.dernier_signe = Instant::now();
         match protocole::lire(v) {
-            Recu::Ouverture { session, modele, serveurs, outils } => {
+            Recu::Ouverture { session, modele, serveurs, outils, effort_par_tour } => {
                 journal::ecrire(&format!(
                     "Claude Code ouvert : session {session}, modèle {modele}, serveurs {serveurs:?}"
                 ));
+                if let Some(e) = effort_par_tour {
+                    self.effort_par_tour = e;
+                }
                 if !std::mem::replace(&mut self.outils_vus, true) {
                     let hors: Vec<&str> =
                         outils.iter().map(String::as_str).filter(|o| self.espace.refus(o).is_some()).collect();
@@ -2803,6 +2890,11 @@ impl Chef {
                 }
             }
             Recu::Agents(agents) => self.suivre_les_agents(agents),
+            Recu::EffortFixe => {
+                if std::mem::replace(&mut self.effort_par_tour, false) {
+                    journal::ecrire("l'effort ne se donne plus tour par tour : celui des réglages reste");
+                }
+            }
             Recu::Limite { etat, reprise, sorte, part } => self.suivre_la_limite(&etat, reprise, &sorte, part),
             Recu::Reessai { tentative, permis, panne, sans_reponse } => {
                 journal::ecrire(&format!(
@@ -2980,12 +3072,16 @@ impl Chef {
             du_tour.map(|t| format!("{t:.4} $ ; cumul {cumul:.4} $")).unwrap_or_default(),
             garde::ecourter(&texte, 400)
         ));
-        // Ce que la réponse a pris, montré sous elle : sa durée, son coût, le cerveau qui l'a faite.
-        let cerveau = format!(
-            "{}, {}",
-            crate::reglages::nom_du_modele(&self.reglages.modele),
-            crate::reglages::nom_de_l_effort(&self.reglages.effort)
-        );
+        // Ce que la réponse a pris, montré sous elle : sa durée, son coût, le cerveau qui l'a faite — l'effort de ce
+        // tour (bref pour un propos bref), qui ne dure que lui : celui des réglages revient.
+        let effort = if self.effort_en_vigueur == EFFORT_BREF.0 {
+            EFFORT_BREF.1
+        } else {
+            crate::reglages::nom_de_l_effort(&self.effort_en_vigueur)
+        };
+        let cerveau = format!("{}, {effort}", crate::reglages::nom_du_modele(&self.reglages.modele));
+        let lancement = self.lance_avec.1.clone();
+        self.donner_l_effort(&lancement);
         let tour = match du_tour {
             Some(t) => format!("{} · {} · {cerveau}", mesures::duree(secondes), mesures::dollars(t)),
             None => format!("{} · {cerveau}", mesures::duree(secondes)),
@@ -3303,6 +3399,7 @@ impl Chef {
         self.alertes.clear();
         self.alerte_a_dire = None;
         self.ecoute_suite = None;
+        self.fin_de_tour.oublier();
         if self.tours > 0
             && let Some(c) = &self.cerveau
             && c.interrompre().is_ok()
@@ -3370,6 +3467,9 @@ impl Chef {
         match Cerveau::lancer(&l, self.rapport.clone()) {
             Ok(c) => {
                 self.lance_avec = (l.modele.clone(), l.effort.clone());
+                // L'effort du lancement ; s'il se donne tour par tour, l'ouverture du premier tour le dira.
+                self.effort_en_vigueur = l.effort.clone();
+                self.effort_par_tour = false;
                 journal::ecrire(&format!(
                     "Claude Code lancé ({}, effort {}{}) dans {}",
                     l.modele,
@@ -3550,6 +3650,13 @@ impl Chef {
         if self.ecoute && self.debut_ecoute.is_some_and(|d| maintenant.duration_since(d) > ECOUTE_MAX) {
             self.parler_fin();
         }
+        // Une phrase en suspens attend sa suite : la touche tenue, une phrase que le micro entend ou que l'oreille
+        // transcrit la prolongent ; sans suite, elle part telle quelle.
+        let suite = self.ecoute || self.transcriptions > 0 || self.micro.as_ref().is_some_and(Micro::en_parole);
+        if let Some(t) = self.fin_de_tour.attendre(maintenant, suite) {
+            journal::ecrire("sans suite : la phrase en suspens part telle quelle");
+            self.phrase(t, self.fin_de_parole);
+        }
         if self.ecoute && self.parle && self.debut_ecoute.is_some_and(|d| maintenant.duration_since(d) > COUPE_APRES) {
             self.couper();
         }
@@ -3605,10 +3712,15 @@ impl Chef {
             if !prete {
                 continue;
             }
+            // Après « Oui ? », pendant une demande d'accord, ou quand une phrase en suspens attend sa suite : la phrase
+            // se transcrit sans « Eve » devant ; et quand l'oreille cherche encore la demande d'après « Eve », elle en
+            // est peut-être la suite (elle ne vaudra que si cette demande s'arrête en suspens).
             let suite = self.ecoute_suite.is_some_and(|f| maintenant < f);
-            if suite || !self.attentes.is_empty() {
+            let attendue = suite || !self.attentes.is_empty() || self.fin_de_tour.attend();
+            if attendue || self.eveil_en_cours {
                 self.ecoute_suite = None;
-                if self.oreille.send(Demande::Commande { audio: p, continue_: true, depuis: maintenant }).is_ok() {
+                let d = Demande::Commande { audio: p, continue_: true, depuis: maintenant, suite_possible: !attendue };
+                if self.oreille.send(d).is_ok() {
                     self.transcriptions += 1;
                 } else {
                     self.oreille_perdue();
@@ -4224,6 +4336,10 @@ impl Chef {
         }
         if self.transcriptions > 0 {
             return ("transcription", "Je transcris…".into(), String::new());
+        }
+        // Une phrase en suspens attend sa suite : Eve écoute encore.
+        if self.fin_de_tour.attend() {
+            return ("ecoute", "Je t'écoute…".into(), "Continue ta phrase : j'attends la suite".into());
         }
         if !self.attentes.is_empty() {
             return (

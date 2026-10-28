@@ -54,6 +54,16 @@ pub fn interruption() -> Value {
     json!({ "subtype": "interrupt" })
 }
 
+/// L'effort de réflexion des tours qui suivent (`apply_flag_settings`, la clé `effortLevel` : « low », « medium »,
+/// « high », « xhigh », « max ») — le même que donne `--effort` au lancement, que Claude Code 2.1.312 applique avant de
+/// lire le message suivant (vérifié par `get_settings`, `applied.effort`). Quand l'effort se donne tour par tour
+/// (`per_turn_effort_active` de l'ouverture), le changer garde le prompt en cache : Claude Code le glisse dans la
+/// conversation, au tour où il change ; sinon, il récrit tout le préfixe en cache. (Un effort nul ne revient pas à
+/// celui du lancement, mais à celui du modèle : on redonne toujours l'effort voulu.)
+pub fn effort(niveau: &str) -> Value {
+    json!({ "subtype": "apply_flag_settings", "settings": { "effortLevel": niveau } })
+}
+
 /// L'état des serveurs MCP (`mcp_status`) : la réponse (`{"mcpServers": [{"name", "status"}]}`) dit si la base est
 /// branchée — Eve attend qu'elle le soit pour préchauffer : ses outils font partie du contexte mis en cache.
 pub fn etat_mcp() -> Value {
@@ -128,8 +138,19 @@ pub enum Flux {
 /// Un message reçu de Claude Code, rangé.
 #[derive(Debug)]
 pub enum Recu<'a> {
-    /// L'ouverture de la session (à chaque tour) : les serveurs MCP et leur état, les outils offerts.
-    Ouverture { session: String, modele: String, serveurs: Vec<(String, String)>, outils: Vec<String> },
+    /// L'ouverture de la session (à chaque tour) : les serveurs MCP et leur état, les outils offerts ; et si l'effort
+    /// se donne tour par tour (`per_turn_effort_active` ; rien : on ne sait pas), ce qui permet de le changer sans
+    /// perdre le cache ([`effort`]).
+    Ouverture {
+        session: String,
+        modele: String,
+        serveurs: Vec<(String, String)>,
+        outils: Vec<String>,
+        effort_par_tour: Option<bool>,
+    },
+    /// L'effort ne se donne plus tour par tour (`system/per_turn_effort_changed`, toujours à faux : le serveur a refusé
+    /// ce message) : le changer récrirait désormais le préfixe en cache.
+    EffortFixe,
     /// Un message de l'Adjointe : son texte et ses appels d'outils (`(identifiant, nom, entrée)`) ; `panne` : la sorte
     /// d'erreur de l'API qu'il porte (son champ `error` : « authentication_failed », « rate_limit »…), vide sans elle.
     Adjointe { textes: Vec<String>, outils: Vec<(String, String, &'a Value)>, panne: String },
@@ -188,6 +209,7 @@ pub fn lire(v: &Value) -> Recu<'_> {
                 part: l.get("utilization").and_then(Value::as_f64),
             }
         }
+        "system" if texte(v, "subtype") == "per_turn_effort_changed" => Recu::EffortFixe,
         "system" if texte(v, "subtype") == "init" => Recu::Ouverture {
             session: texte(v, "session_id").to_string(),
             modele: texte(v, "model").to_string(),
@@ -201,6 +223,7 @@ pub fn lire(v: &Value) -> Recu<'_> {
                 .and_then(Value::as_array)
                 .map(|l| l.iter().filter_map(Value::as_str).map(str::to_string).collect())
                 .unwrap_or_default(),
+            effort_par_tour: v.get("per_turn_effort_active").and_then(Value::as_bool),
         },
         "assistant" => {
             let mut textes = Vec::new();
@@ -417,13 +440,28 @@ mod essais {
         let v = json!({ "type": "system", "subtype": "init", "session_id": "s1", "model": "claude-sonnet-5-5",
             "tools": ["Read", "Write", "mcp__freecad__freecad_exec"], "mcp_servers": [{ "name": "freecad", "status": "connected" }] });
         match lire(&v) {
-            Recu::Ouverture { session, outils, serveurs, .. } => {
+            Recu::Ouverture { session, outils, serveurs, effort_par_tour, .. } => {
                 assert_eq!(session, "s1");
                 assert_eq!(outils, ["Read", "Write", "mcp__freecad__freecad_exec"]);
                 assert_eq!(serveurs, [("freecad".to_string(), "connected".to_string())]);
+                assert_eq!(effort_par_tour, None, "un Claude Code d'avant ne le dit pas");
             }
             autre => panic!("{autre:?}"),
         }
+    }
+
+    /// L'effort tour par tour, tel que Claude Code 2.1.312 le dit (vu le 27 octobre 2026 avec Sonnet 5.5) et le prend.
+    #[test]
+    fn l_effort_se_change_tour_par_tour() {
+        let v = json!({ "type": "system", "subtype": "init", "session_id": "s", "model": "claude-sonnet-5-5",
+            "tools": [], "mcp_servers": [], "per_turn_effort_active": true });
+        assert!(matches!(lire(&v), Recu::Ouverture { effort_par_tour: Some(true), .. }));
+        let fixe = json!({ "type": "system", "subtype": "per_turn_effort_changed", "per_turn_effort_active": false,
+            "uuid": "u", "session_id": "s" });
+        assert!(matches!(lire(&fixe), Recu::EffortFixe));
+        let d: Value = serde_json::from_str(&demande("eve_effort_1", effort("low"))).unwrap();
+        assert_eq!(d["type"], "control_request");
+        assert_eq!(d["request"], json!({ "subtype": "apply_flag_settings", "settings": { "effortLevel": "low" } }));
     }
 
     #[test]

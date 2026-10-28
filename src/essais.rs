@@ -38,6 +38,9 @@
 //!   bord la montrerait ; les routes lues et les droits d'une clé restreinte.
 //! - `eve --essai-son textes.txt dossier` : ce qu'Eve dirait de chaque texte, rendu sans le jouer — les WAV que
 //!   recevrait le lecteur, et leur tout.
+//! - `eve --essai-tour <dossier> [--fin S] [--oreille S] [--modele M]` : le tour de parole rejoué sur des sons inventés
+//!   (l'écoute du micro, l'oreille, ce qui part à Claude et quand), avant et après la fin du tour qui attend la suite
+//!   d'une phrase en suspens.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -9412,5 +9415,140 @@ pub fn son(r: &Reglages, args: &[String]) -> i32 {
         return 1;
     }
     println!("rendu en {:.1} s dans {}", t0.elapsed().as_secs_f32(), dossier.display());
+    0
+}
+
+// ---- Le tour de parole ------------------------------------------------------------------------------------------
+
+/// `eve --essai-tour <dossier> [--fin S] [--oreille S] [--modele M]` : le tour de parole rejoué sur des sons inventés —
+/// les WAV du dossier, chacun avec son manifeste JSON (le texte voulu, la fin vraie de la parole, ses pauses) :
+/// l'écoute continue du micro ([`micro::rejouer_l_ecoute`], son silence de fin `--fin`, [`micro::SILENCE_DE_FIN`]
+/// d'office), l'oreille sur le processeur (le texte de chaque phrase, avec l'amorce de l'éveil), puis ce qui part à
+/// Claude, et quand. Avant : chaque phrase qui appelle Eve part à sa fin ; une suite sans « Eve » se perd. Après : la
+/// fin du tour ([`parole::FinDeTour`]) attend la suite d'une phrase en suspens. L'oreille met `--oreille` secondes à
+/// rendre son texte (1,1 s d'office : la carte graphique de l'Assistante) ; ce que met le processeur ne compte pas.
+pub fn tour(r: &Reglages, args: &[String]) -> i32 {
+    let Some(dossier) = args.first().map(Path::new).filter(|d| d.is_dir()) else {
+        eprintln!("usage : eve --essai-tour <dossier de WAV et de manifestes> [--fin S] [--oreille S] [--modele M]");
+        return 2;
+    };
+    let option = |nom: &str| args.iter().position(|a| a == nom).and_then(|i| args.get(i + 1));
+    let fin = option("--fin").and_then(|v| v.parse().ok()).unwrap_or(micro::SILENCE_DE_FIN);
+    let delai: f32 = option("--oreille").and_then(|v| v.parse().ok()).unwrap_or(1.1);
+    let modele = option("--modele").map(std::path::PathBuf::from).unwrap_or_else(|| r.chemin_oreille());
+    let mut etat = match oreille::charger(&modele) {
+        Ok((e, _)) => e,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let (amorce, fils) = (format!("Eve, {}", r.vocabulaire_complet()), oreille::fils_de_calcul());
+    println!(
+        "silence de fin {fin} s ; l'oreille rend son texte {delai} s après ; la suite attendue {} s ; {}",
+        parole::FinDeTour::SUITE.as_secs_f32(),
+        modele.display()
+    );
+    let mut wavs: Vec<std::path::PathBuf> = std::fs::read_dir(dossier)
+        .map(|d| d.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "wav")).collect())
+        .unwrap_or_default();
+    wavs.sort();
+    // Avant et après : les tours coupés à tort, et ce qu'attend une phrase finie après la fin de sa parole.
+    let (mut coupes, mut attentes): ([usize; 2], [Vec<f32>; 2]) = ([0, 0], [Vec::new(), Vec::new()]);
+    for wav in &wavs {
+        let nom = wav.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let manifeste: Value = std::fs::read_to_string(wav.with_extension("json"))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or(Value::Null);
+        let voulu = manifeste.get("texte").and_then(Value::as_str).unwrap_or("").to_string();
+        let vraie_fin = manifeste.get("fin").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        let son = match micro::lire_wav(wav) {
+            Ok(s) => s,
+            Err(e) => {
+                println!("{nom} : illisible ({e})");
+                continue;
+            }
+        };
+        let phrases = micro::rejouer_l_ecoute(&son, micro::CADENCE, fin);
+        let textes: Vec<String> = phrases
+            .iter()
+            .map(|p| parole::nettoyer_transcription(&oreille::transcrire(&mut etat, &p.son, &amorce, fils)))
+            .collect();
+        println!("\n{nom} — « {voulu} » (fin de la parole : {vraie_fin:.2} s)");
+        for (p, t) in phrases.iter().zip(&textes) {
+            println!("  entendu de {:.2} à {:.2} s : « {t} »", p.debut, p.fin);
+        }
+        // Avant : chaque phrase qui appelle Eve part quand son texte est là.
+        let avant: Vec<(f32, String)> = phrases
+            .iter()
+            .zip(&textes)
+            .filter_map(|(p, t)| parole::appel_a_eve(t).map(|reste| (p.fin + delai, reste)))
+            .collect();
+        // Après : la fin du tour, menée au rythme du chef (un tic de 50 ms), sur une horloge simulée.
+        let mut apres: Vec<(f32, String)> = Vec::new();
+        let t0 = Instant::now();
+        let a = |s: f32| t0 + Duration::from_secs_f32(s);
+        let mut f = parole::FinDeTour::default();
+        let horizon = phrases.last().map_or(0.0, |p| p.fin) + delai + parole::FinDeTour::SUITE.as_secs_f32() + 1.0;
+        let (mut k, mut t) = (0, 0.0f32);
+        while t <= horizon {
+            while k < phrases.len() && phrases[k].fin + delai <= t {
+                // Une phrase en suspens attend : la suivante est sa suite, sans « Eve » ; sinon, elle doit l'appeler.
+                let entendu = if f.attend() {
+                    Some(parole::appel_a_eve(&textes[k]).unwrap_or_else(|| textes[k].clone()))
+                } else {
+                    parole::appel_a_eve(&textes[k])
+                };
+                if let Some(e) = entendu
+                    && let parole::Tour::Part(tout) = f.phrase(&e, a(t))
+                {
+                    apres.push((t, tout));
+                }
+                k += 1;
+            }
+            let suite = phrases.iter().any(|p| p.debut <= t && t < p.fin + delai);
+            if let Some(tout) = f.attendre(a(t), suite) {
+                apres.push((t, tout));
+            }
+            t += 0.05;
+        }
+        // Le tour est entier s'il part en une seule demande, qui porte la dernière phrase entendue, sans son appel à
+        // Eve (rien ne s'est perdu après la première) ; sans aucune demande, « Eve » n'a pas été entendu (l'oreille,
+        // pas la fin du tour).
+        let derniere = textes
+            .last()
+            .map(|t| parole::normaliser(&parole::appel_a_eve(t).unwrap_or_else(|| t.clone())))
+            .unwrap_or_default();
+        let entier =
+            |envois: &[(f32, String)]| envois.len() == 1 && parole::normaliser(&envois[0].1).ends_with(&derniere);
+        for (i, (sorte, envois)) in [("avant", &avant), ("après", &apres)].into_iter().enumerate() {
+            let ok = entier(envois);
+            let verdict = if envois.is_empty() {
+                "« Eve » pas entendu"
+            } else if ok {
+                "entier"
+            } else {
+                "COUPÉ"
+            };
+            if !ok && !envois.is_empty() {
+                coupes[i] += 1;
+            } else if ok && manifeste.get("pauses").and_then(Value::as_array).is_some_and(Vec::is_empty) {
+                attentes[i].push(envois[0].0 - vraie_fin);
+            }
+            let detail: Vec<String> = envois.iter().map(|(t, e)| format!("+{:.2} s « {e} »", t - vraie_fin)).collect();
+            println!("  {sorte:5} : {verdict} — {}", detail.join(" ; "));
+        }
+    }
+    let moyenne = |v: &[f32]| if v.is_empty() { 0.0 } else { v.iter().sum::<f32>() / v.len() as f32 };
+    println!(
+        "\n{} sons : coupés à tort, avant {} et après {} ; une phrase finie part {:.2} s puis {:.2} s après la fin de \
+         sa parole (en moyenne)",
+        wavs.len(),
+        coupes[0],
+        coupes[1],
+        moyenne(&attentes[0]),
+        moyenne(&attentes[1])
+    );
     0
 }

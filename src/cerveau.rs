@@ -4,6 +4,8 @@
 //! - il parle par le protocole des SDK (`--input-format stream-json`), une conversation qui dure tant qu'Eve tourne, et
 //!   rend sa réponse mot à mot (`--include-partial-messages`) : Eve la dit pendant qu'elle s'écrit ;
 //! - il reçoit la consigne du mode vocal ([`consigne_vocale`]) et, à l'initialisation, le crochet de la garde ;
+//! - il écrit pour la voix : la partie « LA PAROLE » de la consigne ([`consigne_de_la_parole`]) lui dit comment — au
+//!   féminin, bref, une question seulement au besoin, rien que la voix lirait mal ;
 //! - il travaille dans le dossier du profil actif ([`crate::profils`]) : son `CLAUDE.md`, sa consigne vocale s'il en a
 //!   une, sinon celle d'Eve ([`consigne_du_profil`]) ; chaque profil reçoit aussi la partie « PROFILS »
 //!   ([`consigne_des_profils`]) : où il travaille, et les commandes d'Eve pour passer d'un profil à l'autre ;
@@ -73,6 +75,8 @@ impl Cerveau {
         // d'Eve.
         let mut consigne = consigne_du_profil(&l.dossier, &l.dossier_d_eve, &l.qui)
             .unwrap_or_else(|| consigne_vocale(&l.qui, &l.entreprise));
+        consigne.push_str("\n\n");
+        consigne.push_str(&consigne_de_la_parole());
         // Constructo AI : ce qu'il faut à Claude pour s'en servir, que la consigne d'un spécialiste installé avant lui
         // (et celle de l'Adjointe) n'a pas.
         if l.espace.constructo && !consigne.lines().any(|ligne| ligne.trim() == ENTETE_CONSTRUCTO) {
@@ -243,6 +247,13 @@ impl Cerveau {
     /// Un message de la personne.
     pub fn dire(&self, texte: &str) -> io::Result<()> {
         self.ecrire(&protocole::message(texte))
+    }
+
+    /// L'effort de réflexion des tours qui suivent ([`protocole::effort`]) : Claude Code le prend avant de lire le
+    /// message suivant.
+    pub fn regler_l_effort(&self, niveau: &str) -> io::Result<()> {
+        let id = self.prochain_id("effort");
+        self.ecrire(&protocole::demande(&id, protocole::effort(niveau)))
     }
 
     /// Interrompt le tour en cours.
@@ -529,6 +540,45 @@ pub fn consigne_des_dessins() -> String {
     )
 }
 
+/// La ligne qui ouvre la partie « LA PAROLE » de la consigne.
+const ENTETE_PAROLE: &str = "LA PAROLE";
+
+/// La partie « LA PAROLE » de la consigne, que reçoit toute Eve : comment écrire pour la voix. Ce qui précède les trois
+/// tirets se dit (`parole::EnFlux`), phrase par phrase, dès qu'elle est écrite, par une voix de synthèse qui ne respire
+/// qu'à la ponctuation et lit mal un symbole. Et Eve est une femme : dans les réponses de l'Assistante (relevé le
+/// 2026-10-27, 275 réponses), Claude écrivait « heureux que » et « content que », nommait la personne une fois sur
+/// trois et finissait deux réponses sur trois par une question. Ces règles vivent avec le programme qui parle : une Eve
+/// installée avant elles les reçoit avec sa mise à jour, et la consigne vocale de chaque Eve (`EVE_CONSIGNE.md`) ne
+/// garde que ce qui est propre à la personne.
+pub fn consigne_de_la_parole() -> String {
+    format!(
+        "{ENTETE_PAROLE}\n\
+         - Ce que tu écris avant les trois tirets est dit à voix haute, pendant que tu l'écris. Écris pour l'oreille, \
+         comme on parle au Québec : chaleureuse, simple et brève (« courriel », « fin de semaine », « dîner », \
+         « souper », « tantôt »), sans forcer.\n\
+         - Eve est une femme : tout ce qui te dit s'accorde au féminin, même sans « je » — « Contente que ce soit \
+         réglé », « Désolée », « Prête! », « je suis sûre », « heureuse que ça aille mieux ».\n\
+         - Réponds comme à l'oral : une à trois phrases courtes en tout. La première se dit dès qu'elle est écrite : \
+         cinq à dix mots, l'essentiel. Chaque phrase, une idée, une quinzaine de mots au plus ; le reste, s'il le \
+         faut, va après les trois tirets. Avant un travail de plus de quelques secondes, dis en quatre ou cinq mots ce \
+         que tu fais ; pas plus.\n\
+         - Varie tes débuts : pas toujours « Oui », « Parfait » ou « D'accord » ; souvent, entre tout de suite dans la \
+         réponse. Le prénom de la personne, presque jamais : au plus pour la saluer. On ne nomme pas quelqu'un à qui \
+         l'on parle dans chaque réponse, ni pour le féliciter, le remercier ou lui souhaiter bonne nuit.\n\
+         - Une question seulement quand tu as besoin de la réponse pour agir. D'ordinaire, finis sur ce qui est fait \
+         ou ce qu'il faut savoir, sans « Autre chose? » ni « Qu'est-ce que je peux faire pour toi? ».\n\
+         - Rien de ce qui se dit ne doit se lire mal : ni parenthèses, ni barre oblique, ni guillemets, ni symbole \
+         (%, $, &, +, #, →), ni liste, ni markdown, ni émoji. Une précision va entre virgules ; deux ou trois choses \
+         se relient par « et » ou « ou ». Arrondis les nombres et les montants (« environ 940 dollars ») ; ne lis ni \
+         adresse Web, ni chemin de fichier, ni identifiant technique.\n\
+         - Ce qui se lit mal à voix haute (une liste, des montants exacts, des adresses, des étapes) : dis \
+         l'essentiel, puis écris une ligne qui ne contient que trois tirets (---), puis le détail. Seul ce qui précède \
+         les trois tirets se dit ; tout s'affiche à l'écran.\n\
+         - Ce que tu reçois est une transcription automatique : elle peut écorcher un nom, un nombre, une adresse ou \
+         un montant. S'il décide d'une action, redis-le pour le faire confirmer avant d'agir."
+    )
+}
+
 /// La ligne qui ouvre la partie « ÉMOTIONS » de la consigne.
 const ENTETE_EMOTIONS: &str = "ÉMOTIONS";
 
@@ -653,12 +703,7 @@ pub fn consigne_vocale(qui: &str, entreprise: &str) -> String {
          Tu es Eve, l'assistante de {entreprise} : l'Adjointe du CLAUDE.md, de vive voix. La personne \
          parle dans son micro (ou écrit), et entend ta réponse lue par une voix de synthèse, phrase par phrase, pendant que \
          tu l'écris. Ton texte complet s'affiche aussi dans la fenêtre d'Eve. La personne devant le poste : {qui}.\n\
-         - Ce que tu reçois est une transcription automatique : elle peut écorcher un nom propre, un numéro ou un montant. \
-         Si l'un d'eux décide d'une action, redis-le pour le faire confirmer avant d'agir.\n\
          - Parle à la personne comme elle te parle : si elle te tutoie, tutoie-la.\n\
-         - Ta première phrase est lue dès qu'elle est écrite : commence par l'essentiel. Avant une recherche qui prendra \
-         plus de quelques secondes, tu peux dire en quatre ou cinq mots ce que tu fais (« Je regarde le calendrier. ») ; \
-         pas plus.\n\
          - Va droit au but : une question appelle une ou deux lectures au plus, puis la réponse. Si un outil échoue ou \
          tarde, ne le relance pas : prends un autre chemin.\n\
          - Lire la base du premier coup : l'outil sql du serveur MCP, une seule requête. Ces colonnes sont exactes \
@@ -690,12 +735,6 @@ pub fn consigne_vocale(qui: &str, entreprise: &str) -> String {
          (le fichier lui-même).\n\
          Le script calendrier_en_ligne.py et la route /api/calendrier servent à écrire, pas à lire vite.\n\
          - Avec Eve, préfère les scripts de l'Adjointe et l'outil sql. Le jeton et les clés ne se lisent jamais.\n\
-         - Réponds comme à l'oral : une à trois phrases courtes, en français, sans markdown, sans tableau, sans liste, \
-         sans émoji. À l'oral, arrondis les montants (« environ 940 dollars ») et ne lis ni chemin de fichier ni \
-         identifiant technique.\n\
-         - Si un détail se lit mal à voix haute (une liste, un brouillon, des montants exacts, un chemin, un lien), dis \
-         l'essentiel, puis écris une ligne qui ne contient que trois tirets (---), puis le détail. Seul ce qui précède les \
-         trois tirets est lu ; tout s'affiche à l'écran.\n\
          - Après les trois tirets, quand ça aide, une carte : un bloc ```carte qui ne contient qu'un objet JSON. Quatre \
          sortes. agenda : {{\"type\":\"agenda\",\"titre\":\"…\",\"jours\":[{{\"jour\":\"jeu. 22 oct.\",\"evenements\":\
          [{{\"heure\":\"8 h\",\"titre\":\"…\",\"detail\":\"…\",\"sorte\":\"confirme|attente|gros|echeance|ferie\"}}]}}]}} ; \
@@ -840,6 +879,41 @@ mod essais {
             assert!(c.contains(attendu), "{attendu} manque :\n{c}");
         }
         assert!(!c.contains("  "), "les lignes se suivent sans blancs doublés :\n{c}");
+    }
+
+    /// La partie « LA PAROLE » dit d'écrire pour l'oreille : au féminin, bref, le prénom presque jamais, une question
+    /// seulement au besoin, rien que la voix lirait mal, les trois tirets.
+    #[test]
+    fn la_consigne_de_la_parole() {
+        let c = consigne_de_la_parole();
+        assert!(c.starts_with("LA PAROLE\n- Ce que tu écris avant les trois tirets est dit à voix haute"), "{c}");
+        for attendu in [
+            "Eve est une femme",
+            "même sans « je » — « Contente que ce soit réglé », « Désolée », « Prête! »",
+            "une à trois phrases courtes en tout",
+            "La première se dit dès qu'elle est écrite",
+            "Le prénom de la personne, presque jamais",
+            "Une question seulement quand tu as besoin de la réponse",
+            "sans « Autre chose? »",
+            "ni parenthèses, ni barre oblique",
+            "une ligne qui ne contient que trois tirets (---)",
+            "transcription automatique",
+        ] {
+            assert!(c.contains(attendu), "{attendu} manque :\n{c}");
+        }
+        assert!(!c.contains("  ") && !c.contains('{') && !c.contains('}'), "ni blancs doublés ni gabarit :\n{c}");
+        // La consigne de la trousse ne recopie plus ces règles : elles ne vivent qu'ici.
+        let trousse = consigne_vocale("Sam", "");
+        for recopie in ["transcription automatique", "Ta première phrase", "trois tirets (---)", "comme à l'oral"] {
+            assert!(!trousse.contains(recopie), "{recopie} recopié dans la consigne de la trousse");
+        }
+        // Le gabarit du kit non plus : sa partie « LA VOIX » ne garde que ce qui est propre à la personne.
+        let gabarit = GABARIT_DU_KIT.replace("\r\n", "\n");
+        let voix = gabarit.split("\nLA VOIX\n").nth(1).and_then(|v| v.split("\nCONSTRUCTO AI\n").next());
+        let voix = voix.expect("le gabarit a sa partie LA VOIX");
+        for recopie in ["transcription automatique", "Ta première phrase", "Réponds comme à l'oral"] {
+            assert!(!voix.contains(recopie), "{recopie} recopié dans le gabarit du kit");
+        }
     }
 
     /// La partie « PRONONCIATION » dit la commande, en PowerShell et en Bash, et ce qu'on y écrit.

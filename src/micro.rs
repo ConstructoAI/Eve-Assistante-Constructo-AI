@@ -7,10 +7,15 @@
 //!   que celles qui commencent par « Eve ». En sourdine pendant qu'Eve parle : elle ne s'entend pas elle-même.
 //!
 //! Tout se ramène à 16 kHz, la cadence de Whisper.
+//!
+//! La poignée d'essai `EVE_MICRO=<dossier>` remplace le micro du poste par les sons qu'on dépose dans ce dossier
+//! ([`Micro::ouvrir`]) : le tour de parole s'essaie de bout en bout, sans personne devant le poste ni rien qui joue
+//! dans la pièce.
 
 use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -21,8 +26,12 @@ pub const CADENCE: u32 = 16_000;
 /// Le seuil de parole le plus bas (moyenne quadratique), quel que soit le silence du bureau.
 pub const SEUIL_MIN: f32 = 0.012;
 
+/// Le silence qui finit une phrase de l'écoute continue : la phrase part alors à l'oreille. Une pause plus longue au
+/// milieu d'une phrase la coupe ; la fin du tour (`parole::FinDeTour`) en attend la suite quand elle s'arrête en
+/// suspens.
+pub const SILENCE_DE_FIN: f32 = 0.7;
+
 /// Le détecteur de parole de l'écoute continue, par blocs de 20 ms.
-#[derive(Default)]
 struct Detecteur {
     en_parole: bool,
     phrase: Vec<f32>,
@@ -30,6 +39,22 @@ struct Detecteur {
     silence: usize,
     au_dessus: usize,
     bruit: f32,
+    /// Le silence qui finit une phrase, en secondes ([`SILENCE_DE_FIN`] ; un autre pour l'essai du tour).
+    fin: f32,
+}
+
+impl Default for Detecteur {
+    fn default() -> Detecteur {
+        Detecteur {
+            en_parole: false,
+            phrase: Vec::new(),
+            bloc: Vec::new(),
+            silence: 0,
+            au_dessus: 0,
+            bruit: 0.0,
+            fin: SILENCE_DE_FIN,
+        }
+    }
 }
 
 impl Detecteur {
@@ -41,7 +66,7 @@ impl Detecteur {
         self.au_dessus = 0;
     }
 
-    /// Un échantillon de plus ; une phrase finie (0,7 s de silence, ou 20 s de parole) part dans `phrases`.
+    /// Un échantillon de plus ; une phrase finie (son silence de fin, ou 20 s de parole) part dans `phrases`.
     fn ajouter(&mut self, m: f32, taux: u32, avance: &VecDeque<f32>, phrases: &mut VecDeque<Vec<f32>>) {
         self.bloc.push(m);
         if self.bloc.len() < (taux / 50).max(1) as usize {
@@ -66,7 +91,8 @@ impl Detecteur {
         } else {
             self.phrase.extend_from_slice(&self.bloc);
             self.silence = if niveau < seuil * 0.7 { self.silence + self.bloc.len() } else { 0 };
-            let fin = self.silence > taux as usize * 7 / 10 || self.phrase.len() > taux as usize * 20;
+            let fin =
+                self.silence > (taux as f32 * self.fin).round() as usize || self.phrase.len() > taux as usize * 20;
             if fin {
                 let utile = self.phrase.len().saturating_sub(self.silence);
                 if utile > taux as usize * 4 / 10 {
@@ -121,15 +147,19 @@ impl Capture {
 }
 
 pub struct Micro {
-    _flux: cpal::Stream,
+    /// Le flux du micro du poste ; aucun pour le micro d'essai ([`micro_d_essai`]).
+    _flux: Option<cpal::Stream>,
     partage: Arc<Mutex<Capture>>,
     taux: u32,
     pub nom: String,
 }
 
 impl Micro {
-    /// Le micro par défaut de Windows.
+    /// Le micro par défaut de Windows ; sous la poignée d'essai `EVE_MICRO`, le micro d'essai ([`micro_d_essai`]).
     pub fn ouvrir() -> Result<Micro, String> {
+        if let Some(dossier) = std::env::var_os("EVE_MICRO").filter(|d| !d.is_empty()) {
+            return Ok(micro_d_essai(PathBuf::from(dossier)));
+        }
         let hote = cpal::default_host();
         let appareil = hote.default_input_device().ok_or("aucun micro branché")?;
         let nom = appareil.description().map(|d| d.name().to_string()).unwrap_or_else(|_| "micro".into());
@@ -146,7 +176,7 @@ impl Micro {
             autre => return Err(format!("format du micro non pris en charge : {autre:?}")),
         }?;
         flux.play().map_err(|e| format!("le micro ne démarre pas : {e}"))?;
-        Ok(Micro { _flux: flux, partage, taux, nom })
+        Ok(Micro { _flux: Some(flux), partage, taux, nom })
     }
 
     /// La touche est enfoncée : on garde tout, à partir de la demi-seconde d'avance ; l'écoute continue s'efface.
@@ -223,6 +253,60 @@ const SILENCE_MAX: Duration = Duration::from_secs(2);
 /// la réouverture toutes les 5 s le réparait par accident ; sans elle, Eve resterait sourde, « Prête » à l'écran.
 fn en_panne_de(c: &Capture, maintenant: Instant) -> bool {
     c.en_panne || maintenant.saturating_duration_since(c.dernier_paquet) > SILENCE_MAX
+}
+
+/// Le micro d'essai (`EVE_MICRO=<dossier>`) : à la place du micro du poste, Eve entend les sons WAV qu'on dépose dans
+/// ce dossier, un à un dans l'ordre de leur nom, en temps réel, comme dits devant elle — chacun renommé `.entendu`
+/// quand il commence —, sur un léger souffle de micro (vers -70 dBFS). Le tour de parole s'essaie ainsi de bout en
+/// bout, la touche (les gestes de la fenêtre) comme l'écoute continue, sans rien jouer dans la pièce. Jamais posée par
+/// Eve elle-même.
+fn micro_d_essai(dossier: PathBuf) -> Micro {
+    let partage = Arc::new(Mutex::new(Capture::nouvelle(CADENCE)));
+    let p = partage.clone();
+    let nom = format!("micro d'essai ({})", dossier.display());
+    thread::spawn(move || {
+        let pas = CADENCE as usize / 100;
+        let (mut son, mut prochain, mut regarde) = (VecDeque::new(), Instant::now(), Instant::now());
+        let mut hasard = 0x2545_f491_4f6c_dd1d_u64;
+        // Jusqu'à ce que le micro soit lâché (une réouverture en fait un autre).
+        while Arc::strong_count(&p) > 1 {
+            if son.is_empty() && regarde.elapsed() >= Duration::from_millis(100) {
+                regarde = Instant::now();
+                if let Some(f) = premier_wav(&dossier) {
+                    match lire_wav(&f) {
+                        Ok(s) => son.extend(s),
+                        Err(e) => crate::journal::ecrire(&format!("micro d'essai : {} ({e})", f.display())),
+                    }
+                    let _ = std::fs::rename(&f, f.with_extension("entendu"));
+                }
+            }
+            let bloc: Vec<f32> = (0..pas)
+                .map(|_| {
+                    hasard ^= hasard << 13;
+                    hasard ^= hasard >> 7;
+                    hasard ^= hasard << 17;
+                    let souffle = ((hasard >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.001;
+                    son.pop_front().unwrap_or(0.0) + souffle
+                })
+                .collect();
+            recevoir(&p, &bloc, 1, de_f32);
+            prochain += Duration::from_millis(10);
+            thread::sleep(prochain.saturating_duration_since(Instant::now()));
+        }
+    });
+    Micro { _flux: None, partage, taux: CADENCE, nom }
+}
+
+/// Le premier son WAV d'un dossier, dans l'ordre des noms.
+fn premier_wav(dossier: &Path) -> Option<PathBuf> {
+    let mut wavs: Vec<PathBuf> = std::fs::read_dir(dossier)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("wav")))
+        .collect();
+    wavs.sort();
+    wavs.into_iter().next()
 }
 
 fn de_f32(x: f32) -> f32 {
@@ -333,6 +417,39 @@ fn recevoir<T: Copy>(partage: &Mutex<Capture>, donnees: &[T], canaux: usize, con
         let rms = (somme / n as f32).sqrt();
         c.niveau = c.niveau * 0.5 + rms * 0.5;
     }
+}
+
+/// Une phrase de l'écoute continue, rejouée sur un son ([`rejouer_l_ecoute`]) : quand le détecteur l'a entendue
+/// commencer et quand il l'a finie (en secondes du son), et son son, tel qu'il part à l'oreille.
+pub struct PhraseEntendue {
+    pub debut: f32,
+    pub fin: f32,
+    pub son: Vec<f32>,
+}
+
+/// L'écoute continue rejouée sur un son (mono, à `taux`), comme le micro la mène ([`recevoir`] : la demi-seconde
+/// d'avance, le détecteur et son silence de fin, `fin` secondes) : les phrases qu'il en tire. Pour l'essai du tour de
+/// parole (`eve --essai-tour`).
+pub fn rejouer_l_ecoute(son: &[f32], taux: u32, fin: f32) -> Vec<PhraseEntendue> {
+    let mut d = Detecteur { fin, ..Detecteur::default() };
+    let (mut avance, mut sorties, mut rendues) = (VecDeque::new(), VecDeque::new(), Vec::new());
+    let mut debut = 0.0;
+    for (i, &m) in son.iter().enumerate() {
+        avance.push_back(m);
+        if avance.len() > taux as usize / 2 {
+            avance.pop_front();
+        }
+        let avant = d.en_parole;
+        d.ajouter(m, taux, &avance, &mut sorties);
+        let t = (i + 1) as f32 / taux as f32;
+        if d.en_parole && !avant {
+            debut = t;
+        }
+        if let Some(p) = sorties.pop_front() {
+            rendues.push(PhraseEntendue { debut, fin: t, son: p });
+        }
+    }
+    rendues
 }
 
 /// Ramène un son mono à 16 kHz : une moyenne glissante (un passe-bas sommaire, contre le repliement), puis une
@@ -516,5 +633,71 @@ mod essais {
         assert_eq!(phrases.len(), 1);
         let p = &phrases[0];
         assert!(p.len() > taux as usize && p.len() < taux as usize * 2 + taux as usize / 2, "{}", p.len());
+    }
+
+    /// Le micro d'essai joue en temps réel le son qu'on dépose dans son dossier : tenu par la touche, il le rend ; le
+    /// son joué se renomme ; lâché, son fil s'arrête.
+    #[test]
+    fn le_micro_d_essai_joue_ce_qu_on_depose() {
+        let dossier = std::env::temp_dir().join(format!("eve-micro-essai-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dossier);
+        std::fs::create_dir_all(&dossier).unwrap();
+        // 0,6 s d'un son fort, à 16 kHz.
+        let echantillons: Vec<i16> = (0..9_600).map(|i| (8_000.0 * (i as f32 * 0.05).sin()) as i16).collect();
+        let mut wav = Vec::new();
+        for (bloc, valeur) in [(b"RIFF", 36 + 19_200u32), (b"WAVE", 0)] {
+            wav.extend_from_slice(bloc);
+            if valeur > 0 {
+                wav.extend_from_slice(&valeur.to_le_bytes());
+            }
+        }
+        wav.extend_from_slice(b"fmt ");
+        for v in [16u32, 1 | (1 << 16), 16_000, 32_000, 2 | (16 << 16)] {
+            wav.extend_from_slice(&v.to_le_bytes());
+        }
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&19_200u32.to_le_bytes());
+        wav.extend(echantillons.iter().flat_map(|e| e.to_le_bytes()));
+        let m = micro_d_essai(dossier.clone());
+        m.debut();
+        std::fs::write(dossier.join("a.tmp"), &wav).unwrap();
+        std::fs::rename(dossier.join("a.tmp"), dossier.join("a.wav")).unwrap();
+        std::thread::sleep(Duration::from_millis(1_200));
+        let entendu = m.fin();
+        assert!(dossier.join("a.entendu").is_file(), "le son joué se renomme");
+        assert!(entendu.len() > 15_000 && rms(&entendu) > 0.05, "{} échantillons, {}", entendu.len(), rms(&entendu));
+        assert!(!m.en_panne());
+        drop(m);
+        let _ = std::fs::remove_dir_all(&dossier);
+    }
+
+    /// L'écoute rejouée sur un son : une pause plus courte que le silence de fin ne coupe pas la phrase ; plus longue,
+    /// elle la coupe — chaque morceau avec ses instants, son avance comprise.
+    #[test]
+    fn l_ecoute_rejouee_coupe_aux_longues_pauses() {
+        let taux = 16_000;
+        // 0,5 s de silence, 1 s de « parole », une pause, 1 s de « parole », 2 s de silence.
+        let son = |pause: f32| -> Vec<f32> {
+            let n = |s: f32| (s * taux as f32) as usize;
+            let parole = |k: usize| (0..k).map(|i| 0.3 * (i as f32 * 0.05).sin()).collect::<Vec<f32>>();
+            [vec![0.001; n(0.5)], parole(n(1.0)), vec![0.001; n(pause)], parole(n(1.0)), vec![0.001; n(2.0)]].concat()
+        };
+        let une = rejouer_l_ecoute(&son(0.5), taux, SILENCE_DE_FIN);
+        assert_eq!(une.len(), 1, "une pause de 0,5 s ne coupe pas");
+        assert!(
+            (une[0].debut - 0.56).abs() < 0.03 && (une[0].fin - 3.7).abs() < 0.05,
+            "{} {}",
+            une[0].debut,
+            une[0].fin
+        );
+        let deux = rejouer_l_ecoute(&son(1.0), taux, SILENCE_DE_FIN);
+        assert_eq!(deux.len(), 2, "une pause de 1 s coupe");
+        assert!(
+            (deux[0].fin - 2.2).abs() < 0.05 && (deux[1].debut - 2.56).abs() < 0.03,
+            "{} {}",
+            deux[0].fin,
+            deux[1].debut
+        );
+        assert_eq!(rejouer_l_ecoute(&son(1.0), taux, 1.2).len(), 1, "un silence de fin plus long ne la coupe pas");
     }
 }

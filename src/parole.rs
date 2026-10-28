@@ -21,10 +21,6 @@ const HALLUCINATIONS: [&str; 8] = [
     "merci de votre attention", "sous titres par", "transcription par",
 ];
 
-/// Ce qui se dit autrement qu'il s'écrit.
-const REMPLACEMENTS: [(&str, &str); 6] =
-    [(" → ", ", "), ("→", ", "), (" -> ", ", "), (" => ", ", "), (" & ", " et "), ("≈", "environ ")];
-
 /// Le texte à lire à voix haute.
 pub fn pour_la_voix(texte: &str) -> String {
     let mut morceaux: Vec<String> = Vec::new();
@@ -57,13 +53,11 @@ fn est_un_separateur(l: &str) -> bool {
     (l.len() >= 3 && l.chars().all(|c| c == '-')) || l == "***" || l == "___"
 }
 
-/// Un morceau de texte prêt à dire : sans markdown, sans adresse web, ses flèches et ses symboles en mots.
+/// Un morceau de texte prêt à dire : sans markdown, sans adresse web. Ses symboles, ses flèches et ses nombres, la
+/// diction de la voix les dit (`diction::tel_qu_il_se_dit`), comme tout ce qui se dit.
 fn propre(l: &str) -> String {
-    let mut s = sans_markdown(l);
-    for (de, vers) in REMPLACEMENTS {
-        s = s.replace(de, vers);
-    }
-    s.split_whitespace()
+    sans_markdown(l)
+        .split_whitespace()
         .filter(|m| !m.starts_with("http://") && !m.starts_with("https://"))
         .collect::<Vec<_>>()
         .join(" ")
@@ -756,6 +750,102 @@ fn replier_les_boucles(texte: &str) -> String {
     mots.join(" ")
 }
 
+/// Les mots sur lesquels une phrase française ne finit pas (en minuscules, tels qu'écrits, accents compris) : une
+/// hésitation, une conjonction, une préposition, un article ou un déterminant, un pronom sujet, « ne », « très »,
+/// « c'est », et un souhait ou une demande qui attend son objet (« j'aimerais », « peux-tu » sans point
+/// d'interrogation : l'oreille ôte souvent le « euh » qui suivait). Seul en fin de phrase, il dit que la personne
+/// cherche la suite. Ni « là » (« je suis là »), ni « a » (« il y en a »), ni « en » ou « avec » (« mets-en »,
+/// « viens-tu avec ? »), ni « un », « elle », « nous », ni « veux » (« si tu veux »), ni « faudrait » (« oui, il
+/// faudrait ») : une phrase finit bien sur eux ; un pronom après un trait d'union (« fais-le ») non plus : le mot
+/// entier compte.
+const SANS_FIN: [&str; 71] = [
+    "euh", "heu", "euhm", "hum", "hmm", "ben", "bah", "et", "ou", "mais", "car", "ni", "puis", "pis", "que", "qu'",
+    "parce", "puisque", "lorsque", "si", "comme", "de", "d'", "du", "des", "à", "au", "aux", "pour", "sans", "chez",
+    "dans", "vers", "par", "entre", "le", "la", "les", "l'", "ce", "cet", "cette", "ces", "mon", "ma", "mes", "ton",
+    "ta", "tes", "son", "sa", "ses", "je", "j'", "tu", "il", "ils", "ne", "très", "c'est", "c'était", "j'aimerais",
+    "aimerais", "voudrais", "souhaiterais", "peux-tu", "pourrais-tu", "veux-tu", "voudrais-tu", "est-ce", "qu'est-ce",
+];
+
+/// La personne s'est-elle arrêtée en suspens — sur une virgule, des points de suspension, un tiret, une hésitation
+/// (« euh ») ou un mot sur lequel une phrase ne finit pas ([`SANS_FIN`] : « et », « parce que », « de », « le »,
+/// « je ») ? Elle reprend son souffle ou cherche ses mots : Eve attend la suite ([`FinDeTour`]) au lieu d'envoyer la
+/// moitié d'une phrase (« C'est parti, », parti seul à Claude le 27 octobre 2026). Une question, une exclamation :
+/// finie.
+pub fn en_suspens(texte: &str) -> bool {
+    let t = texte.trim();
+    if t.ends_with([',', ';', ':', '…', '-', '—', '–']) || t.ends_with("..") {
+        return true;
+    }
+    if t.ends_with(['?', '!']) {
+        return false;
+    }
+    let dernier = t.trim_end_matches('.').split_whitespace().last().unwrap_or("").to_lowercase().replace('’', "'");
+    SANS_FIN.contains(&dernier.trim_start_matches(['«', '"', '(']))
+}
+
+/// Ce que [`FinDeTour`] décide d'une phrase entendue.
+#[derive(Debug, PartialEq)]
+pub enum Tour {
+    /// Elle part : finie, ou sa suite n'est pas venue (avec les phrases en suspens qui la précédaient).
+    Part(String),
+    /// Elle attend sa suite (jusqu'à [`FinDeTour::SUITE`] de silence).
+    Attend,
+}
+
+/// La fin d'un tour de parole : une phrase entendue en suspens ([`en_suspens`]) attend sa suite — une phrase de plus,
+/// dite dans le temps de [`FinDeTour::SUITE`] (la touche reprise, ou la personne qui recommence à parler) —, puis part
+/// avec elle, en une seule demande ; sans suite, elle part seule. Le chef la tient ; l'essai du tour (`eve
+/// --essai-tour`) la mène sur des sons inventés, avec la même horloge.
+#[derive(Debug, Default)]
+pub struct FinDeTour {
+    /// Ce qui attend sa suite, jusqu'à quand, et en combien de morceaux (chacun s'est arrêté sur une pause).
+    attente: Option<(String, std::time::Instant, usize)>,
+}
+
+impl FinDeTour {
+    /// Le temps laissé à la suite, compté depuis que la phrase en suspens est transcrite : ce qui s'y commence (la
+    /// touche tenue, une phrase que le micro entend) la prolonge jusqu'à sa fin.
+    pub const SUITE: std::time::Duration = std::time::Duration::from_millis(2000);
+    /// Au plus, autant de morceaux : la demande part ensuite, même en suspens.
+    const MORCEAUX_MAX: usize = 4;
+
+    /// Une phrase entendue (`texte`, transcrite à `maintenant`) : jointe à celles qui attendaient, elle part ou attend
+    /// sa suite.
+    pub fn phrase(&mut self, texte: &str, maintenant: std::time::Instant) -> Tour {
+        let texte = texte.trim();
+        let (tout, morceaux) = match self.attente.take() {
+            Some((avant, _, n)) if texte.is_empty() => (avant, n),
+            Some((avant, _, n)) => (format!("{avant} {texte}"), n + 1),
+            None => (texte.to_string(), 1),
+        };
+        if !tout.is_empty() && morceaux < Self::MORCEAUX_MAX && en_suspens(&tout) {
+            self.attente = Some((tout, maintenant + Self::SUITE, morceaux));
+            return Tour::Attend;
+        }
+        Tour::Part(tout)
+    }
+
+    /// Le temps passe (`maintenant`) ; `suite` : une suite commence (la touche est tenue, ou le micro entend parler) —
+    /// elle prolonge l'attente. Sans suite à l'échéance, ce qui attendait part.
+    pub fn attendre(&mut self, maintenant: std::time::Instant, suite: bool) -> Option<String> {
+        let (_, jusqua, _) = self.attente.as_ref()?;
+        if suite || maintenant < *jusqua {
+            return None;
+        }
+        self.oublier()
+    }
+
+    /// Une phrase attend sa suite.
+    pub fn attend(&self) -> bool {
+        self.attente.is_some()
+    }
+
+    /// Ce qui attendait, rendu tout de suite (la personne a tapé sa demande, ou dit « arrête »).
+    pub fn oublier(&mut self) -> Option<String> {
+        self.attente.take().map(|(t, _, _)| t)
+    }
+}
+
 /// La fin de la première phrase complète de `s` (l'index qui suit sa ponctuation et ses guillemets fermants), si l'on
 /// peut déjà en décider : il faut voir ce qui suit — un point peut aussi finir « J.L. » ou une initiale, et une phrase
 /// continue après une question, une exclamation ou des points de suspension suivis d'une minuscule (« Il a crié
@@ -1183,6 +1273,31 @@ pub fn est_un_arret(dit: &str) -> bool {
     let n = normaliser(dit);
     let mots = n.split_whitespace().count();
     mots > 0 && mots <= 3 && ["arrete", "stop", "suffit", "silence", "tais", "annule"].iter().any(|m| contient(&n, m))
+}
+
+/// Les mots d'un propos qui se répond sans réfléchir ([`propos_bref`]), normalisés ([`normaliser`]), dans l'ordre :
+/// saluer et prendre des nouvelles ; « tu m'entends ? » ; remercier, complimenter, une tendresse ; dire au revoir ;
+/// l'heure qu'il est (Eve la donne à Claude en tête de chaque demande) et la politesse au bout. Ni « oui », ni « ok »,
+/// ni « d'accord », ni « vas-y », ni « parfait », ni « correct », ni « non » : un accord ou un refus répond souvent à
+/// ce que Claude vient de proposer, et part avec l'effort des réglages.
+const MOTS_BREFS: &[&str] = &[
+    "salut", "bonjour", "bonsoir", "allo", "coucou", "hey", "hello", "hi", "yo", "comment", "ca", "va", "vas", "allez",
+    "se", "passe", "tu", "toi", "vous", "et", "bien", "tres", "pas", "mal", "super", "est", "ce", "que", "m", "me",
+    "entends", "entend", "entendez", "merci", "beaucoup", "mille", "fois", "infiniment", "vraiment", "pour", "tout",
+    "c", "gentil", "gentille", "recu", "bravo", "excellent", "excellente", "genial", "geniale", "wow", "cool",
+    "magnifique", "superbe", "es", "avec", "moi", "je", "t", "aime", "adore", "bonne", "nuit", "soiree", "journee",
+    "fin", "de", "semaine", "a", "demain", "plus", "tard", "tantot", "bientot", "au", "revoir", "bye", "la",
+    "prochaine", "l", "heure", "quelle", "il", "s", "te", "plait", "stp", "svp",
+];
+
+/// Un propos qui se répond sans réfléchir — un salut, des nouvelles (« comment ça va ? »), « tu m'entends ? », un
+/// merci, un compliment, un au revoir, l'heure qu'il est : douze mots au plus, tous de [`MOTS_BREFS`] ou un nom d'Eve
+/// (aucun chiffre). Claude y répond avec un effort bref (`chef.rs`) : à l'effort max, il réfléchissait cinq secondes
+/// avant de dire « Salut ! ».
+pub fn propos_bref(dit: &str) -> bool {
+    let n = normaliser(dit);
+    let mots: Vec<&str> = n.split_whitespace().collect();
+    !mots.is_empty() && mots.len() <= 12 && mots.iter().all(|m| MOTS_BREFS.contains(m) || EVE.contains(m))
 }
 
 /// Les formes sous lesquelles Whisper rend « Eve », le mot d'éveil.
@@ -1812,6 +1927,82 @@ mod essais {
         }
     }
 
+    /// Une phrase s'arrête en suspens sur une virgule, une hésitation, un mot sur lequel le français ne finit pas ; une
+    /// phrase finie, une question, un pronom après un trait d'union, « là », « il y en a » : non.
+    #[test]
+    fn une_phrase_en_suspens_se_reconnait() {
+        for t in [
+            "C'est parti,",
+            "Eve, peux-tu regarder mes courriels, euh",
+            "J'aimerais savoir si le",
+            "Il faut que",
+            "Regarde les factures de",
+            "Envoie le courriel à Marie et",
+            "Je voudrais parler de…",
+            "Bon, ben...",
+            "Je pense que c'est",
+            "Parce qu'",
+            "Mets ça dans le.",
+            // L'oreille a ôté le « euh » d'après : « Eve, j'aimerais, euh que tu prépares la soumission ».
+            "Eve, J'aimerais",
+            "Eve, peux-tu.",
+            "Qu'est-ce",
+        ] {
+            assert!(en_suspens(t), "en suspens : {t}");
+        }
+        for t in [
+            "Quelle heure est-il ?",
+            "Merci beaucoup.",
+            "Non mais je te l'ai dit, là c'est correct maintenant",
+            "Je suis là",
+            "Il y en a",
+            "Fais-le.",
+            "Envoie-les",
+            "C'est parti !",
+            "Mets-en",
+            "Salut Eve",
+            "Oui, j'aimerais ça.",
+            "Oui, il faudrait.",
+            "Comme tu veux",
+            "",
+        ] {
+            assert!(!en_suspens(t), "finie : {t}");
+        }
+    }
+
+    /// Une phrase en suspens attend sa suite, puis part avec elle ; sans suite à l'échéance, elle part seule ; une
+    /// suite qui commence la prolonge ; quatre morceaux au plus.
+    #[test]
+    fn la_fin_du_tour_attend_la_suite_d_une_phrase_en_suspens() {
+        let t0 = std::time::Instant::now();
+        let s = |x: f32| t0 + std::time::Duration::from_secs_f32(x);
+        let mut f = FinDeTour::default();
+        assert_eq!(f.phrase("Quelle heure est-il ?", s(0.0)), Tour::Part("Quelle heure est-il ?".into()));
+        assert!(!f.attend());
+        assert_eq!(f.phrase("C'est parti,", s(1.0)), Tour::Attend);
+        assert!(f.attend());
+        assert_eq!(f.attendre(s(2.5), false), None, "avant l'échéance");
+        assert_eq!(f.attendre(s(3.5), true), None, "une suite commence : elle prolonge");
+        assert_eq!(
+            f.phrase("on regarde mes courriels.", s(4.0)),
+            Tour::Part("C'est parti, on regarde mes courriels.".into())
+        );
+        assert!(!f.attend());
+        // Sans suite : la phrase part seule, à l'échéance.
+        assert_eq!(f.phrase("Peux-tu regarder, euh", s(10.0)), Tour::Attend);
+        assert_eq!(f.attendre(s(11.9), false), None);
+        assert_eq!(f.attendre(s(12.0), false), Some("Peux-tu regarder, euh".into()));
+        // Quatre morceaux au plus.
+        for (i, m) in ["Je voudrais,", "euh,", "que tu regardes les factures de"].iter().enumerate() {
+            assert_eq!(f.phrase(m, s(20.0 + i as f32)), Tour::Attend, "{m}");
+        }
+        assert_eq!(f.phrase("et", s(24.0)), Tour::Part("Je voudrais, euh, que tu regardes les factures de et".into()));
+        // Une demande tapée prend ce qui attendait.
+        assert_eq!(f.phrase("Et aussi,", s(30.0)), Tour::Attend);
+        assert_eq!(f.oublier(), Some("Et aussi,".into()));
+        assert_eq!(f.attendre(s(40.0), false), None);
+    }
+
     #[test]
     fn le_garde_fou_de_l_oreille() {
         let juste = |t: &str| Transcription::Juste(t.to_string());
@@ -2225,6 +2416,46 @@ mod essais {
         assert!(est_un_arret("Arrête !"));
         assert!(est_un_arret("Stop."));
         assert!(!est_un_arret("Arrête de chercher les factures de 2025 et donne-moi celles d'octobre"));
+    }
+
+    /// Un salut, des nouvelles, « tu m'entends ? », un merci, un au revoir, l'heure : bref. Un accord ou un refus (il
+    /// répond souvent à ce que Claude proposait), une vraie question, un chiffre : non. Des phrases de la forme de
+    /// celles du journal de l'Assistante.
+    #[test]
+    fn un_propos_bref_se_reconnait() {
+        for p in [
+            "Salut!",
+            "Salut Eve, comment ça va ?",
+            "Allo, Eve, est-ce que tu m'entends bien?",
+            "Merci",
+            "C'est bien reçu, merci beaucoup Eve",
+            "Excellent Eve, merci beaucoup",
+            "Bonne nuit Eve",
+            "Bonsoir Eve",
+            "Quelle heure est-il?",
+            "Ça va bien, et toi ?",
+            "Merci pour tout, à demain !",
+            "Je t'aime, Eva !",
+        ] {
+            assert!(propos_bref(p), "bref : {p}");
+        }
+        for p in [
+            "C'est correct",
+            "Oui, vas-y",
+            "Ok",
+            "Parfait",
+            "Non, c'est bon, je l'ai reçu",
+            "D'accord",
+            "Salut Eve, qu'est-ce qu'on fait demain?",
+            "Est-ce que j'ai quelque chose de prévu demain matin ?",
+            "Merci de m'appeler le plombier",
+            "C'est parti,",
+            "Rappelle-moi à 10 h",
+            "",
+        ] {
+            assert!(!propos_bref(p), "pas bref : {p}");
+        }
+        assert!(!propos_bref(&"merci ".repeat(13)), "douze mots au plus");
     }
 
     #[test]

@@ -44,8 +44,9 @@ use crate::reglages::dossier_local;
 /// avec le texte — le temps de l'oreille se compte de là, file d'attente comprise (`eve --mesures`).
 pub enum Demande {
     /// Une demande à transcrire (la touche, ou la réponse à « Oui ? », ou « je confirme ») ; `continue_` : entendue par
-    /// l'écoute continue (sans touche), rendue telle quelle dans `Evt::Transcrit`.
-    Commande { audio: Vec<f32>, continue_: bool, depuis: Instant },
+    /// l'écoute continue (sans touche) ; `suite_possible` : entendue pendant que l'oreille cherchait encore la demande
+    /// d'après « Eve » — peut-être sa suite. Les deux rendus tels quels dans `Evt::Transcrit`.
+    Commande { audio: Vec<f32>, continue_: bool, depuis: Instant, suite_possible: bool },
     /// Une phrase de l'écoute continue : commence-t-elle par « Eve » ?
     Eveil { audio: Vec<f32>, depuis: Instant },
 }
@@ -106,7 +107,7 @@ pub fn demarrer(
         let amorce_eveil = format!("Eve, {vocabulaire}");
         for demande in rx {
             match demande {
-                Demande::Commande { audio, continue_, depuis } => {
+                Demande::Commande { audio, continue_, depuis, suite_possible } => {
                     let t0 = Instant::now();
                     let texte = oreille.entendre(&audio, &vocabulaire, Modele::Fidele);
                     let _ = oreille.rapport.send(Evt::Transcrit {
@@ -115,6 +116,7 @@ pub fn demarrer(
                         secondes_calcul: t0.elapsed().as_secs_f32(),
                         continue_,
                         depuis,
+                        suite_possible,
                     });
                 }
                 Demande::Eveil { audio, depuis } => oreille.eveil(&audio, &amorce_eveil, depuis),

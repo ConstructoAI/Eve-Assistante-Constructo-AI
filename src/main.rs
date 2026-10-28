@@ -102,6 +102,7 @@ fn main() {
         Some("--essai-services") => essais::services(&args[1..]),
         Some("--essai-stripe") => essais::stripe(&args[1..]),
         Some("--essai-son") => essais::son(&reglages, &args[1..]),
+        Some("--essai-tour") => essais::tour(&reglages, &args[1..]),
         Some("--aide" | "-h" | "--help") => {
             aide();
             0
@@ -310,7 +311,10 @@ fn aide() {
          \x20                            ce que le tableau de bord en montre ; les droits d'une clé restreinte\n\
          eve --essai-son textes.txt dossier [--bruts DOSSIER] [--id VOIX] [--douceur N]  ce qu'Eve dirait de chaque\n\
          \x20                            texte, rendu sans le jouer : les WAV de ses phrases et leur tout\n\
-         eve --mesures [dossier…]    le temps de chaque étape des demandes et le coût des tours, lus au journal\n\
+         eve --essai-tour <dossier> [--fin s] [--oreille s] [--modele M]  le tour de parole rejoué sur des sons\n\
+         \x20                            inventés (WAV et manifestes) : l'écoute du micro, l'oreille, ce qui part\n\
+         \x20                            à Claude et quand, avant et après la fin du tour qui attend la suite\n\
+         eve --mesures [dossier…]     le temps de chaque étape des demandes et le coût des tours, lus au journal\n\
          eve --profils                les profils de cette Eve (EVE_DOSSIER_LOCAL), le profil choisi marqué\n\
          eve --profil-ajouter \"nom\" \"dossier\"  un profil de plus : un dossier qui porte son CLAUDE.md\n\
          eve --profil [\"nom\"]         le profil choisi, où Eve passe entre deux demandes (rien : celui d'office)\n\

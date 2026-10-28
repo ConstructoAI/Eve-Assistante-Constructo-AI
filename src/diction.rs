@@ -10,6 +10,11 @@
 //! et les montants, les heures, les dates, les unités, les ordinaux, les numéros de téléphone, les adresses, les
 //! abréviations, les sigles qui s'épellent, et les mots anglais du monde d'Eve écrits comme ils se prononcent. Le reste
 //! passe tel quel, la ponctuation et les blancs aussi : Piper en tire ses pauses.
+//!
+//! Relevé le 2026-10-27 sur les 1 272 phrases que l'Assistante a vraiment dites, phonème par phonème : les homographes
+//! qu'eSpeak lit d'une seule façon (« en fait » sans son t, « en plus » sans son s, « vas-y » : « vas i grec »), et la
+//! mélodie. Piper ne connaît que la ponctuation pour respirer : une incise entre parenthèses ou entre deux tirets
+//! simples se lit d'un trait, sans pause (eSpeak n'y voit pas de fin de proposition) ; elle passe entre virgules.
 
 use std::collections::BTreeMap;
 
@@ -424,20 +429,26 @@ const FEMININS: [&str; 74] = [
 
 /// Les sigles qu'eSpeak lit comme un mot (« l'ERP » : [lɛʁp], « la SAQ » : [sak], « un CPE » : [kp]) alors qu'ils
 /// s'épellent ; épelés, leurs lettres séparées d'une espace, ils se disent comme ceux qu'il épelle de lui-même
-/// (« TPS », « CLSC »). Avec des traits d'union, « l'I-A » glissait en [lja] ; « l'I A » se dit [li a].
-const SIGLES_EPELES: [&str; 26] = [
+/// (« TPS », « CLSC »). Avec des traits d'union, « l'I-A » glissait en [lja] ; « l'I A » se dit [li a]. Ceux qui se
+/// disent comme un mot au Québec restent des mots (« la CAQ », « le CÉGEP », « l'UQAM », « le NIP », « le REM »).
+const SIGLES_EPELES: [&str; 31] = [
     "ERP", "IA", "SAAQ", "RAMQ", "ARC", "CA", "ACQ", "APCHQ", "GPU", "SAQ", "PIB", "HEC", "TI", "CNESST", "REEE",
-    "CMEQ", "OIQ", "OAQ", "SEAO", "AEC", "ETS", "VUS", "CPE", "AE", "RQAP", "UE",
+    "CMEQ", "OIQ", "OAQ", "SEAO", "AEC", "ETS", "VUS", "CPE", "AE", "RQAP", "UE", "NEQ", "ASP", "CPTAQ", "TDAH", "IGA",
 ];
 
 /// Les mots qu'eSpeak lit avec des sons anglais (ou à côté), écrits comme on les dit au Québec ; chaque graphie,
 /// vérifiée dans eSpeak : rien que des phonèmes français. Sans égard à la casse, sauf ceux qui commencent par une
 /// majuscule (« python », le serpent, se dit en français). Un pluriel en s (« emails ») prend la même graphie. Les
 /// villes du Québec au nom anglais ou autochtone qu'eSpeak lit à l'anglaise (relevé le 2026-10-26 sur 120 villes :
-/// « Granby » y devient « gɹanbi », avec un r anglais et sans nasale), comme les y disent les francophones.
-const LEXIQUE: [(&str, &str); 112] = [
+/// « Granby » y devient « gɹanbi », avec un r anglais et sans nasale), comme les y disent les francophones. Et un mot
+/// bien français qu'eSpeak prend pour de l'anglais (relevé le 2026-10-27 : « menthe », [mɛnð]).
+const LEXIQUE: [(&str, &str); 116] = [
     ("eve", "Ève"),
     ("aujourd'hui", "aujourdhui"),
+    ("menthe", "mante"),
+    ("Stripe", "Straïpe"),
+    ("Render", "Rènndeur"),
+    ("Jerry", "Djèri"),
     ("reer", "Èrééèr"),
     ("celi", "Céli"),
     ("celiapp", "Céliapp"),
@@ -638,7 +649,8 @@ const DOMAINES: [(&str, &str); 10] = [
 ];
 
 /// Un mot seul, tel qu'il se dit : un sigle à épeler, un mot du lexique (après l'élision : « l'ERP », « d'Outlook »),
-/// ou l'une des parties d'un mot composé (« Saint-Hyacinthe », « St-Jean ») ; sinon, tel quel.
+/// ou l'une des parties d'un mot composé (« Saint-Hyacinthe », « St-Jean ») — le « y » d'un impératif, « i » : eSpeak
+/// lisait « vas-y » « vas i grec » ; sinon, tel quel.
 fn mot_dit(mot: &str) -> String {
     let (prefixe, reste) = elision(mot);
     // Devant un sigle épelé, l'article en minuscule : « L'I-A » se lirait « L apostrophe I A ».
@@ -655,6 +667,7 @@ fn mot_dit(mot: &str) -> String {
                 match *p {
                     "St" if nom_suit => "Saint".to_string(),
                     "Ste" if nom_suit => "Sainte".to_string(),
+                    "y" if n > 0 => "i".to_string(),
                     _ => remplacer(p).unwrap_or_else(|| p.to_string()),
                 }
             })
@@ -762,6 +775,13 @@ impl Diction {
 
     /// Le mot qui précède `k`, en minuscules.
     fn mot_avant(&self, k: usize) -> String {
+        let (d, f) = self.bornes_du_mot_avant(k);
+        self.c[d..f].iter().collect::<String>().to_lowercase()
+    }
+
+    /// Les bornes du mot qui précède `k` (ses lettres, les blancs d'entre eux sautés) ; vide s'il n'y a pas de lettre
+    /// juste avant (le début, une ponctuation, une apostrophe).
+    fn bornes_du_mot_avant(&self, k: usize) -> (usize, usize) {
         let mut j = k;
         while j > 0 && self.c[j - 1].is_whitespace() {
             j -= 1;
@@ -770,7 +790,7 @@ impl Diction {
         while j > 0 && self.c[j - 1].is_alphabetic() {
             j -= 1;
         }
-        self.c[j..fin].iter().collect::<String>().to_lowercase()
+        (j, fin)
     }
 
     /// Le mot qui suit `k`, en minuscules.
@@ -805,7 +825,8 @@ impl Diction {
             '-' | '−' | '–' if self.chiffre(k + 1) && self.signe_permis(k) && !self.apres_un_nombre => {
                 ("moins ", k + 1, false)
             }
-            '+' if self.chiffre(k + 1) && self.signe_permis(k) => ("plus ", k + 1, false),
+            // « plusse » : eSpeak lit « plus » [ply], comme dans « plus de lait ».
+            '+' if self.chiffre(k + 1) && self.signe_permis(k) => ("plusse ", k + 1, false),
             '~' | '≈' if self.chiffre(apres_espace) => ("environ ", apres_espace, false),
             '#' if self.chiffre(k + 1) => ("numéro ", k + 1, false),
             '×' if self.chiffre(apres_espace) => ("fois ", apres_espace, false),
@@ -1125,8 +1146,10 @@ impl Diction {
         }
         let (fin, dit) = self
             .abreviation(k)
+            .or_else(|| self.initiales(k))
             .or_else(|| self.romain(k))
             .or_else(|| self.adresse(k))
+            .or_else(|| self.homographe(k))
             .unwrap_or_else(|| self.mot_seul(k));
         self.dire(&dit);
         self.i = fin;
@@ -1175,6 +1198,95 @@ impl Diction {
             let fin = k + motif.chars().count();
             (self.commence(k, motif) && self.fin_de_mot(fin)).then(|| (fin, dit.to_string()))
         })
+    }
+
+    /// Des initiales (« A.B. », « J.-L. ») : leurs lettres épelées, sans leurs points — eSpeak continuait d'épeler le
+    /// mot qui suit (« A.B. y est notée » : « A B i grec »). Le dernier point reste s'il finit le texte.
+    fn initiales(&self, k: usize) -> Option<(usize, String)> {
+        let mut lettres = Vec::new();
+        let mut j = k;
+        while self.car(j).is_some_and(char::is_uppercase) && self.car(j + 1) == Some('.') {
+            lettres.push(self.c[j].to_string());
+            j += 2;
+            if self.car(j) == Some('-') && self.car(j + 1).is_some_and(char::is_uppercase) {
+                j += 1;
+            }
+        }
+        if lettres.len() < 2 || self.lettre(j) {
+            return None;
+        }
+        let mut dit = lettres.join(" ");
+        if self.c[j..].iter().all(|c| c.is_whitespace()) {
+            dit.push('.');
+        }
+        Some((j, dit))
+    }
+
+    /// Les homographes qu'eSpeak lit d'une seule façon, là où le sens en demande une autre. « En fait » au sens de « en
+    /// réalité », et « au fait », se disent avec leur t (« faite ») — pas « on en fait », « il s'en fait » : le verbe.
+    /// « En plus », « de plus », « le plus » et « au plus » au bout d'un groupe de mots, et « en plus de », avec leur s
+    /// (« plusse ») — pas « de plus en plus », ni « plus » devant un adjectif ; « plus ou moins » avec sa liaison
+    /// (« plus-ou-moins »).
+    fn homographe(&self, k: usize) -> Option<(usize, String)> {
+        let mut j = k;
+        while self.lettre(j) {
+            j += 1;
+        }
+        // Un mot composé (« plus-value »), une élision : le mot seul les lit.
+        if matches!(self.car(j), Some('-' | '\'' | '’')) && self.lettre(j + 1) {
+            return None;
+        }
+        let mot: String = self.c[k..j].iter().collect();
+        let casse = |dit: &str| {
+            let mut d = dit.chars();
+            match d.next() {
+                Some(p) if mot.starts_with(char::is_uppercase) => p.to_uppercase().chain(d).collect(),
+                _ => dit.to_string(),
+            }
+        };
+        let fin_de_groupe = self.c[j..].iter().find(|c| !c.is_whitespace()).is_none_or(|c| ",.;:!?…".contains(*c));
+        let (d, f) = self.bornes_du_mot_avant(k);
+        let avant: String = self.c[d..f].iter().collect::<String>().to_lowercase();
+        // Le mot d'avant celui-là ; s'il est élidé (« qu'en », « s'en »), ce qui l'élide.
+        let elide = d > 0 && matches!(self.c[d - 1], '\'' | '’');
+        let (d2, f2) = self.bornes_du_mot_avant(if elide { d - 1 } else { d });
+        let avant_avant: String = self.c[d2..f2].iter().collect::<String>().to_lowercase();
+        let rien_avant = d2 == f2;
+        match mot.to_lowercase().as_str() {
+            "plus" => {
+                let m = self.espace(j);
+                if self.commence(m, "ou moins") && self.fin_de_mot(m + 8) {
+                    return Some((m + 8, casse("plus-ou-moins")));
+                }
+                if avant_avant == "plus" {
+                    return None;
+                }
+                let apres = self.mot_apres(j);
+                let au_bout = matches!(avant.as_str(), "en" | "de" | "le" | "au") && fin_de_groupe;
+                let en_plus_de = avant == "en" && matches!(apres.as_str(), "de" | "d" | "du" | "des");
+                (au_bout || en_plus_de).then(|| (j, casse("plusse")))
+            }
+            "fait" if avant == "en" => {
+                // « on en fait », « qui en fait partie », « il s'en fait », « il n'en fait rien » : le verbe faire.
+                const SUJETS: [&str; 11] =
+                    ["je", "tu", "il", "elle", "on", "nous", "vous", "ils", "elles", "ça", "qui"];
+                const DEVANT: [&str; 11] =
+                    ["mais", "et", "donc", "car", "or", "alors", "est", "sont", "était", "a", "ont"];
+                let adverbe = if elide {
+                    matches!(avant_avant.as_str(), "qu" | "lorsqu" | "puisqu" | "jusqu")
+                } else {
+                    !SUJETS.contains(&avant_avant.as_str())
+                        && (rien_avant || DEVANT.contains(&avant_avant.as_str()) || fin_de_groupe)
+                };
+                adverbe.then(|| (j, casse("faite")))
+            }
+            "fait" if avant == "au" => {
+                // « au fait de » : au courant de.
+                let apres = self.mot_apres(j);
+                (!matches!(apres.as_str(), "de" | "d" | "du" | "des")).then(|| (j, casse("faite")))
+            }
+            _ => None,
+        }
     }
 
     /// Un ordinal en chiffres romains : « XXIe siècle », « XIXe » (deux lettres au moins : « Le » et « Ce » sont des
@@ -1250,7 +1362,8 @@ impl Diction {
     // ---- Les signes ----------------------------------------------------------------------------------------------
 
     /// Un tiret entre deux nombres (« 3-5 jours », « 9 h-17 h »), des points de suspension, une esperluette, un signe
-    /// d'égalité, une fraction écrite d'un signe.
+    /// d'égalité, une fraction écrite d'un signe, une flèche ; une incise entre parenthèses ou entre deux tirets
+    /// simples.
     fn signe(&mut self) -> bool {
         let k = self.i;
         let x = self.c[k];
@@ -1264,6 +1377,22 @@ impl Diction {
                 self.i = j;
                 return true;
             }
+        }
+        // Une flèche (« A → B », « -> », « => ») : une pause, comme une virgule.
+        let fleche = match x {
+            '→' | '⇒' => 1,
+            '-' | '=' if self.car(k + 1) == Some('>') => 2,
+            _ => 0,
+        };
+        if fleche > 0 {
+            self.virgule_d_incise();
+            self.i = k + fleche;
+            self.apres_un_nombre = false;
+            return true;
+        }
+        if self.incise(k) {
+            self.apres_un_nombre = false;
+            return true;
         }
         // Les points de suspension : une pause dans la phrase (une virgule ; eSpeak n'en fait aucune), ou sa fin.
         let suspension = if x == '…' {
@@ -1283,7 +1412,7 @@ impl Diction {
         } else {
             let dit = match x {
                 '&' => "et",
-                '+' => "plus",
+                '+' => "plusse",
                 '=' => "égale",
                 '≈' => "environ",
                 '§' => "paragraphe",
@@ -1310,6 +1439,57 @@ impl Diction {
         self.i = fin;
         self.apres_un_nombre = false;
         true
+    }
+
+    /// Une incise : eSpeak lit d'un trait ce qui est entre parenthèses (« Le prix (avant taxes) est bon. ») ou entre
+    /// deux tirets simples (« Factures - Novembre »), sans y voir de fin de proposition ; entre virgules, Piper s'y
+    /// arrête, comme il le fait déjà d'un tiret long (« — », « – »). La marque collée à un mot (« client(s) »,
+    /// « le(s) ») se tait : eSpeak la lirait « ès ».
+    fn incise(&mut self, k: usize) -> bool {
+        match self.c[k] {
+            '(' => {
+                let n = self.c[k + 1..].iter().take_while(|c| c.is_alphabetic()).count();
+                if k > 0 && self.lettre(k - 1) && (1..=3).contains(&n) && self.car(k + 1 + n) == Some(')') {
+                    self.i = k + 2 + n;
+                    return true;
+                }
+                self.virgule_d_incise();
+                if !self.sortie.is_empty() {
+                    self.sortie.push(' ');
+                }
+                self.i = k + 1;
+                while self.car(self.i) == Some(' ') {
+                    self.i += 1;
+                }
+                true
+            }
+            ')' => {
+                let suite = self.c[k + 1..].iter().find(|c| **c != ' ').copied();
+                let fin = self.sortie.trim_end().len();
+                self.sortie.truncate(fin);
+                if suite.is_some_and(|c| c.is_alphanumeric() || matches!(c, '«' | '"' | '(')) {
+                    self.sortie.push(',');
+                }
+                self.i = k + 1;
+                true
+            }
+            '-' if k > 0 && self.car(k - 1) == Some(' ') && self.car(k + 1) == Some(' ') => {
+                self.virgule_d_incise();
+                self.i = k + 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// La virgule qui ouvre une incise, collée au mot qui la précède — sauf après une ponctuation qui fait déjà la
+    /// pause.
+    fn virgule_d_incise(&mut self) {
+        let fin = self.sortie.trim_end().len();
+        self.sortie.truncate(fin);
+        if self.sortie.ends_with(|c: char| c.is_alphanumeric() || matches!(c, '»' | '"' | '\'' | '’')) {
+            self.sortie.push(',');
+        }
     }
 }
 
@@ -1398,7 +1578,7 @@ mod essais {
         assert_eq!(dit("Une maison de 500 000 $."), "Une maison de cinq cent mille dollars.");
         assert_eq!(dit("Il manque 350 à 550 $."), "Il manque trois cent cinquante à cinq cent cinquante dollars.");
         assert_eq!(dit("Un budget de 1,5 M$."), "Un budget de un virgule cinq million de dollars.");
-        assert_eq!(dit("Environ 2 k$ de plus."), "Environ deux mille dollars de plus.");
+        assert_eq!(dit("Environ 2 k$ de plus."), "Environ deux mille dollars de plusse.");
         assert_eq!(dit("Le prix est de $250."), "Le prix est de deux cent cinquante dollars.");
         assert_eq!(dit("Le solde : -250 $."), "Le solde : moins deux cent cinquante dollars.");
         assert_eq!(dit("Le montant est de 937.05 dollars."), "Le montant est de neuf cent trente-sept dollars cinq.");
@@ -1434,7 +1614,7 @@ mod essais {
         // « 2 l'heure » : un « l » qui n'est pas des litres.
         assert_eq!(dit("Le 2 l'a dit."), "Le deux l'a dit.");
         assert_eq!(dit("Environ ~ 30, soit ≈ 40."), "Environ environ trente, soit environ quarante.");
-        assert_eq!(dit("Le ticket #3 : 2 + 2 = 4."), "Le ticket numéro trois : deux plus deux égale quatre.");
+        assert_eq!(dit("Le ticket #3 : 2 + 2 = 4."), "Le ticket numéro trois : deux plusse deux égale quatre.");
     }
 
     #[test]
@@ -1595,6 +1775,7 @@ mod essais {
         assert_eq!(dit("Attends… je regarde."), "Attends, je regarde.");
         assert_eq!(dit("Je ne sais pas... Peut-être."), "Je ne sais pas. Peut-être.");
         assert_eq!(dit("Le bois & le gypse, ½ tasse."), "Le bois et le gypse, un demi tasse.");
+        assert_eq!(dit("Le plan A → le plan B, de 2 -> 3, x => y."), "Le plan A, le plan B, de deux, trois, x, y.");
     }
 
     /// Un corpus (une phrase par ligne, ou « famille|phrase »), tel qu'il se dit : pour le faire lire à Piper, avant et
@@ -1617,11 +1798,54 @@ mod essais {
         let tel_quel = [
             "Bonjour Sam. Je t'ai préparé le point de la journée : deux rendez-vous, et une facture à envoyer.",
             "Bonne nouvelle : le client a accepté la soumission. On commence lundi !",
-            "« Le chantier », dit-il ; puis (entre parenthèses) — une pause.",
+            "« Le chantier », dit-il ; puis — une pause.",
             "",
         ];
         for t in tel_quel {
             assert_eq!(dit(t), t);
         }
+    }
+
+    #[test]
+    fn les_incises_se_detachent_entre_virgules() {
+        assert_eq!(dit("Le prix (avant taxes) est bon."), "Le prix, avant taxes, est bon.");
+        assert_eq!(dit("Il reste le 31 mars (impôt, retenues)."), "Il reste le trente et un mars, impôt, retenues.");
+        assert_eq!(dit("La démo (D) et le plein écran (F) marchent."), "La démo, D, et le plein écran, F, marchent.");
+        assert_eq!(dit("(Entre nous) c'est fait."), "Entre nous, c'est fait.");
+        assert_eq!(dit("Le dossier « Factures - Novembre » est prêt."), "Le dossier « Factures, Novembre » est prêt.");
+        // La marque du pluriel collée au mot se tait ; un tiret long, une plage, un numéro gardent leur lecture.
+        assert_eq!(dit("Le ou les client(s) et le(s) projet(s)."), "Le ou les client et le projet.");
+        assert_eq!(dit("Le chantier — celui de Sam — avance."), "Le chantier — celui de Sam — avance.");
+        assert_eq!(dit("Il faut de 3 - 5 jours."), "Il faut de trois à cinq jours.");
+        assert_eq!(dit("Puis (entre parenthèses) — une pause."), "Puis, entre parenthèses — une pause.");
+    }
+
+    #[test]
+    fn les_homographes_se_disent_selon_leur_sens() {
+        // « En fait », « au fait » : avec leur t ; le verbe faire garde le sien.
+        assert_eq!(dit("En fait, c'est réglé. Mais en fait non."), "En faite, c'est réglé. Mais en faite non.");
+        assert_eq!(
+            dit("C'est en fait le seul, parce qu'en fait il pleut. Au fait, le courriel est parti."),
+            "C'est en faite le seul, parce qu'en faite il pleut. Au faite, le courriel est parti."
+        );
+        let verbe = "Ce qu'on en fait, il s'en fait, il n'en fait rien, elle en fait partie, il est au fait du sujet.";
+        assert_eq!(dit(verbe), verbe);
+        // « plus » : [plys] au bout d'un groupe, devant « de », et pour le signe ; [ply] ailleurs.
+        assert_eq!(dit("En plus, c'est rapide, en plus de ça."), "En plusse, c'est rapide, en plusse de ça.");
+        assert_eq!(
+            dit("Trois choses de plus. C'est ce que j'aime le plus, tout au plus."),
+            "Trois choses de plusse. C'est ce que j'aime le plusse, tout au plusse."
+        );
+        assert_eq!(dit("Plus ou moins deux heures."), "Plus-ou-moins deux heures.");
+        let ply = "De plus en plus, le plus grand, il n'y en a plus, en plus grand, une plus-value.";
+        assert_eq!(dit(ply), ply);
+        assert_eq!(dit("Il fera +5 °C, soit 2 + 3."), "Il fera plusse cinq degrés Celsius, soit deux plusse trois.");
+        // « y » : le pronom, pas la lettre ; des initiales, épelées sans leurs points.
+        assert_eq!(dit("Vas-y, allez-y, j'y vais."), "Vas-i, allez-i, j'y vais.");
+        assert_eq!(dit("Toitures A.B. y est notée, comme J.-L. Roy."), "Toitures A B y est notée, comme J L Roi.");
+        assert_eq!(dit("Chez Toitures R.B."), "Chez Toitures R B.");
+        assert_eq!(dit("Un thé à la menthe, Stripe et Render."), "Un thé à la mante, Straïpe et Rènndeur.");
+        assert_eq!(dit("Tom et Jerry."), "Tom et Djèri.");
+        assert_eq!(dit("Le NEQ, le TDAH, chez IGA."), "Le N E Q, le T D A H, chez I G A.");
     }
 }
