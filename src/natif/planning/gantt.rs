@@ -1,15 +1,18 @@
-//! Le Gantt du tableau de bord (l'onglet « Gantt ») : les chantiers et leurs opérations dans le temps, d'après la
-//! compétence de visualisation des données. À gauche, la liste — chaque chantier, son chevron qui le replie ou le
-//! déplie, ses opérations en retrait ; à droite, le temps — l'échelle des semaines (leurs lundis, les fins de semaine
-//! pâlies) ou des mois, des filets pleins et pâles, la ligne d'aujourd'hui en marine. Chaque tâche, sa barre fine, aux
+//! Le Gantt du tableau de bord (l'onglet « Gantt ») : un tableau du suivi de Constructo AI dans le temps, au choix comme
+//! au Kanban — les chantiers et leurs opérations, les soumissions, les bons de travail et leurs opérations, les
+//! opérations, les ventes, les achats, les factures —, d'après la compétence de visualisation des données. À gauche, la
+//! liste — un chantier ou un bon de travail, son chevron qui le replie ou le déplie, ses opérations en retrait ; une
+//! soumission, une vente, une facture, chacune sur sa rangée ; à droite, le temps — l'échelle des semaines (leurs
+//! lundis, les fins de semaine pâlies) ou des mois, des filets pleins et pâles, la ligne d'aujourd'hui en marine.
+//! Chaque tâche, sa barre fine, aux
 //! bouts arrondis, de la couleur de son statut (planifiée en gris, en cours en bleu, terminée en vert, en attente en
 //! ambre, en retard en rouge — un état, toujours dit aussi par la légende et la bulle) ; son avancement, la part faite
 //! en plein et le reste en plus pâle de la même couleur, écrit au bout d'une tâche en cours ; quand elle glisse, sa
 //! référence (les dates prévues de l'ERP) en trait gris sous elle, et son retard écrit au bout (« + 5 j ») ; un jalon,
 //! un losange. Les dépendances : des flèches fines, en équerre, de la fin d'une tâche au début de celle qui l'attend.
 //! Au survol, la rangée se lave et sa bulle dit tout ; un clic ouvre son menu : en parler, me le rappeler demain,
-//! « Replanifier… ». Au-dessus : le titre, ‹ Aujourd'hui ›, ses données en tableau (chaque valeur s'y lit sans survol),
-//! « Tout déplier », « Semaines · Mois ».
+//! « Replanifier… ». Au-dessus : le choix du tableau ; puis son titre, ‹ Aujourd'hui ›, ses données en tableau (chaque
+//! valeur s'y lit sans survol), « Tout déplier », « Semaines · Mois ».
 
 use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, FontFamily, FontId, Layout, Pos2, Rect, Sense, Shape, Stroke,
@@ -17,16 +20,16 @@ use eframe::egui::{
 };
 
 use super::{
-    Action, Cle, FormeDeCle, bornes_du_mois, bulle, couleur_de_la_personne, en_francais, initiales, jour_de_semaine,
-    jours_de_la_tache, legende, lundi, menu_de_chose, navigation, nom_du_mois, parler_de_la_tache, premier_jour,
-    quantieme, rappel_de_la_tache, replanifier_la_tache, titre_de_vue,
+    Action, Cle, FormeDeCle, bornes_du_mois, bulle, choix_du_tableau, couleur_de_la_personne, en_francais, initiales,
+    jour_de_semaine, jours_de_la_tache, legende, lundi, menu_de_chose, navigation, nom_du_mois, parler_de_la_tache,
+    premier_jour, quantieme, rappel_de_la_tache, replanifier_la_tache, titre_de_vue,
 };
 use crate::centre;
 use serde_json::{Value, json};
 
 use crate::natif::theme::{self, BoutonErp, erp};
 use crate::natif::{ICONES, SEMI};
-use crate::planning::{Dependance, Planning, Tache};
+use crate::planning::{Dependance, Gantt, Planning, Tache};
 
 /// L'échelle du temps : les semaines (un jour fait une quinzaine de points) ou les mois.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,11 +38,13 @@ enum Echelle {
     Mois,
 }
 
-/// Ce que montre le Gantt : son échelle, de combien de pas il a avancé ou reculé depuis aujourd'hui (quatre semaines,
-/// ou deux mois, par pas), les chantiers qu'on a dépliés ou repliés (leur id) — les autres suivent la règle d'office
-/// ([`ouvert`]) —, et ses données en tableau à la place des barres.
+/// Ce que montre le Gantt : le tableau du suivi (sa clé ; vide : le premier, les chantiers), son échelle, de combien de
+/// pas il a avancé ou reculé depuis aujourd'hui (quatre semaines, ou deux mois, par pas), les groupes qu'on a dépliés
+/// ou repliés (leur id) — les autres suivent la règle d'office ([`ouvert`]) —, et ses données en tableau à la place des
+/// barres.
 #[derive(Clone, Debug, PartialEq)]
 struct Etat {
+    tableau: String,
     echelle: Echelle,
     decalage: i64,
     ouverts: Vec<(String, bool)>,
@@ -48,7 +53,7 @@ struct Etat {
 
 impl Default for Etat {
     fn default() -> Self {
-        Etat { echelle: Echelle::Semaines, decalage: 0, ouverts: Vec::new(), en_tableau: false }
+        Etat { tableau: String::new(), echelle: Echelle::Semaines, decalage: 0, ouverts: Vec::new(), en_tableau: false }
     }
 }
 
@@ -62,12 +67,100 @@ fn garder(ctx: &egui::Context, e: Etat) {
     ctx.data_mut(|d| d.insert_temp(egui::Id::unique(ETAT), e));
 }
 
-/// Le Gantt d'une scène de l'essai du thème : ces chantiers dépliés (les autres suivent la règle d'office), aux mois ou
-/// aux semaines.
-pub(super) fn preparer(ctx: &egui::Context, deplies: &[&str], mois: bool, en_tableau: bool) {
+/// Le Gantt d'une scène de l'essai du thème : ce tableau (sa clé ; vide : le premier), ces groupes dépliés (les autres
+/// suivent la règle d'office), aux mois ou aux semaines.
+pub(super) fn preparer(ctx: &egui::Context, deplies: &[&str], mois: bool, en_tableau: bool, tableau: &str) {
     let ouverts = deplies.iter().map(|id| (id.to_string(), true)).collect();
     let echelle = if mois { Echelle::Mois } else { Echelle::Semaines };
-    garder(ctx, Etat { echelle, ouverts, en_tableau, ..Etat::default() });
+    garder(ctx, Etat { tableau: tableau.into(), echelle, ouverts, en_tableau, ..Etat::default() });
+}
+
+/// Ce qu'un Gantt appelle ses rangées : l'en-tête de sa liste, la colonne de sa vue en tableau, ce qu'est la rangée
+/// au-dessus d'une rangée en retrait, ce qu'on replanifie, et ce que dit son Gantt vide (son titre, son texte).
+struct Mots {
+    liste: &'static str,
+    colonne: &'static str,
+    parent: &'static str,
+    chose: &'static str,
+    vide: (&'static str, &'static str),
+}
+
+/// Les mots du Gantt d'un tableau du suivi (sa clé : celles de [`crate::planning::TABLEAUX`]).
+fn mots(cle: &str) -> Mots {
+    match cle {
+        "projets" => Mots {
+            liste: "CHANTIER · OPÉRATION",
+            colonne: "Chantier · opération",
+            parent: "chantier",
+            chose: "la tâche",
+            vide: (
+                "Aucun chantier planifié",
+                "Aucun chantier n'a de dates dans Constructo AI : ses projets et leurs opérations se placeront ici dès \
+                 qu'ils en auront.",
+            ),
+        },
+        "devis" => Mots {
+            liste: "SOUMISSION",
+            colonne: "Soumission",
+            parent: "soumission",
+            chose: "la soumission",
+            vide: (
+                "Aucune soumission à placer",
+                "Aucune soumission en cours n'a de dates dans Constructo AI : leurs travaux prévus se placeront ici.",
+            ),
+        },
+        "bons_travail" => Mots {
+            liste: "BON DE TRAVAIL · OPÉRATION",
+            colonne: "Bon de travail · opération",
+            parent: "bon de travail",
+            chose: "la tâche",
+            vide: ("Aucun bon de travail planifié", "Aucun bon de travail n'a de dates dans Constructo AI."),
+        },
+        "operations" => Mots {
+            liste: "OPÉRATION",
+            colonne: "Opération",
+            parent: "bon de travail",
+            chose: "l'opération",
+            vide: (
+                "Aucune opération planifiée",
+                "Aucune opération du suivi de production n'a de dates : elles se lisent dans Constructo AI quand ce \
+                 Gantt s'ouvre.",
+            ),
+        },
+        "ventes" => Mots {
+            liste: "VENTE",
+            colonne: "Vente",
+            parent: "vente",
+            chose: "la vente",
+            vide: ("Aucune vente à placer", "Aucune vente ouverte du CRM n'a de dates dans Constructo AI."),
+        },
+        "achats" => Mots {
+            liste: "BON DE COMMANDE",
+            colonne: "Bon de commande",
+            parent: "bon de commande",
+            chose: "le bon de commande",
+            vide: ("Aucun achat en route", "Aucun bon de commande en route n'a de dates dans Constructo AI."),
+        },
+        "factures" => Mots {
+            liste: "FACTURE",
+            colonne: "Facture",
+            parent: "facture",
+            chose: "la facture",
+            vide: ("Aucune facture à suivre", "Aucune facture n'attend son solde dans Constructo AI."),
+        },
+        _ => Mots {
+            liste: "TÂCHE",
+            colonne: "Tâche",
+            parent: "groupe",
+            chose: "la tâche",
+            vide: ("Rien de planifié", "Ce tableau n'a encore rien de daté dans Constructo AI."),
+        },
+    }
+}
+
+/// Les tableaux dont le Gantt montre les opérations du suivi de production : elles se demandent quand il se montre.
+fn montre_les_operations(cle: &str) -> bool {
+    matches!(cle, "projets" | "bons_travail" | "operations")
 }
 
 /// Au-delà de tant de rangées, les chantiers se montrent repliés d'office (la personne déplie ce qu'elle veut voir).
@@ -134,8 +227,9 @@ fn etape(t: &Tache, debut: i64, fin: i64, aujourdhui: i64) -> Etape {
     if a(&["cours", "actif", "demarr", "commence"]) || debut <= aujourdhui { Etape::EnCours } else { Etape::Planifiee }
 }
 
-/// Une rangée du Gantt : sa tâche (son rang dans le planning), ses jours, son niveau (0 un chantier, 1 une opération),
-/// combien d'opérations elle a, le titre de son chantier.
+/// Une rangée du Gantt : sa tâche (son rang dans son Gantt), ses jours, son niveau (0 une chose du tableau, 1 l'une
+/// des siennes, en retrait), combien elle en a, le titre de celle au-dessus d'elle, et si elle est un groupe (un
+/// chantier, un bon de travail et ses opérations : sa rangée plus haute, sa barre de synthèse, son chevron).
 #[derive(Clone, Debug, PartialEq)]
 struct Rangee {
     k: usize,
@@ -144,36 +238,41 @@ struct Rangee {
     niveau: u8,
     enfants: usize,
     parent: Option<String>,
+    groupe: bool,
 }
 
-/// Les rangées du Gantt : chaque chantier (une tâche sans parent, ou dont le parent n'est pas là), puis ses opérations,
-/// dans l'ordre du planning (celui de l'ERP) — celles d'un chantier replié ne se montrent pas. Une tâche dont les dates
-/// ne se lisent pas s'en va ; une fin avant le début compte pour un jour. Rend aussi combien de rangées aurait le Gantt
-/// déplié.
-fn rangees(p: &Planning, e: &Etat) -> (Vec<Rangee>, usize) {
+/// Les rangées du Gantt : chaque chose du tableau (une tâche sans parent, ou dont le parent n'est pas là), puis les
+/// siennes, dans l'ordre du planning (celui de l'ERP) — celles d'un groupe replié ne se montrent pas. Les chantiers sont
+/// des groupes, et les choses d'un tableau où l'une en a d'autres sous elle (les bons de travail et leurs opérations) ;
+/// ailleurs, chacune est une tâche sur sa rangée. Une tâche dont les dates ne se lisent pas s'en va ; une fin avant le
+/// début compte pour un jour. Rend aussi combien de rangées aurait le Gantt déplié.
+fn rangees(g: &Gantt, e: &Etat) -> (Vec<Rangee>, usize) {
     let jours = |t: &Tache| {
         let debut = centre::numero_du_jour(&t.debut)?;
         let fin = centre::numero_du_jour(&t.fin).filter(|f| *f >= debut).unwrap_or(debut);
         Some((debut, fin))
     };
-    let est_la = |id: &str| p.taches.iter().any(|t| t.id == id);
-    let chantiers: Vec<usize> = (0..p.taches.len())
-        .filter(|k| p.taches[*k].parent.as_deref().is_none_or(|parent| !est_la(parent)))
-        .filter(|k| jours(&p.taches[*k]).is_some())
+    let est_la = |id: &str| g.taches.iter().any(|t| t.id == id);
+    let hauts: Vec<usize> = (0..g.taches.len())
+        .filter(|k| g.taches[*k].parent.as_deref().is_none_or(|parent| !est_la(parent)))
+        .filter(|k| jours(&g.taches[*k]).is_some())
         .collect();
-    let total = p.taches.iter().filter(|t| jours(t).is_some()).count();
+    let en_groupes = g.cle == "projets" || g.taches.iter().any(|t| t.parent.as_deref().is_some_and(est_la));
+    let total = g.taches.iter().filter(|t| jours(t).is_some()).count();
     let mut sortie = Vec::new();
-    for c in chantiers {
-        let t = &p.taches[c];
+    for c in hauts {
+        let t = &g.taches[c];
         let Some((debut, fin)) = jours(t) else { continue };
-        let enfants: Vec<(usize, i64, i64)> = (0..p.taches.len())
-            .filter(|k| *k != c && p.taches[*k].parent.as_deref() == Some(t.id.as_str()))
-            .filter_map(|k| jours(&p.taches[k]).map(|(d, f)| (k, d, f)))
+        let enfants: Vec<(usize, i64, i64)> = (0..g.taches.len())
+            .filter(|k| *k != c && g.taches[*k].parent.as_deref() == Some(t.id.as_str()))
+            .filter_map(|k| jours(&g.taches[k]).map(|(d, f)| (k, d, f)))
             .collect();
-        sortie.push(Rangee { k: c, debut, fin, niveau: 0, enfants: enfants.len(), parent: None });
+        let rangee = Rangee { k: c, debut, fin, niveau: 0, enfants: enfants.len(), parent: None, groupe: en_groupes };
+        sortie.push(rangee);
         if ouvert(e, &t.id, total) {
             for (k, debut, fin) in enfants {
-                sortie.push(Rangee { k, debut, fin, niveau: 1, enfants: 0, parent: Some(t.titre.clone()) });
+                let parent = Some(t.titre.clone());
+                sortie.push(Rangee { k, debut, fin, niveau: 1, enfants: 0, parent, groupe: false });
             }
         }
     }
@@ -258,18 +357,36 @@ const AUJOURDHUI: Color32 = erp::MARINE_HAUT;
 const PLANIFIEE: Color32 = Color32::from_rgb(0xC3, 0xCD, 0xDA);
 const REFERENCE: Color32 = Color32::from_rgb(0x7C, 0x8A, 0x9E);
 
-/// Le Gantt : sa barre d'outils, puis sa carte — la légende, l'en-tête du temps, les rangées. Rend ce qu'on a choisi
-/// dans le menu d'une tâche ; montré en tableau, ce tableau (le format des cartes « tableau »), que la fenêtre dessine
-/// sous la barre d'outils comme ceux des cartes.
-pub(super) fn vue(ui: &mut egui::Ui, p: &Planning, aujourdhui: i64) -> (Option<Action>, Option<String>) {
+/// Le Gantt : le choix du tableau du suivi, sa barre d'outils, puis sa carte — la légende, l'en-tête du temps, les
+/// rangées. Rend ce qu'on a choisi dans le menu d'une tâche ; montré en tableau, ce tableau (le format des cartes
+/// « tableau »), que la fenêtre dessine sous la barre d'outils comme ceux des cartes ; et si le Gantt montré a les
+/// opérations du suivi (elles se demandent alors au chef).
+pub(super) fn vue(ui: &mut egui::Ui, p: &Planning, aujourdhui: i64) -> (Option<Action>, Option<String>, bool) {
+    if p.gantts.is_empty() {
+        let texte = "Constructo AI n'a encore aucun tableau de suivi à montrer dans le temps : ses chantiers, ses \
+                     soumissions et ses bons de travail s'y placeront.";
+        super::etat_vide(ui, super::ONGLETS[2].1, erp::BLEU, "Aucun tableau de suivi", texte, None);
+        return (None, None, false);
+    }
     let avant = etat(ui.ctx());
     let mut e = avant.clone();
-    let (rangees, total) = rangees(p, &e);
+    let titres: Vec<String> = p.gantts.iter().map(|g| en_francais(&g.titre)).collect();
+    let mut k = p.gantts.iter().position(|g| g.cle == e.tableau).unwrap_or(0);
+    if let Some(j) = choix_du_tableau(ui, "tableau-du-gantt", &titres, k, super::ONGLETS[2].1).filter(|j| *j != k) {
+        k = j;
+        e.tableau = p.gantts[j].cle.clone();
+        e.decalage = 0;
+    }
+    ui.add_space(10.0);
+    let g = &p.gantts[k];
+    let m = mots(&g.cle);
+    let operations = montre_les_operations(&g.cle);
+    let (rangees, total) = rangees(g, &e);
     let largeur = ui.available_width();
     // La barre d'outils.
     let (barre, _) = ui.allocate_exact_size(vec2(largeur, 40.0), Sense::hover());
     let mut gauche = ui.new_child(UiBuilder::new().max_rect(barre).layout(Layout::left_to_right(Align::Center)));
-    titre_de_vue(&mut gauche, "Chantiers");
+    titre_de_vue(&mut gauche, &titres[k]);
     gauche.add_space(18.0);
     let aides = match e.echelle {
         Echelle::Semaines => ("Quatre semaines plus tôt", "Quatre semaines plus tard"),
@@ -290,15 +407,15 @@ pub(super) fn vue(ui: &mut egui::Ui, p: &Planning, aujourdhui: i64) -> (Option<A
         e.echelle = if k == 0 { Echelle::Semaines } else { Echelle::Mois };
         e.decalage = 0;
     }
-    let chantiers: Vec<&str> =
-        rangees.iter().filter(|r| r.niveau == 0 && r.enfants > 0).map(|r| p.taches[r.k].id.as_str()).collect();
-    if !chantiers.is_empty() {
+    let groupes: Vec<&str> =
+        rangees.iter().filter(|r| r.niveau == 0 && r.enfants > 0).map(|r| g.taches[r.k].id.as_str()).collect();
+    if !groupes.is_empty() {
         droite.add_space(10.0);
-        let tous_ouverts = chantiers.iter().all(|id| ouvert(&e, id, total));
+        let tous_ouverts = groupes.iter().all(|id| ouvert(&e, id, total));
         let (mot, icone) = if tous_ouverts { ("Tout replier", '\u{E70E}') } else { ("Tout déplier", '\u{E70D}') };
         let id = Some(egui::Id::unique("tout-deplier-le-gantt"));
         if theme::bouton_erp_nomme(&mut droite, id, Some(icone), mot, BoutonErp::Fantome).clicked() {
-            e.ouverts = chantiers.iter().map(|id| (id.to_string(), !tous_ouverts)).collect();
+            e.ouverts = groupes.iter().map(|id| (id.to_string(), !tous_ouverts)).collect();
         }
     }
     // Les barres, ou leurs données en tableau.
@@ -315,39 +432,37 @@ pub(super) fn vue(ui: &mut egui::Ui, p: &Planning, aujourdhui: i64) -> (Option<A
     }
     ui.add_space(12.0);
     if rangees.is_empty() {
-        let texte = "Aucun chantier n'a de dates dans Constructo AI : ses projets et leurs opérations se placeront ici \
-                     dès qu'ils en auront.";
-        super::etat_vide(ui, super::ONGLETS[2].1, erp::BLEU, "Aucun chantier planifié", texte, None);
+        super::etat_vide(ui, super::ONGLETS[2].1, erp::BLEU, m.vide.0, m.vide.1, None);
         if e != avant {
             garder(ui.ctx(), e);
         }
-        return (None, None);
+        return (None, None, operations);
     }
     if e.en_tableau {
-        let tableau = en_tableau(p, &rangees, aujourdhui);
+        let tableau = en_tableau(g, &rangees, aujourdhui, m.colonne);
         if e != avant {
             garder(ui.ctx(), e);
         }
-        return (None, Some(tableau));
+        return (None, Some(tableau), operations);
     }
     let mut action = None;
     theme::carte(ui, None, 0.0, |ui| {
-        action = gantt(ui, p, &rangees, &mut e, total, aujourdhui);
+        action = gantt(ui, g, &rangees, &mut e, total, aujourdhui, &m);
     });
     if e != avant {
         garder(ui.ctx(), e);
     }
-    (action, None)
+    (action, None, operations)
 }
 
-/// Le Gantt en tableau, au format des cartes « tableau » (`colonnes`, `lignes`) : les rangées montrées — un chantier,
-/// puis ses opérations dépliées, en retrait —, leurs jours, leur statut, leur avancement, leur référence quand elles
-/// glissent, leurs responsables ; chaque valeur s'y lit sans survol.
-fn en_tableau(p: &Planning, rangees: &[Rangee], aujourdhui: i64) -> String {
+/// Le Gantt en tableau, au format des cartes « tableau » (`colonnes`, `lignes` ; `colonne` : le titre de la première) :
+/// les rangées montrées — une chose du tableau, puis les siennes dépliées, en retrait —, leurs jours, leur statut, leur
+/// avancement, leur référence quand elles glissent, leurs responsables ; chaque valeur s'y lit sans survol.
+fn en_tableau(g: &Gantt, rangees: &[Rangee], aujourdhui: i64, colonne: &str) -> String {
     let lignes: Vec<Value> = rangees
         .iter()
         .map(|r| {
-            let t = &p.taches[r.k];
+            let t = &g.taches[r.k];
             let titre = if r.niveau > 0 { format!("— {}", t.titre.trim()) } else { t.titre.trim().to_string() };
             let statut = statut_dit(t, etape(t, r.debut, r.fin, aujourdhui));
             let reference = reference_dite(t, glissement(t, r.fin))
@@ -363,7 +478,7 @@ fn en_tableau(p: &Planning, rangees: &[Rangee], aujourdhui: i64) -> String {
             ])
         })
         .collect();
-    let colonnes = ["Chantier · opération", "Début", "Fin", "Statut", "Fait", "Prévu", "Responsables"];
+    let colonnes = [colonne, "Début", "Fin", "Statut", "Fait", "Prévu", "Responsables"];
     json!({ "colonnes": colonnes, "lignes": lignes }).to_string()
 }
 
@@ -406,18 +521,19 @@ fn reference_dite(t: &Tache, glisse: Option<i64>) -> Option<(String, String)> {
 }
 
 /// La carte du Gantt : sa légende, l'en-tête du temps, ses rangées, ses dépendances, la ligne d'aujourd'hui. Rend ce
-/// qu'on a choisi dans le menu d'une tâche ; un chevron cliqué replie ou déplie son chantier (`e`).
+/// qu'on a choisi dans le menu d'une tâche ; un chevron cliqué replie ou déplie son groupe (`e`).
 fn gantt(
     ui: &mut egui::Ui,
-    p: &Planning,
+    g: &Gantt,
     rangees: &[Rangee],
     e: &mut Etat,
     total: usize,
     aujourdhui: i64,
+    m: &Mots,
 ) -> Option<Action> {
     let l = ui.available_width();
-    let etapes: Vec<Etape> = rangees.iter().map(|r| etape(&p.taches[r.k], r.debut, r.fin, aujourdhui)).collect();
-    let glissements: Vec<Option<i64>> = rangees.iter().map(|r| glissement(&p.taches[r.k], r.fin)).collect();
+    let etapes: Vec<Etape> = rangees.iter().map(|r| etape(&g.taches[r.k], r.debut, r.fin, aujourdhui)).collect();
+    let glissements: Vec<Option<i64>> = rangees.iter().map(|r| glissement(&g.taches[r.k], r.fin)).collect();
     // La légende : les états montrés, dans leur ordre ; puis la référence, les dépendances, aujourd'hui.
     let mut cles: Vec<Cle> = Vec::new();
     for x in [Etape::Planifiee, Etape::EnCours, Etape::EnAttente, Etape::EnRetard, Etape::Terminee] {
@@ -429,7 +545,7 @@ fn gantt(
         let nom = "Prévu (la référence)".to_string();
         cles.push(Cle { couleur: REFERENCE, forme: FormeDeCle::Barre, icone: None, nom });
     }
-    if !p.dependances.is_empty() {
+    if !g.dependances.is_empty() {
         cles.push(Cle { couleur: FLECHE, forme: FormeDeCle::Trait, icone: None, nom: "Dépendance".into() });
     }
     cles.push(Cle { couleur: AUJOURDHUI, forme: FormeDeCle::Verticale, icone: None, nom: "Aujourd'hui".into() });
@@ -443,7 +559,7 @@ fn gantt(
     let (tete, _) = ui.allocate_exact_size(vec2(l, 44.0), Sense::hover());
     let x0 = tete.left() + gauche;
     let x_de = |n: i64| x0 + (n - plage.debut) as f32 * par_jour;
-    let hauteurs: Vec<f32> = rangees.iter().map(|r| if r.niveau == 0 { CHANTIER } else { OPERATION }).collect();
+    let hauteurs: Vec<f32> = rangees.iter().map(|r| if r.groupe { CHANTIER } else { OPERATION }).collect();
     let (corps, _) = ui.allocate_exact_size(vec2(l, hauteurs.iter().sum()), Sense::hover());
     let pinceau = ui.painter().clone();
     let temps_rect = Rect::from_min_max(pos2(x0, tete.top()), pos2(tete.right(), corps.bottom()));
@@ -460,7 +576,7 @@ fn gantt(
     });
     // Les fins de semaine pâlies, la grille, l'en-tête.
     let masque = pastille.as_ref().map(|(r, _)| r.expand(3.0));
-    entete_du_temps(&pinceau, &clip, tete, corps, x0, plage, par_jour, e.echelle, masque);
+    entete_du_temps(&pinceau, &clip, (tete, corps), x0, plage, par_jour, e.echelle, masque, m.liste);
     // Les rangées : leur place.
     let mut y = corps.top();
     let places: Vec<Rect> = hauteurs
@@ -481,7 +597,7 @@ fn gantt(
     let mut basculer = None;
     // Les rangées : leur survol, leur menu, puis la liste.
     for (i, (r, place)) in rangees.iter().zip(&places).enumerate() {
-        let t = &p.taches[r.k];
+        let t = &g.taches[r.k];
         let cle = format!("tache-du-gantt-{}", t.id);
         let rep = ui.interact(*place, egui::Id::unique(cle.as_str()), Sense::click());
         let menu_ouvert = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&rep));
@@ -490,22 +606,22 @@ fn gantt(
             pinceau.rect_filled(place.shrink2(vec2(0.0, 1.0)), 6.0, erp::PRIMAIRE.gamma_multiply(0.07));
         }
         liste(ui, &pinceau, t, r, *place, gauche, e, total, &mut basculer);
+        let parent = r.parent.as_deref().map(|p| (m.parent, p));
         if rep.hovered() && !menu_ouvert {
-            bulle_de_la_tache(ui, t, r, etapes[i], glissements[i], &cle);
+            bulle_de_la_tache(ui, t, r, (etapes[i], glissements[i]), parent, &cle);
         }
         let rep = rep.on_hover_cursor(egui::CursorIcon::PointingHand);
-        let parent = r.parent.as_deref();
         let propres = [('\u{E787}', "Replanifier…".to_string())];
         action = action.or(match menu_de_chose(&rep, &cle, &propres, None) {
             Some(0) => Some(parler_de_la_tache(t, parent)),
             Some(1) => Some(rappel_de_la_tache(t, parent)),
-            Some(_) => Some(replanifier_la_tache(t, parent)),
+            Some(_) => Some(replanifier_la_tache(t, parent, m.chose)),
             None => None,
         });
     }
     // Les dépendances, sous les barres.
-    for d in &p.dependances {
-        let trouver = |id: &str| rangees.iter().position(|r| p.taches[r.k].id == id);
+    for d in &g.dependances {
+        let trouver = |id: &str| rangees.iter().position(|r| g.taches[r.k].id == id);
         let (Some(a), Some(b)) = (trouver(&d.de), trouver(&d.vers)) else { continue };
         let (de_la_fin, vers_le_debut) = bouts(d);
         let jours = |i: usize| (x_de(rangees[i].debut), x_de(rangees[i].fin + 1));
@@ -520,9 +636,9 @@ fn gantt(
     }
     // Les barres ; ce qui s'écrit au bout d'une barre d'où part une flèche se pose après elle.
     for (i, (r, place)) in rangees.iter().zip(&places).enumerate() {
-        let id = &p.taches[r.k].id;
-        let fleche = p.dependances.iter().any(|d| d.de == *id && bouts(d).0);
-        let t = &p.taches[r.k];
+        let id = &g.taches[r.k].id;
+        let fleche = g.dependances.iter().any(|d| d.de == *id && bouts(d).0);
+        let t = &g.taches[r.k];
         barre(&pinceau, &clip, t, r, *place, etapes[i], glissements[i], x_de, plage, temps_rect, fleche);
     }
     // Aujourd'hui : sa ligne, et sa pastille dans l'en-tête.
@@ -550,18 +666,19 @@ fn glissement(t: &Tache, fin: i64) -> Option<i64> {
 
 /// Les fins de semaine pâlies et la grille du temps (aux semaines, un filet à chaque lundi ; aux mois, au premier de
 /// chaque mois), puis l'en-tête : les mois en toutes lettres (« octobre 2026 »), en haut, et aux semaines le jour de
-/// chaque lundi, dessous — sauf sous la pastille d'aujourd'hui (`masque`).
+/// chaque lundi, dessous — sauf sous la pastille d'aujourd'hui (`masque`) ; au-dessus de la liste, ce qu'elle montre
+/// (`liste` : « CHANTIER · OPÉRATION »).
 #[allow(clippy::too_many_arguments)]
 fn entete_du_temps(
     p: &egui::Painter,
     clip: &egui::Painter,
-    tete: Rect,
-    corps: Rect,
+    (tete, corps): (Rect, Rect),
     x0: f32,
     plage: Plage,
     par_jour: f32,
     echelle: Echelle,
     masque: Option<Rect>,
+    liste: &str,
 ) {
     let x_de = |n: i64| x0 + (n - plage.debut) as f32 * par_jour;
     let haut_de_la_grille = tete.top() + if echelle == Echelle::Semaines { 22.0 } else { 0.0 };
@@ -614,12 +731,12 @@ fn entete_du_temps(
     p.hline(tete.x_range(), tete.bottom() - 0.5, Stroke::new(1.0, erp::FILET_DE_CARTE));
     p.vline(x0, tete.top()..=corps.bottom(), Stroke::new(1.0, erp::FILET_DE_CARTE));
     let titre = FontId::new(11.0, FontFamily::Name(SEMI.into()));
-    p.text(pos2(tete.left(), tete.bottom() - 13.0), Align2::LEFT_CENTER, "CHANTIER · OPÉRATION", titre, erp::TEXTE_3);
+    p.text(pos2(tete.left(), tete.bottom() - 13.0), Align2::LEFT_CENTER, liste, titre, erp::TEXTE_3);
 }
 
-/// La liste d'une rangée, à gauche : un chantier, son chevron (qui le replie ou le déplie : `basculer`) et son titre en
-/// demi-gras, son nombre d'opérations ; une opération, en retrait, son titre, et les pastilles des initiales de ses
-/// responsables contre le bord.
+/// La liste d'une rangée, à gauche : un groupe (un chantier, un bon de travail), son chevron (qui le replie ou le
+/// déplie : `basculer`) et son titre en demi-gras, son nombre d'opérations ; une tâche — en retrait sous son groupe,
+/// sinon contre le bord —, son titre, et les pastilles des initiales de ses responsables contre le bord.
 #[allow(clippy::too_many_arguments)]
 fn liste(
     ui: &mut egui::Ui,
@@ -635,7 +752,7 @@ fn liste(
     let y = place.center().y;
     let mut x = place.left() + 4.0;
     let fin = place.left() + gauche - 10.0;
-    if r.niveau == 0 {
+    if r.groupe {
         if r.enfants > 0 {
             let chevron = Rect::from_center_size(pos2(x + 9.0, y), vec2(22.0, 22.0));
             let rep = ui.interact(chevron, egui::Id::unique(("chevron-du-gantt", t.id.as_str())), Sense::click());
@@ -646,7 +763,7 @@ fn liste(
             let icone = if deplie { '\u{E70D}' } else { '\u{E76C}' };
             let police = FontId::new(11.0, FontFamily::Name(ICONES.into()));
             p.text(chevron.center(), Align2::CENTER_CENTER, icone, police, erp::TEXTE_2);
-            let aide = if deplie { "Replier ce chantier" } else { "Voir ses opérations" };
+            let aide = if deplie { "Replier" } else { "Voir ses opérations" };
             if rep.on_hover_text(aide).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 *basculer = Some(t.id.clone());
             }
@@ -671,7 +788,7 @@ fn liste(
         }
         return;
     }
-    x += 30.0;
+    x += if r.niveau > 0 { 30.0 } else { 8.0 };
     // Les responsables : leurs initiales, contre le bord de la liste (deux au plus, puis « +1 »).
     let mut droite = fin;
     let responsables: Vec<&String> = t.responsables.iter().filter(|n| !n.trim().is_empty()).collect();
@@ -742,12 +859,12 @@ fn barre(
         && let Some((d, f)) = &t.prevu
         && let (Some(d), Some(f)) = (centre::numero_du_jour(d), centre::numero_du_jour(f))
     {
-        let h = if r.niveau == 0 { BARRE_DE_CHANTIER } else { BARRE };
+        let h = if r.groupe { BARRE_DE_CHANTIER } else { BARRE };
         let reference =
             Rect::from_min_max(pos2(x_de(d), y + h / 2.0 + 2.0), pos2(x_de(f.max(d) + 1), y + h / 2.0 + 5.0));
         clip.rect_filled(reference, 1.5, REFERENCE);
     }
-    let jalon = r.debut == r.fin && r.niveau > 0;
+    let jalon = r.debut == r.fin && !r.groupe;
     let bout_droit = if jalon {
         let c = pos2((x1 + x2) / 2.0, y);
         let d = 8.0;
@@ -755,10 +872,10 @@ fn barre(
         clip.add(Shape::convex_polygon(losange, couleur, Stroke::new(2.0, Color32::WHITE)));
         c.x + d
     } else {
-        let h = if r.niveau == 0 { BARRE_DE_CHANTIER } else { BARRE };
+        let h = if r.groupe { BARRE_DE_CHANTIER } else { BARRE };
         let rect = Rect::from_min_max(pos2(x1 + 1.0, y - h / 2.0), pos2((x2 - 1.0).max(x1 + 3.0), y + h / 2.0));
         let rayon = (h / 2.0).min(4.0).min(rect.width() / 2.0) as u8;
-        let rayon = if r.niveau == 0 { (h / 2.0) as u8 } else { rayon };
+        let rayon = if r.groupe { (h / 2.0) as u8 } else { rayon };
         let fait = t.avancement.map(|a| a.clamp(0.0, 1.0));
         match fait {
             Some(a) if a < 0.999 && etape != Etape::Terminee => {
@@ -784,7 +901,7 @@ fn barre(
     let ecrit = match (glisse, etape, t.avancement) {
         (Some(g), _, _) if g > 0 => Some((format!("+ {g} j"), erp::AVERTISSEMENT_ENCRE)),
         (Some(g), _, _) if g < 0 => Some((format!("{g} j"), erp::ECART_BON)),
-        (_, Etape::EnCours | Etape::EnRetard, Some(a)) if r.niveau > 0 || a > 0.0 => {
+        (_, Etape::EnCours | Etape::EnRetard, Some(a)) if !r.groupe || a > 0.0 => {
             Some((format!("{}\u{a0}%", (a * 100.0).round() as i64), erp::TITRE))
         }
         _ => None,
@@ -798,9 +915,16 @@ fn barre(
     }
 }
 
-/// La bulle d'une tâche : son titre ; son chantier ; ses jours et leur durée ; son état, son avancement ; sa référence
-/// et son glissement ; ses responsables.
-fn bulle_de_la_tache(ui: &egui::Ui, t: &Tache, r: &Rangee, etape: Etape, glisse: Option<i64>, cle: &str) {
+/// La bulle d'une tâche : son titre ; ce qui la situe ; sa rangée au-dessus (`parent` : ce qu'elle est, son titre) ; ses
+/// jours et leur durée ; son état, son avancement ; sa référence et son glissement ; ses responsables.
+fn bulle_de_la_tache(
+    ui: &egui::Ui,
+    t: &Tache,
+    r: &Rangee,
+    (etape, glisse): (Etape, Option<i64>),
+    parent: Option<(&str, &str)>,
+    cle: &str,
+) {
     let Some(pt) = ui.ctx().pointer_hover_pos() else { return };
     let duree = r.fin - r.debut + 1;
     let duree = match duree {
@@ -809,8 +933,11 @@ fn bulle_de_la_tache(ui: &egui::Ui, t: &Tache, r: &Rangee, etape: Etape, glisse:
         d => format!("{} semaines", (d as f64 / 7.0).round() as i64),
     };
     let mut lignes: Vec<(Option<Color32>, String)> = Vec::new();
-    if let Some(c) = &r.parent {
-        lignes.push((None, format!("Chantier : {c}")));
+    if !t.detail.trim().is_empty() {
+        lignes.push((None, t.detail.trim().to_string()));
+    }
+    if let Some((nom, titre)) = parent {
+        lignes.push((None, format!("{} : {titre}", theme::casse_de_phrase(nom))));
     }
     lignes.push((None, format!("{} · {duree}", theme::casse_de_phrase(&jours_de_la_tache(t)))));
     let avancement = avancement_dit(t).map_or(String::new(), |a| format!(" · {a} fait"));
@@ -837,6 +964,7 @@ mod essais {
             id: id.into(),
             parent: parent.map(Into::into),
             titre: format!("Tâche {id}"),
+            detail: String::new(),
             debut: debut.into(),
             fin: fin.into(),
             avancement: None,
@@ -866,10 +994,16 @@ mod essais {
         assert_eq!(etape(&finie, n("2026-10-01"), n("2026-11-20"), aujourdhui), Etape::Terminee);
     }
 
+    /// Un Gantt d'un tableau, sans dépendances.
+    fn gantt_de(cle: &str, taches: Vec<Tache>) -> Gantt {
+        Gantt { cle: cle.into(), titre: cle.into(), taches, dependances: Vec::new() }
+    }
+
     #[test]
     fn les_rangees_suivent_les_chantiers_replies() {
-        let p = Planning {
-            taches: vec![
+        let g = gantt_de(
+            "projets",
+            vec![
                 tache("ch-1", None, "2026-09-01", "2026-12-18", "En cours"),
                 tache("op-2", Some("ch-1"), "2026-11-02", "2026-11-27", "Planifié"),
                 tache("op-1", Some("ch-1"), "2026-09-01", "2026-10-30", "En cours"),
@@ -877,10 +1011,9 @@ mod essais {
                 tache("op-3", Some("absent"), "2026-10-05", "2026-10-09", "Terminé"),
                 tache("op-4", Some("ch-2"), "bientôt", "2026-10-09", "Terminé"),
             ],
-            ..Planning::default()
-        };
-        let (r, total) = rangees(&p, &Etat::default());
-        let ids: Vec<&str> = r.iter().map(|x| p.taches[x.k].id.as_str()).collect();
+        );
+        let (r, total) = rangees(&g, &Etat::default());
+        let ids: Vec<&str> = r.iter().map(|x| g.taches[x.k].id.as_str()).collect();
         assert_eq!(
             ids,
             ["ch-1", "op-2", "op-1", "ch-2", "op-3"],
@@ -888,17 +1021,27 @@ mod essais {
         );
         assert_eq!(total, 5, "une date qui ne se lit pas s'en va");
         assert_eq!((r[0].enfants, r[1].parent.as_deref()), (2, Some("Tâche ch-1")));
+        assert!(r[0].groupe && !r[1].groupe && r[4].groupe, "les chantiers sont des groupes, même sans opérations");
         let replie = Etat { ouverts: vec![("ch-1".into(), false)], ..Etat::default() };
-        let (r, _) = rangees(&p, &replie);
+        let (r, _) = rangees(&g, &replie);
         assert_eq!(r.len(), 3, "replié, un chantier cache ses opérations");
         // Au-delà de vingt-quatre rangées, repliés d'office.
         let beaucoup: Vec<Tache> =
             (0..30).map(|k| tache(&format!("op-{k}"), Some("ch-1"), "2026-10-01", "2026-10-02", "")).collect();
-        let grand = Planning {
-            taches: [vec![tache("ch-1", None, "2026-09-01", "2026-12-18", "")], beaucoup].concat(),
-            ..Planning::default()
-        };
+        let grand = gantt_de("projets", [vec![tache("ch-1", None, "2026-09-01", "2026-12-18", "")], beaucoup].concat());
         assert_eq!(rangees(&grand, &Etat::default()).0.len(), 1);
+        // Un tableau sans rien sous ses choses (les factures) : chacune une tâche sur sa rangée, pas un groupe.
+        let factures = gantt_de(
+            "factures",
+            vec![
+                tache("facture-1", None, "2026-10-01", "2026-10-31", "Envoyée"),
+                tache("facture-2", None, "2026-10-12", "2026-10-12", "Envoyée"),
+            ],
+        );
+        let (r, _) = rangees(&factures, &Etat::default());
+        assert_eq!(r.iter().map(|x| (x.niveau, x.groupe)).collect::<Vec<_>>(), [(0, false), (0, false)]);
+        assert_eq!(mots("factures").liste, "FACTURE");
+        assert!(montre_les_operations("bons_travail") && !montre_les_operations("factures"));
     }
 
     /// Le Gantt en tableau : ses colonnes, un chantier puis ses opérations en retrait, le statut de l'ERP en français,
@@ -909,14 +1052,14 @@ mod essais {
         acier.avancement = Some(0.85);
         acier.prevu = Some(("2026-09-28".into(), "2026-10-23".into()));
         acier.responsables = vec!["Alex".into()];
-        let p = Planning {
-            taches: vec![tache("ch-1", None, "2026-09-01", "2026-12-18", "En cours"), acier, {
+        let g = gantt_de(
+            "projets",
+            vec![tache("ch-1", None, "2026-09-01", "2026-12-18", "En cours"), acier, {
                 tache("op-2", Some("ch-1"), "2026-11-02", "2027-01-15", "Planifie")
             }],
-            ..Planning::default()
-        };
-        let (r, _) = rangees(&p, &Etat::default());
-        let t: Value = serde_json::from_str(&en_tableau(&p, &r, n("2026-10-30"))).unwrap();
+        );
+        let (r, _) = rangees(&g, &Etat::default());
+        let t: Value = serde_json::from_str(&en_tableau(&g, &r, n("2026-10-30"), mots("projets").colonne)).unwrap();
         assert_eq!(t["colonnes"][0], "Chantier · opération");
         assert_eq!(t["colonnes"].as_array().unwrap().len(), 7);
         let l = &t["lignes"];

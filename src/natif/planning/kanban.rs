@@ -12,16 +12,14 @@
 
 use std::sync::Arc;
 
-use eframe::egui::{
-    self, Align, Align2, Color32, FontFamily, FontId, Layout, Rect, Sense, Stroke, StrokeKind, UiBuilder, pos2, vec2,
-};
+use eframe::egui::{self, Align2, Color32, FontFamily, FontId, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 
 use super::{
-    Action, couleur_de_la_personne, deplacer_la_carte, en_francais, initiales, menu_de_chose, parler_de_la_carte,
-    rappel_de_la_carte, titre_de_vue,
+    Action, choix_du_tableau, couleur_de_la_personne, deplacer_la_carte, en_francais, initiales, menu_de_chose,
+    parler_de_la_carte, rappel_de_la_carte, titre_de_vue,
 };
 use crate::centre;
-use crate::natif::theme::{self, BoutonErp, erp};
+use crate::natif::theme::{self, erp};
 use crate::natif::{ICONES, SEMI};
 use crate::planning::{Carte, Colonne, Planning, Tableau};
 
@@ -140,27 +138,8 @@ pub(super) fn vue(ui: &mut egui::Ui, p: &Planning, aujourdhui: i64) -> (Option<A
     let avant = etat(ui.ctx());
     let k = p.tableaux.iter().position(|t| t.cle == avant.tableau).unwrap_or(0);
     let largeur = ui.available_width();
-    let (barre, _) = ui.allocate_exact_size(vec2(largeur, 40.0), Sense::hover());
-    let mut gauche = ui.new_child(UiBuilder::new().max_rect(barre).layout(Layout::left_to_right(Align::Center)));
     let titres: Vec<String> = p.tableaux.iter().map(|t| en_francais(&t.titre)).collect();
-    let choix: Vec<theme::Segment> =
-        titres.iter().map(|t| theme::Segment { icone: None, mot: t.as_str(), aide: "" }).collect();
-    let mesure: f32 = titres
-        .iter()
-        .map(|t| {
-            ui.painter()
-                .layout_no_wrap(t.clone(), FontId::new(13.0, FontFamily::Name(SEMI.into())), erp::TEXTE)
-                .size()
-                .x
-                + 34.0
-        })
-        .sum::<f32>()
-        + 8.0;
-    let choisi = if mesure <= largeur {
-        theme::segments_erp(&mut gauche, "tableau-du-kanban", &choix, k, 34.0)
-    } else {
-        menu_des_tableaux(&mut gauche, &titres, k)
-    };
+    let choisi = choix_du_tableau(ui, "tableau-du-kanban", &titres, k, super::ONGLETS[3].1);
     if let Some(j) = choisi.filter(|j| *j != k) {
         garder(ui.ctx(), Etat { tableau: p.tableaux[j].cle.clone() });
     }
@@ -216,25 +195,6 @@ pub(super) fn vue(ui: &mut egui::Ui, p: &Planning, aujourdhui: i64) -> (Option<A
         action = couloirs(ui, t, couloir, aujourdhui);
     }
     (action, des_operations(t))
-}
-
-/// Le choix du tableau quand ses segments ne tiennent pas : un bouton à son nom, et le menu des tableaux (`titres` :
-/// leurs titres, en français).
-fn menu_des_tableaux(ui: &mut egui::Ui, titres: &[String], k: usize) -> Option<usize> {
-    let id = Some(egui::Id::unique("menu-des-tableaux-du-kanban"));
-    let rep = theme::bouton_erp_nomme(ui, id, Some('\u{E70D}'), &titres[k], BoutonErp::Secondaire);
-    let mut choisi = None;
-    theme::menu_blanc(&rep).show(|ui| {
-        ui.spacing_mut().item_spacing.y = 2.0;
-        for (j, titre) in titres.iter().enumerate() {
-            let icone = if j == k { '\u{E73E}' } else { '\u{E8C0}' };
-            if theme::ligne_du_menu(ui, icone, titre, false, egui::Id::unique(("tableau-du-kanban-menu", j))).clicked()
-            {
-                choisi = Some(j);
-            }
-        }
-    });
-    choisi
 }
 
 /// Une carte du Kanban, mise en page dans la largeur de son couloir : son titre, son détail, son pied (son montant, son

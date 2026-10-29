@@ -1,6 +1,8 @@
 //! Le calendrier du tableau de bord (l'onglet « Calendrier ») : un mois, d'office, ou une semaine, comme les
-//! calendriers d'aujourd'hui. Le mois : une grille de sept colonnes, du lundi au dimanche ; aujourd'hui souligné (son
-//! numéro dans une pastille de l'accent, sa case lavée de bleu) ; les jours d'un autre mois pâlis ; chaque événement en
+//! calendriers d'aujourd'hui ; en tête, le choix « Tout » ou d'un tableau du suivi de l'ERP (les chantiers, les
+//! soumissions, les factures…), comme au Gantt et au Kanban. Le mois : une grille de sept colonnes, du lundi au
+//! dimanche ; aujourd'hui allumé (sa case lavée de l'accent et cerclée, son numéro dans une pastille, son jour de la
+//! semaine à l'accent dans l'en-tête) ; les jours d'un autre mois pâlis ; chaque événement en
 //! pastille de la teinte de sa sorte — son icône, son heure, son titre —, ceux de plusieurs jours en bandes d'une case
 //! à l'autre ; au-delà de ce qu'une case tient, « + 2 autres », qui ouvre sa semaine. Étroit (la conversation à côté),
 //! le mois montre des points de couleur, et dessous l'agenda du jour qu'on touche. La semaine : sept colonnes, les
@@ -13,15 +15,15 @@ use eframe::egui::{
 };
 
 use super::{
-    Action, Cle, FormeDeCle, allure_de, bornes_du_mois, bulle, encre_de, jour_de_semaine, jour_en_trois_lettres,
-    legende, lundi, menu_de_chose, navigation, nom_du_mois, parler_de_l_evenement, premier_jour, quand_de_l_evenement,
-    quantieme, rappel_de_l_evenement, se_montre, titre_de_vue,
+    Action, Cle, FormeDeCle, allure_de, bornes_du_mois, bulle, choix_du_tableau, encre_de, jour_de_semaine,
+    jour_en_trois_lettres, legende, lundi, menu_de_chose, navigation, nom_du_mois, parler_de_l_evenement, premier_jour,
+    quand_de_l_evenement, quantieme, rappel_de_l_evenement, se_montre, titre_de_vue,
 };
 use crate::centre;
 use crate::natif::tableau::Vue;
 use crate::natif::theme::{self, erp};
 use crate::natif::{GRAS, ICONES, SEMI};
-use crate::planning::{Evenement, Planning};
+use crate::planning::{Evenement, Planning, TABLEAUX};
 
 /// Le mois ou la semaine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,18 +33,19 @@ pub(crate) enum Mode {
 }
 
 /// Ce que montre le calendrier : son mode, le jour qui le situe (un jour du mois ou de la semaine montrés ; `None` :
-/// aujourd'hui), et le jour touché dans un mois étroit (son agenda dessous ; `None` : aujourd'hui, ou le premier du
-/// mois).
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// aujourd'hui), le jour touché dans un mois étroit (son agenda dessous ; `None` : aujourd'hui, ou le premier du mois),
+/// et le tableau du suivi choisi (sa clé ; `None` : tout).
+#[derive(Clone, Debug, PartialEq)]
 struct Etat {
     mode: Mode,
     repere: Option<i64>,
     choisi: Option<i64>,
+    tableau: Option<String>,
 }
 
 impl Default for Etat {
     fn default() -> Self {
-        Etat { mode: Mode::Mois, repere: None, choisi: None }
+        Etat { mode: Mode::Mois, repere: None, choisi: None, tableau: None }
     }
 }
 
@@ -57,9 +60,11 @@ fn garder(ctx: &egui::Context, e: Etat) {
     ctx.data_mut(|d| d.insert_temp(egui::Id::unique(ETAT), e));
 }
 
-/// Le calendrier d'une scène de l'essai du thème : ce mode, autour d'aujourd'hui.
-pub(super) fn preparer(ctx: &egui::Context, mode: Mode) {
-    garder(ctx, Etat { mode, ..Etat::default() });
+/// Le calendrier d'une scène de l'essai du thème : ce mode, autour d'aujourd'hui, ce tableau du suivi (sa clé ; vide :
+/// tout).
+pub(super) fn preparer(ctx: &egui::Context, mode: Mode, tableau: &str) {
+    let tableau = (!tableau.is_empty()).then(|| tableau.to_string());
+    garder(ctx, Etat { mode, tableau, ..Etat::default() });
 }
 
 /// Un événement placé dans le temps : son rang dans le planning, son premier et son dernier jour (compris). Ce qu'on
@@ -78,13 +83,14 @@ impl Place {
     }
 }
 
-/// Les événements de la vue (son côté), placés : ceux dont la date ne se lit pas s'en vont ; une fin avant le début
-/// ne compte pas.
-fn places(p: &Planning, vue: Vue) -> Vec<Place> {
+/// Les événements de la vue (son côté) et du tableau du suivi choisi (`tableau` ; `None` : tout), placés : ceux dont la
+/// date ne se lit pas s'en vont ; une fin avant le début ne compte pas.
+fn places(p: &Planning, vue: Vue, tableau: Option<&str>) -> Vec<Place> {
     p.evenements
         .iter()
         .enumerate()
         .filter(|(_, e)| se_montre(e.cote, vue))
+        .filter(|(_, e)| tableau.is_none_or(|t| e.tableau.as_deref() == Some(t)))
         .filter_map(|(k, e)| {
             let debut = centre::numero_du_jour(&e.debut)?;
             let fin = e.fin.as_deref().and_then(centre::numero_du_jour).filter(|f| *f >= debut).unwrap_or(debut);
@@ -214,13 +220,34 @@ fn pastille(
     menu_de_l_evenement(&rep, e, cle)
 }
 
-/// Le calendrier : sa barre d'outils (le titre, ‹ Aujourd'hui ›, « Mois · Semaine »), le mois ou la semaine, la
-/// légende des sortes montrées. Rend ce qu'on a choisi dans le menu d'un événement.
-pub(super) fn vue(ui: &mut egui::Ui, p: &Planning, vue: Vue, aujourdhui: i64) -> Option<Action> {
+/// Le calendrier : le choix du tableau du suivi (« Tout », puis ceux qui ont quelque chose au calendrier dans cette
+/// vue ; aucun choix sans eux, la maison seule), sa barre d'outils (le titre, ‹ Aujourd'hui ›, « Mois · Semaine »), le
+/// mois ou la semaine, la légende des sortes montrées. Rend ce qu'on a choisi dans le menu d'un événement, et si le
+/// tableau montré est celui des opérations (elles se demandent alors au chef).
+pub(super) fn vue(ui: &mut egui::Ui, p: &Planning, vue: Vue, aujourdhui: i64) -> (Option<Action>, bool) {
     let avant = etat(ui.ctx());
-    let mut e = avant;
+    let mut e = avant.clone();
+    let tableaux: Vec<(&str, &str)> = TABLEAUX
+        .iter()
+        .copied()
+        .filter(|(cle, _)| p.evenements.iter().any(|x| se_montre(x.cote, vue) && x.tableau.as_deref() == Some(*cle)))
+        .collect();
+    // Le tableau choisi, s'il a quelque chose dans cette vue (la famille n'en a aucun) : sinon, tout.
+    let mut tableau = e.tableau.clone().filter(|t| tableaux.iter().any(|(c, _)| c == t));
+    if !tableaux.is_empty() {
+        let titres: Vec<String> =
+            std::iter::once("Tout".to_string()).chain(tableaux.iter().map(|(_, t)| t.to_string())).collect();
+        let k = tableau.as_deref().and_then(|t| tableaux.iter().position(|(c, _)| *c == t)).map_or(0, |j| j + 1);
+        let icone = super::ONGLETS[1].1;
+        if let Some(j) = choix_du_tableau(ui, "tableau-du-calendrier", &titres, k, icone).filter(|j| *j != k) {
+            tableau = (j > 0).then(|| tableaux[j - 1].0.to_string());
+            e.tableau = tableau.clone();
+            e.choisi = None;
+        }
+        ui.add_space(10.0);
+    }
     let repere = e.repere.unwrap_or(aujourdhui);
-    let places = places(p, vue);
+    let places = places(p, vue, tableau.as_deref());
     let largeur = ui.available_width();
     let (barre, _) = ui.allocate_exact_size(vec2(largeur, 40.0), Sense::hover());
     let mut gauche = ui.new_child(UiBuilder::new().max_rect(barre).layout(Layout::left_to_right(Align::Center)));
@@ -264,7 +291,7 @@ pub(super) fn vue(ui: &mut egui::Ui, p: &Planning, vue: Vue, aujourdhui: i64) ->
         e.repere = Some(l);
     }
     if e != avant {
-        garder(ui.ctx(), e);
+        garder(ui.ctx(), e.clone());
     }
     // La légende : les sortes de ce qui se montre, dans l'ordre où elles se nomment.
     let (de, a) = etendue(&e, aujourdhui);
@@ -278,21 +305,25 @@ pub(super) fn vue(ui: &mut egui::Ui, p: &Planning, vue: Vue, aujourdhui: i64) ->
     cles.sort_by_key(|c| ORDRE_DE_LA_LEGENDE.iter().position(|n| *n == c.nom).unwrap_or(usize::MAX));
     ui.add_space(10.0);
     if cles.is_empty() {
+        let ou = match tableau.as_deref().and_then(|t| tableaux.iter().find(|(c, _)| *c == t)) {
+            Some((_, titre)) => format!("dans « {titre} »"),
+            None => "au calendrier".to_string(),
+        };
         let rien = match e.mode {
-            Mode::Mois => format!("Rien au calendrier en {}.", nom_du_mois(e.repere.unwrap_or(aujourdhui))),
-            Mode::Semaine => "Rien au calendrier cette semaine-là.".to_string(),
+            Mode::Mois => format!("Rien {ou} en {}.", nom_du_mois(e.repere.unwrap_or(aujourdhui))),
+            Mode::Semaine => format!("Rien {ou} cette semaine-là."),
         };
         ui.label(egui::RichText::new(rien).size(13.0).color(erp::TEXTE_2));
     } else {
         legende(ui, &cles);
     }
-    action
+    (action, tableau.as_deref() == Some("operations"))
 }
 
 /// L'ordre des sortes dans la légende : l'entreprise, puis la maison.
-const ORDRE_DE_LA_LEGENDE: [&str; 12] = [
-    "Chantiers", "Opérations", "Livraisons", "Rendez-vous", "Notes de l'ERP", "Factures", "Factures échues",
-    "Échéances", "École", "Anniversaires", "Rappels d'Eve", "Autres",
+const ORDRE_DE_LA_LEGENDE: [&str; 14] = [
+    "Chantiers", "Opérations", "Soumissions", "Ventes", "Livraisons", "Rendez-vous", "Notes de l'ERP", "Factures",
+    "Factures échues", "Échéances", "École", "Anniversaires", "Rappels d'Eve", "Autres",
 ];
 
 /// Les jours que montre le calendrier : la grille du mois (ses semaines entières), ou la semaine.
@@ -318,9 +349,31 @@ fn titre_de_la_semaine(lundi: i64) -> String {
     }
 }
 
-/// Le lavis des cases : un autre mois, un samedi ou un dimanche, aujourd'hui.
+/// Le lavis des cases : un autre mois, un samedi ou un dimanche.
 const AUTRE_MOIS: Color32 = Color32::from_rgb(0xF6, 0xF8, 0xFB);
 const FIN_DE_SEMAINE: Color32 = Color32::from_rgb(0xFA, 0xFB, 0xFD);
+
+/// Aujourd'hui allumé, comme dans les calendriers d'aujourd'hui (`r` : sa case du mois, ou sa colonne de la semaine) :
+/// lavé de l'accent, cerclé d'un trait de l'accent, un halo pâle en dedans. Trois formes, à poser sous ses événements.
+fn aujourdhui_allume(r: Rect, rayon: f32) -> [egui::Shape; 3] {
+    let accent = erp::PRIMAIRE;
+    [
+        egui::Shape::rect_filled(r.shrink(1.0), rayon, accent.gamma_multiply(0.085)),
+        egui::Shape::rect_stroke(
+            r.shrink(3.0),
+            (rayon - 1.5).max(0.0),
+            Stroke::new(3.0, accent.gamma_multiply(0.13)),
+            egui::StrokeKind::Inside,
+        ),
+        egui::Shape::rect_stroke(
+            r.shrink(1.5),
+            rayon,
+            Stroke::new(1.5, accent.gamma_multiply(0.8)),
+            egui::StrokeKind::Inside,
+        ),
+    ]
+}
+
 /// La hauteur d'une pastille, et ce qui les sépare.
 const PASTILLE: f32 = 21.0;
 const ENTRE: f32 = 3.0;
@@ -345,7 +398,9 @@ fn grille_du_mois(
         let l = ui.available_width();
         let cw = l / 7.0;
         let compact = cw < 112.0;
-        entete_des_jours(ui, debut, cw, compact);
+        // Le jour de la semaine d'aujourd'hui s'allume dans l'en-tête quand la grille le montre.
+        let colonne_d_aujourdhui = (debut..=fin).contains(&aujourdhui).then(|| jour_de_semaine(aujourdhui));
+        entete_des_jours(ui, debut, cw, compact, colonne_d_aujourdhui);
         let rh = if compact { 54.0 } else { (cw * 0.76).clamp(112.0, 136.0) };
         let (grille, _) = ui.allocate_exact_size(vec2(l, rh * semaines as f32), Sense::hover());
         let pinceau = ui.painter().clone();
@@ -362,9 +417,7 @@ fn grille_du_mois(
                     pinceau.vline(case.left(), case.y_range(), Stroke::new(1.0, erp::FILET_DE_CARTE));
                 }
                 let dans_le_mois = (premier..suivant).contains(&n);
-                let fond = if n == aujourdhui {
-                    Some(erp::PRIMAIRE.gamma_multiply(0.06))
-                } else if !dans_le_mois {
+                let fond = if !dans_le_mois {
                     Some(AUTRE_MOIS)
                 } else if jour_de_semaine(n) >= 5 {
                     Some(FIN_DE_SEMAINE)
@@ -373,6 +426,9 @@ fn grille_du_mois(
                 };
                 if let Some(f) = fond {
                     pinceau.rect_filled(case.shrink(0.5), 0.0, f);
+                }
+                if n == aujourdhui {
+                    pinceau.extend(aujourdhui_allume(case, if compact { 6.0 } else { 9.0 }));
                 }
                 if compact {
                     let rep = ui.interact(case, egui::Id::unique(("jour-du-calendrier", n)), Sense::click());
@@ -411,25 +467,33 @@ fn grille_du_mois(
     (action, vers_la_semaine)
 }
 
-/// L'en-tête d'une grille de jours : « LUN », « MAR »… en petites capitales espacées, et un filet dessous.
-fn entete_des_jours(ui: &mut egui::Ui, lundi: i64, cw: f32, compact: bool) {
+/// L'en-tête d'une grille de jours : « LUN », « MAR »… en petites capitales espacées, et un filet dessous ; le jour de
+/// la semaine d'aujourd'hui (`aujourdhui` : sa colonne, 0 le lundi), quand la grille le montre, en gras de l'accent et
+/// souligné d'un trait de l'accent.
+fn entete_des_jours(ui: &mut egui::Ui, lundi: i64, cw: f32, compact: bool, aujourdhui: Option<i64>) {
     let l = cw * 7.0;
     let (tete, _) = ui.allocate_exact_size(vec2(l, 26.0), Sense::hover());
     let p = ui.painter();
-    let format = egui::text::TextFormat {
-        font_id: FontId::new(11.0, FontFamily::Name(SEMI.into())),
-        color: erp::TEXTE_2,
-        extra_letter_spacing: 1.2,
-        ..Default::default()
-    };
     for j in 0..7 {
+        let allume = aujourdhui == Some(j);
+        let format = egui::text::TextFormat {
+            font_id: FontId::new(11.0, FontFamily::Name(if allume { GRAS } else { SEMI }.into())),
+            color: if allume { erp::PRIMAIRE } else { erp::TEXTE_2 },
+            extra_letter_spacing: 1.2,
+            ..Default::default()
+        };
         let mot = jour_en_trois_lettres(lundi + j);
         let mot = if compact { mot.chars().take(1).collect() } else { mot };
         let mut job = egui::text::LayoutJob::default();
-        job.append(&mot, 0.0, format.clone());
+        job.append(&mot, 0.0, format);
         let g = p.layout_job(job);
-        let x = tete.left() + cw * (j as f32 + 0.5) - g.size().x / 2.0;
-        p.galley(pos2(x, tete.center().y - g.size().y / 2.0 - 2.0), g, erp::TEXTE_2);
+        let centre = tete.left() + cw * (j as f32 + 0.5);
+        let y = tete.center().y - g.size().y / 2.0 - 2.0;
+        if allume {
+            let trait_ = Rect::from_center_size(pos2(centre, tete.bottom() - 2.5), vec2(g.size().x.max(16.0), 3.0));
+            p.rect_filled(trait_, 1.5, erp::PRIMAIRE);
+        }
+        p.galley(pos2(centre - g.size().x / 2.0, y), g, erp::TEXTE_2);
     }
     p.hline(tete.x_range(), tete.bottom() - 0.5, Stroke::new(1.0, erp::FILET_DE_CARTE));
 }
@@ -581,6 +645,8 @@ fn semaine(ui: &mut egui::Ui, p: &Planning, places: &[Place], lundi_s: i64, aujo
         // L'en-tête : le jour en trois lettres, son numéro en grand.
         let (tete, _) = ui.allocate_exact_size(vec2(l, 58.0), Sense::hover());
         let pinceau = ui.painter().clone();
+        // Aujourd'hui allumé, sa colonne entière : posé sous tout le reste, sa hauteur ne se connaît qu'à la fin.
+        let sous_tout: Vec<egui::layers::ShapeIdx> = (0..3).map(|_| pinceau.add(egui::Shape::Noop)).collect();
         for j in 0..7 {
             let n = lundi_s + j;
             let x = tete.left() + cw * (j as f32 + 0.5);
@@ -660,10 +726,12 @@ fn semaine(ui: &mut egui::Ui, p: &Planning, places: &[Place], lundi_s: i64, aujo
             let n = lundi_s + j as i64;
             if n == aujourdhui {
                 let colonne = Rect::from_min_max(
-                    pos2(corps.left() + cw * j as f32 + 0.5, zone_des_bandes.top()),
-                    pos2(corps.left() + cw * (j + 1) as f32 - 0.5, corps.bottom()),
+                    pos2(corps.left() + cw * j as f32 + 1.0, tete.top() - 4.0),
+                    pos2(corps.left() + cw * (j + 1) as f32 - 1.0, corps.bottom()),
                 );
-                pinceau.rect_filled(colonne, 0.0, erp::PRIMAIRE.gamma_multiply(0.04));
+                for (i, forme) in sous_tout.iter().zip(aujourdhui_allume(colonne, 12.0)) {
+                    pinceau.set(*i, forme);
+                }
             }
             let mut y = corps.top() + 6.0;
             for (k, c) in cartes {
@@ -855,19 +923,20 @@ mod essais {
             detail: String::new(),
             sorte: Sorte::RendezVous,
             cote,
+            tableau: None,
             source: String::new(),
         }
     }
 
     #[test]
     fn la_grille_d_un_mois_va_du_lundi_au_dimanche() {
-        let octobre = Etat { mode: Mode::Mois, repere: Some(n("2026-10-30")), choisi: None };
+        let octobre = Etat { mode: Mode::Mois, repere: Some(n("2026-10-30")), choisi: None, tableau: None };
         assert_eq!(etendue(&octobre, 0), (n("2026-09-28"), n("2026-11-01")), "cinq semaines");
         let novembre = Etat { repere: Some(n("2026-11-15")), ..octobre };
         let (de, a) = etendue(&novembre, 0);
         assert_eq!((de, a), (n("2026-10-26"), n("2026-12-06")), "le 1er novembre, un dimanche : six semaines");
         assert_eq!((a - de + 1) / 7, 6);
-        let semaine = Etat { mode: Mode::Semaine, repere: None, choisi: None };
+        let semaine = Etat { mode: Mode::Semaine, ..Etat::default() };
         assert_eq!(etendue(&semaine, n("2026-10-30")), (n("2026-10-26"), n("2026-11-01")));
         assert_eq!(titre_de_la_semaine(n("2026-10-26")), "26 oct. – 1er nov. 2026");
         assert_eq!(titre_de_la_semaine(n("2026-11-02")), "2 – 8 nov. 2026");
@@ -901,12 +970,18 @@ mod essais {
             ],
             ..Planning::default()
         };
-        let toutes = places(&p, Vue::Tout);
+        let toutes = places(&p, Vue::Tout, None);
         assert_eq!(toutes.len(), 3, "la date qui ne se lit pas s'en va");
         assert!(toutes[1].bande() && !toutes[0].bande() && !toutes[2].bande(), "une fin avant le début : un jour");
-        assert_eq!(places(&p, Vue::Famille).len(), 1);
-        assert_eq!(places(&p, Vue::Entreprise).len(), 2);
+        assert_eq!(places(&p, Vue::Famille, None).len(), 1);
+        assert_eq!(places(&p, Vue::Entreprise, None).len(), 2);
         assert_eq!(libelle(&p.evenements[0]), ("17 h 30".to_string(), "Hockey".to_string()));
+        // Le choix d'un tableau du suivi : ses événements seuls.
+        let mut p = p;
+        p.evenements[1].tableau = Some("bons_travail".into());
+        let du_tableau = places(&p, Vue::Tout, Some("bons_travail"));
+        assert_eq!(du_tableau.iter().map(|pl| pl.k).collect::<Vec<_>>(), [1]);
+        assert!(places(&p, Vue::Tout, Some("factures")).is_empty());
     }
 
     /// Un mois dessiné sans fenêtre : un clic sur la pastille d'un événement ouvre son menu, et « En parler à Eve »
@@ -932,7 +1007,7 @@ mod essais {
                 ..Default::default()
             };
             let mut action = None;
-            let _ = ctx.run_ui(entree, |ui| action = vue(ui, &p, Vue::Tout, aujourdhui));
+            let _ = ctx.run_ui(entree, |ui| action = vue(ui, &p, Vue::Tout, aujourdhui).0);
             action
         };
         let bouton = |pos, pressed| egui::Event::PointerButton {

@@ -3,10 +3,11 @@
 //! Kanban », celui d'aujourd'hui restant le premier ([`super::tableau`]) —, et les trois vues du planning de
 //! [`crate::planning`], que donne le centre ([`crate::centre::Centre::planning`]) : l'entreprise, lue dans Constructo
 //! AI en lecture seule, et la maison. Le calendrier ([`calendrier`]) : un mois ou une semaine, chaque chose dans la
-//! teinte de sa sorte ; le Gantt ([`gantt`]) : les chantiers et leurs opérations dans le temps ; le Kanban ([`kanban`])
-//! : un tableau du suivi de l'ERP au choix, ses colonnes et leurs cartes. Le choix « Tout · Entreprise · Famille » vaut
-//! pour les quatre ; sans Constructo AI (pas permis à cette Eve), ni Gantt ni Kanban : ils ne montrent que
-//! l'entreprise.
+//! teinte de sa sorte ; le Gantt ([`gantt`]) : un tableau du suivi dans le temps — les chantiers et leurs opérations,
+//! les soumissions, les bons de travail… ; le Kanban ([`kanban`]) : un tableau du suivi, ses colonnes et leurs cartes.
+//! Les trois en tête le même choix des tableaux de l'ERP ([`choix_du_tableau`] ; le calendrier, « Tout » en plus). Le
+//! choix « Tout · Entreprise · Famille » vaut pour les quatre ; sans Constructo AI (pas permis à cette Eve), ni Gantt
+//! ni Kanban : ils ne montrent que l'entreprise.
 //!
 //! Toucher une chose — un événement, une tâche, une carte — ouvre son menu, comme une rangée du tableau de bord : « En
 //! parler à Eve », « Me le rappeler demain », et pour une tâche « Replanifier… », pour une carte « Déplacer vers… ». Ce
@@ -14,7 +15,8 @@
 //! personne vaut là où les accords valent. Chaque demande porte la `source` de la chose, ce qu'Eve en dit à Claude.
 //!
 //! Ce que la fenêtre retient de ces vues — l'onglet ouvert, le mois ou la semaine montrés, l'échelle du Gantt et ses
-//! chantiers dépliés, le tableau du Kanban — vit dans la mémoire d'egui le temps que la fenêtre vit : rien ne s'écrit.
+//! chantiers dépliés, le tableau que montre chacune — vit dans la mémoire d'egui le temps que la fenêtre vit : rien ne
+//! s'écrit.
 
 mod calendrier;
 mod gantt;
@@ -22,7 +24,10 @@ mod kanban;
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use eframe::egui::{self, Align2, Color32, FontFamily, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
+use eframe::egui::{
+    self, Align, Align2, Color32, FontFamily, FontId, Layout, Pos2, Rect, Sense, Stroke, StrokeKind, UiBuilder, pos2,
+    vec2,
+};
 use serde_json::Value;
 
 use super::tableau::{Liaison, Vue};
@@ -47,7 +52,7 @@ pub(crate) enum Onglet {
 const ONGLETS: [(Onglet, char, &str, &str); 4] = [
     (Onglet::Tableau, '\u{F0E2}', "Tableau de bord", "Ce qui presse, la journée, l'entreprise et la famille"),
     (Onglet::Calendrier, '\u{E787}', "Calendrier", "Le mois ou la semaine : l'entreprise et la maison"),
-    (Onglet::Gantt, '\u{EABB}', "Gantt", "Les chantiers et leurs opérations dans le temps"),
+    (Onglet::Gantt, '\u{EABB}', "Gantt", "Les tableaux du suivi dans le temps : les chantiers, les soumissions…"),
     (Onglet::Kanban, '\u{E8C0}', "Kanban", "Les tableaux du suivi de Constructo AI, colonne par colonne"),
 ];
 
@@ -213,7 +218,12 @@ impl Fenetre {
                     }
                     ui.add_space(theme::ECART);
                 }
-                calendrier::vue(ui, planning, vue, jour)
+                let (action, operations) = calendrier::vue(ui, planning, vue, jour);
+                // Les opérations du suivi, au calendrier : elles se demandent quand leur tableau s'y montre.
+                if operations && liaison == Liaison::Reliee {
+                    self.lire_a_la_demande(ui.ctx(), "calendrier-operations");
+                }
+                action
             }
             Onglet::Gantt | Onglet::Kanban => {
                 let (nom, icone) =
@@ -235,10 +245,6 @@ impl Fenetre {
                     }
                     return;
                 }
-                // Le Gantt montre les opérations : elles se demandent quand il se montre (l'entreprise reliée).
-                if onglet == Onglet::Gantt && liaison == Liaison::Reliee {
-                    self.lire_a_la_demande(ui.ctx(), "gantt");
-                }
                 if !lue {
                     match (pas_reliee, erreur) {
                         (true, _) => self.invitation(ui, liaison),
@@ -248,10 +254,15 @@ impl Fenetre {
                     return;
                 }
                 if onglet == Onglet::Gantt {
-                    let (action, tableau) = gantt::vue(ui, planning, jour);
+                    let (action, tableau, operations) = gantt::vue(ui, planning, jour);
                     // Ses données en tableau, comme les tableaux des cartes.
                     if let Some(json) = tableau {
                         theme::carte(ui, None, 0.0, |ui| self.cartes.tableau_seul(ui, &json));
+                    }
+                    // Un Gantt qui montre les opérations (les chantiers, les bons de travail, les opérations) : elles
+                    // se demandent quand il se montre.
+                    if operations && liaison == Liaison::Reliee {
+                        self.lire_a_la_demande(ui.ctx(), "gantt");
                     }
                     action
                 } else {
@@ -340,16 +351,17 @@ pub(super) fn jours_de_la_tache(t: &Tache) -> String {
     }
 }
 
-/// Ce qui situe une tâche dans une demande : son titre et son chantier (`parent` : son titre), ses jours, son statut.
-fn tache_dite(t: &Tache, parent: Option<&str>) -> String {
-    let chantier = parent.map_or(String::new(), |p| format!(", chantier « {p} »"));
+/// Ce qui situe une tâche dans une demande : son titre et sa rangée au-dessus (`parent` : ce qu'elle est — « chantier »,
+/// « bon de travail » — et son titre), ses jours, son statut.
+fn tache_dite(t: &Tache, parent: Option<(&str, &str)>) -> String {
+    let parent = parent.map_or(String::new(), |(nom, titre)| format!(", {nom} « {titre} »"));
     let statut =
         if t.statut.trim().is_empty() { String::new() } else { format!(", {}", t.statut.trim().to_lowercase()) };
-    format!("« {} »{chantier}, {}{statut}", t.titre.trim(), jours_de_la_tache(t))
+    format!("« {} »{parent}, {}{statut}", t.titre.trim(), jours_de_la_tache(t))
 }
 
 /// « En parler à Eve » d'une tâche du Gantt.
-pub(super) fn parler_de_la_tache(t: &Tache, parent: Option<&str>) -> Action {
+pub(super) fn parler_de_la_tache(t: &Tache, parent: Option<(&str, &str)>) -> Action {
     let source = if t.source.trim().is_empty() { String::new() } else { format!(" : {}", t.source.trim()) };
     Action::Demander(avec_un_point(&format!(
         "Parlons de ceci, au Gantt du tableau de bord ({}){source}",
@@ -358,14 +370,16 @@ pub(super) fn parler_de_la_tache(t: &Tache, parent: Option<&str>) -> Action {
 }
 
 /// « Me le rappeler demain » d'une tâche.
-pub(super) fn rappel_de_la_tache(t: &Tache, parent: Option<&str>) -> Action {
-    let chantier = parent.map_or(String::new(), |p| format!(" ({p})"));
-    Action::Rappeler(format!("Gantt : {}{chantier}, {}", t.titre.trim(), jours_de_la_tache(t)))
+pub(super) fn rappel_de_la_tache(t: &Tache, parent: Option<(&str, &str)>) -> Action {
+    let au_dessus = parent.map_or(String::new(), |(_, p)| format!(" ({p})"));
+    Action::Rappeler(format!("Gantt : {}{au_dessus}, {}", t.titre.trim(), jours_de_la_tache(t)))
 }
 
-/// « Replanifier… » d'une tâche : la saisie commence la demande, la personne dit les nouvelles dates.
-pub(super) fn replanifier_la_tache(t: &Tache, parent: Option<&str>) -> Action {
-    Action::Commencer(format!("Replanifie dans Constructo AI la tâche {} : ", tache_dite(t, parent)))
+/// « Replanifier… » d'une tâche (`chose` : ce qu'elle est, « la tâche », « la facture »…) : la saisie commence la
+/// demande, sa source comprise, et la personne dit les nouvelles dates.
+pub(super) fn replanifier_la_tache(t: &Tache, parent: Option<(&str, &str)>, chose: &str) -> Action {
+    let source = if t.source.trim().is_empty() { String::new() } else { format!(" ({})", t.source.trim()) };
+    Action::Commencer(format!("Replanifie dans Constructo AI {chose} {}{source} : ", tache_dite(t, parent)))
 }
 
 /// « En parler à Eve » d'une carte du Kanban : son tableau, sa colonne, sa source (sans elle, son titre et son détail).
@@ -401,10 +415,10 @@ pub(super) fn deplacer_la_carte(c: &Carte, tableau: &str, de: &str, vers: &str, 
 // ---- Les sortes, les dates --------------------------------------------------------------------------------------
 
 /// La teinte, l'icône et le nom (dans une légende) d'une sorte d'événement, les teintes des cartes du tableau de bord
-/// qui disent les mêmes choses : les rendez-vous en violet (« Ta journée »), les notes de l'ERP en indigo (son agenda),
-/// les chantiers et leurs opérations en bleu, les échéances et l'école en jaune, les factures en vert, les livraisons
-/// en orange, les rappels en sarcelle, les anniversaires en rouge. L'icône dit la sorte quand deux partagent une
-/// teinte, et le texte la dit toujours : la couleur ne parle jamais seule.
+/// qui disent les mêmes choses : les rendez-vous et les ventes (le pipeline) en violet (« Ta journée »), les notes de
+/// l'ERP et les soumissions (les devis) en indigo, les chantiers et leurs opérations en bleu, les échéances et l'école
+/// en jaune, les factures en vert, les livraisons en orange, les rappels en sarcelle, les anniversaires en rouge.
+/// L'icône dit la sorte quand deux partagent une teinte, et le texte la dit toujours : la couleur ne parle jamais seule.
 pub(super) fn allure(sorte: Sorte) -> (erp::Teinte, char, &'static str) {
     match sorte {
         Sorte::RendezVous => (erp::VIOLET, '\u{E716}', "Rendez-vous"),
@@ -414,6 +428,8 @@ pub(super) fn allure(sorte: Sorte) -> (erp::Teinte, char, &'static str) {
         Sorte::Echeance => (erp::JAUNE, pictos::ECHEANCES, "Échéances"),
         Sorte::Facture => (erp::VERT, pictos::FACTURES_RECUES, "Factures"),
         Sorte::Livraison => (erp::ORANGE, pictos::COMMANDES, "Livraisons"),
+        Sorte::Soumission => (erp::INDIGO, pictos::DEVIS, "Soumissions"),
+        Sorte::Vente => (erp::VIOLET, pictos::PIPELINE, "Ventes"),
         Sorte::Rappel => (erp::SARCELLE, pictos::RAPPELS, "Rappels d'Eve"),
         Sorte::Anniversaire => (erp::ROUGE, '\u{ED55}', "Anniversaires"),
         Sorte::Ecole => (erp::JAUNE, '\u{E7BE}', "École"),
@@ -516,6 +532,47 @@ fn titre_de_vue(ui: &mut egui::Ui, texte: &str) {
         ui.painter().layout_no_wrap(texte.to_string(), FontId::new(21.0, FontFamily::Name(GRAS.into())), erp::TITRE);
     let (r, _) = ui.allocate_exact_size(vec2(g.size().x, 34.0), Sense::hover());
     ui.painter().galley(pos2(r.left(), r.center().y - g.size().y / 2.0), g, erp::TITRE);
+}
+
+/// Le choix d'un tableau du suivi, en tête du Kanban, du Gantt et du calendrier (`titres` : leurs titres, en français ;
+/// `k` : le choisi) : en segments s'ils tiennent dans la largeur, sinon un bouton à son nom et le menu des tableaux
+/// (`icone` : celle de la vue). `cle` nomme le choix de chaque vue. Rend le rang choisi d'un clic.
+fn choix_du_tableau(ui: &mut egui::Ui, cle: &str, titres: &[String], k: usize, icone: char) -> Option<usize> {
+    let largeur = ui.available_width();
+    let (barre, _) = ui.allocate_exact_size(vec2(largeur, 40.0), Sense::hover());
+    let mut gauche = ui.new_child(UiBuilder::new().max_rect(barre).layout(Layout::left_to_right(Align::Center)));
+    let police = FontId::new(13.0, FontFamily::Name(SEMI.into()));
+    let mesure: f32 = titres
+        .iter()
+        .map(|t| ui.painter().layout_no_wrap(t.clone(), police.clone(), erp::TEXTE).size().x + 34.0)
+        .sum::<f32>()
+        + 8.0;
+    if mesure <= largeur {
+        let choix: Vec<theme::Segment> =
+            titres.iter().map(|t| theme::Segment { icone: None, mot: t.as_str(), aide: "" }).collect();
+        theme::segments_erp(&mut gauche, cle, &choix, k, 34.0)
+    } else {
+        menu_des_tableaux(&mut gauche, cle, titres, k, icone)
+    }
+}
+
+/// Le choix du tableau quand ses segments ne tiennent pas : un bouton à son nom, et le menu des tableaux.
+fn menu_des_tableaux(ui: &mut egui::Ui, cle: &str, titres: &[String], k: usize, icone: char) -> Option<usize> {
+    let id = Some(egui::Id::unique(("menu-des-tableaux", cle)));
+    let rep = theme::bouton_erp_nomme(ui, id, Some('\u{E70D}'), &titres[k], BoutonErp::Secondaire);
+    let mut choisi = None;
+    theme::menu_blanc(&rep).show(|ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        for (j, titre) in titres.iter().enumerate() {
+            let marque = if j == k { '\u{E73E}' } else { icone };
+            if theme::ligne_du_menu(ui, marque, titre, false, egui::Id::unique(("ligne-des-tableaux", cle, j)))
+                .clicked()
+            {
+                choisi = Some(j);
+            }
+        }
+    });
+    choisi
 }
 
 /// Un bouton rond de la barre d'outils (‹ et › : avant, après), comme celui qui relit Constructo AI.
@@ -737,7 +794,7 @@ fn menu_de_chose(
 
 /// Ce qu'une scène de l'essai du thème montre du planning : l'onglet ; le calendrier à la semaine (sinon au mois) ; le
 /// Gantt aux mois (sinon aux semaines), ses chantiers dépliés (par leur id), en tableau (`donnees`) ; le tableau du
-/// Kanban (sa clé ; vide : le premier).
+/// suivi que montre la vue (sa clé ; vide : le premier, et pour le calendrier « Tout »).
 pub(crate) struct Montre<'a> {
     pub(crate) onglet: Onglet,
     pub(crate) semaine: bool,
@@ -750,8 +807,10 @@ pub(crate) struct Montre<'a> {
 /// Les vues du planning d'une scène de l'essai du thème, autour d'aujourd'hui. La vitrine, jamais Eve.
 pub(crate) fn preparer_pour_l_essai(ctx: &egui::Context, m: &Montre<'_>) {
     choisir_l_onglet(ctx, m.onglet);
-    calendrier::preparer(ctx, if m.semaine { calendrier::Mode::Semaine } else { calendrier::Mode::Mois });
-    gantt::preparer(ctx, m.deplies, m.mois, m.donnees);
+    let mode = if m.semaine { calendrier::Mode::Semaine } else { calendrier::Mode::Mois };
+    let tableau = (m.onglet == Onglet::Calendrier).then_some(m.tableau).unwrap_or("");
+    calendrier::preparer(ctx, mode, tableau);
+    gantt::preparer(ctx, m.deplies, m.mois, m.donnees, (m.onglet == Onglet::Gantt).then_some(m.tableau).unwrap_or(""));
     kanban::preparer(ctx, m.tableau);
 }
 
@@ -770,6 +829,7 @@ mod essais {
             detail: "Entrée nord".into(),
             sorte,
             cote: Cote::Entreprise,
+            tableau: None,
             source: source.into(),
         }
     }
@@ -825,6 +885,7 @@ mod essais {
             id: "op-1".into(),
             parent: Some("ch-1".into()),
             titre: "Structure d'acier".into(),
+            detail: String::new(),
             debut: "2026-09-28".into(),
             fin: "2026-10-30".into(),
             avancement: Some(0.85),
@@ -833,17 +894,22 @@ mod essais {
             responsables: vec!["Alexis Tremblay".into()],
             source: "l'opération 12 du projet PROJ-2026-00135".into(),
         };
-        let Action::Demander(d) = parler_de_la_tache(&t, Some("Entrepôt Exemple")) else { panic!() };
+        let chantier = Some(("chantier", "Entrepôt Exemple"));
+        let Action::Demander(d) = parler_de_la_tache(&t, chantier) else { panic!() };
         assert!(
             d.contains("« Structure d'acier », chantier « Entrepôt Exemple », du 28 sept. au 30 oct., en cours"),
             "{d}"
         );
         assert!(d.contains("PROJ-2026-00135"), "{d}");
-        let Action::Commencer(r) = replanifier_la_tache(&t, Some("Entrepôt Exemple")) else { panic!() };
+        let Action::Commencer(r) = replanifier_la_tache(&t, chantier, "la tâche") else { panic!() };
         assert!(
             r.starts_with("Replanifie dans Constructo AI la tâche « Structure d'acier »") && r.ends_with(" : "),
             "{r}"
         );
+        assert!(r.contains("(l'opération 12 du projet PROJ-2026-00135)"), "sa source : {r}");
+        let facture = Tache { parent: None, titre: "Construction Exemple inc.".into(), ..t.clone() };
+        let Action::Commencer(r) = replanifier_la_tache(&facture, None, "la facture") else { panic!() };
+        assert!(r.starts_with("Replanifie dans Constructo AI la facture « Construction Exemple inc. », du"), "{r}");
         let jalon = Tache { debut: "2026-11-05".into(), fin: "2026-11-05".into(), ..t.clone() };
         assert_eq!(jours_de_la_tache(&jalon), "le 5 nov.");
         let c = Carte {

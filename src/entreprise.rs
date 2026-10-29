@@ -417,8 +417,9 @@ pub struct Note {
 }
 
 /// Un devis (une soumission au client) : `depuis`, le jour où il a été soumis (sinon créé) ; `modifie`, le jour de sa
-/// dernière modification. L'ERP ne lui garde pas d'adresse : elle est d'ordinaire dans son nom. `id` : son numéro dans
-/// l'ERP.
+/// dernière modification ; `debut` et `fin`, ceux où ses travaux sont prévus (`date_prevu`, `date_fin` : le Gantt des
+/// devis de l'ERP les prend). L'ERP ne lui garde pas d'adresse : elle est d'ordinaire dans son nom. `id` : son numéro
+/// dans l'ERP.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Devis {
@@ -436,6 +437,10 @@ pub struct Devis {
     pub depuis: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub modifie: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debut: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fin: Option<String>,
 }
 
 /// Une facture reçue d'un fournisseur : son numéro dans l'ERP, le fournisseur, le projet (s'il est en cours), sa date,
@@ -460,9 +465,9 @@ pub struct FactureRecue {
 }
 
 /// Un achat en route : `sorte` — `a_commander` (un bon d'achat pas encore commandé ; `date` : son échéance), `commande`
-/// (un bon de commande pas encore reçu ; `date` : la livraison prévue), `livraison` (une livraison de chantier prévue ;
-/// `date` et `heure`). `texte` : ses notes, courtes (d'une livraison : sa sorte et sa zone). `id` : son numéro dans
-/// l'ERP.
+/// (un bon de commande pas encore reçu ; `depuis` : le jour où il a été commandé ; `date` : la livraison prévue),
+/// `livraison` (une livraison de chantier prévue ; `date` et `heure`). `texte` : ses notes, courtes (d'une livraison :
+/// sa sorte et sa zone). `id` : son numéro dans l'ERP.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Commande {
@@ -477,6 +482,8 @@ pub struct Commande {
     pub projet: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub statut: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depuis: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub date: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -589,7 +596,8 @@ pub struct BonDeTravail {
 }
 
 /// Une vente ouverte du CRM (`lister_opportunites`) : son numéro dans l'ERP, son nom, son étape (`statut`), son montant
-/// estimé, sa probabilité (en pour cent), sa clôture prévue, d'où elle vient (`origine`, la « source » du CRM).
+/// estimé, sa probabilité (en pour cent), son début (le début prévu, sinon le jour où elle a été créée : le Gantt des
+/// ventes de l'ERP le prend) et sa clôture prévue, d'où elle vient (`origine`, la « source » du CRM).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Opportunite {
@@ -602,6 +610,8 @@ pub struct Opportunite {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub probabilite: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub debut: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cloture: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origine: Option<String>,
@@ -609,7 +619,7 @@ pub struct Opportunite {
 
 /// Une facture qui attend son solde (`lister_factures`, ni brouillon ni annulée) : `sorte` — `client` (à recevoir) ou
 /// `fournisseur` (à payer) —, son numéro dans l'ERP et le sien, le client ou le fournisseur (`tiers`), le projet (s'il
-/// est en cours ou à venir), son statut, son échéance, son solde.
+/// est en cours ou à venir), son statut, son jour (`date`) et son échéance, son solde.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FactureOuverte {
@@ -624,6 +634,8 @@ pub struct FactureOuverte {
     pub projet: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub statut: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub echeance: Option<String>,
     pub solde: f64,
@@ -1507,6 +1519,8 @@ fn analyser(reponses: &[(&str, Result<String, String>)], aujourdhui: &str) -> (E
                         valeur: positif(&d["investissement_total"]).or_else(|| positif(&d["prix_estime"])),
                         depuis: date(&d["date_soumis"]).or_else(|| date(&d["created_at"])),
                         modifie: date(&d["updated_at"]).or_else(|| date(&d["created_at"])),
+                        debut: date(&d["date_prevu"]),
+                        fin: date(&d["date_fin"]),
                     })
                 })
                 .collect();
@@ -1561,6 +1575,7 @@ fn analyser(reponses: &[(&str, Result<String, String>)], aujourdhui: &str) -> (E
                         tiers: texte(&f["client_nom"]),
                         projet: nom_du_projet(&f["project_id"]),
                         statut: texte(&f["statut"]),
+                        date: date(&f["date_facture"]),
                         echeance: date(&f["date_echeance"]),
                         solde: montant(&f["solde_du"]).filter(|s| *s > 0.005)?,
                     })
@@ -1615,6 +1630,7 @@ fn analyser(reponses: &[(&str, Result<String, String>)], aujourdhui: &str) -> (E
                     fournisseur: texte(&b["fournisseur_nom"]),
                     projet: texte(&b["projet_nom"]),
                     statut: texte(&b["statut"]),
+                    depuis: date(&b["date_commande"]),
                     date: date(&b["date_livraison_prevue"]),
                     montant: positif(&b["total"]),
                     texte: court(&b["notes"]),
@@ -1767,7 +1783,8 @@ fn analyser_le_planning(
                         statut: texte(&o["statut"]),
                         montant: positif(&o["montant_estime"]),
                         probabilite: entier(&o["probabilite"]).filter(|p| *p <= 100),
-                        cloture: date(&o["date_cloture_prevue"]),
+                        debut: date(&o["date_debut_prevu"]).or_else(|| date(&o["created_at"])),
+                        cloture: date(&o["date_cloture_prevue"]).or_else(|| date(&o["date_fin_prevue"])),
                         origine: texte(&o["source"]),
                     })
                 });
@@ -3568,7 +3585,9 @@ mod essais {
         // Le Gantt : chaque chantier (par son début), puis les siens ; un bon de travail sans chantier connu à sa
         // place ; un bon de travail dont aucune opération n'est lue (celles du bon 38 sont finies avant la fenêtre),
         // sous son chantier ; ni le bon annulé ni ses opérations ; ni l'opération sans date.
-        let ids: Vec<&str> = p.taches.iter().map(|t| t.id.as_str()).collect();
+        let gantt = |cle: &str| p.gantts.iter().find(|g| g.cle == cle).unwrap_or_else(|| panic!("le Gantt {cle}"));
+        let chantiers = gantt("projets");
+        let ids: Vec<&str> = chantiers.taches.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(
             ids,
             [
@@ -3576,7 +3595,7 @@ mod essais {
                 "op-521", "op-522", "bt-12", "op-120", "projet-16", "bt-45", "op-550",
             ]
         );
-        let t = |id: &str| p.taches.iter().find(|t| t.id == id).unwrap();
+        let t = |id: &str| chantiers.taches.iter().find(|t| t.id == id).unwrap();
         assert_eq!(
             (t("projet-9").debut.clone(), t("projet-9").fin.clone()),
             (jour(-75), aujourdhui.clone()),
@@ -3592,9 +3611,33 @@ mod essais {
             (vec!["Toitures Exemple".to_string()], vec!["Kim Essai".to_string()])
         );
         assert_eq!((t("bt-12").titre.as_str(), t("bt-12").statut.as_str()), ("Bon de travail BT-2026-012", "En cours"));
-        let deps: Vec<(&str, &str, &str, i32)> =
-            p.dependances.iter().map(|d| (d.de.as_str(), d.vers.as_str(), d.sorte.as_str(), d.decalage)).collect();
+        let deps: Vec<(&str, &str, &str, i32)> = chantiers
+            .dependances
+            .iter()
+            .map(|d| (d.de.as_str(), d.vers.as_str(), d.sorte.as_str(), d.decalage))
+            .collect();
         assert_eq!(deps, [("op-501", "op-502", "FS", 0), ("op-502", "op-503", "FS", 1), ("op-520", "op-521", "FS", 0)]);
+        // Un Gantt par tableau du suivi ; les soumissions de leurs travaux prévus (sinon, celles qui attendent leur
+        // réponse, jusqu'à aujourd'hui), les ventes ouvertes depuis leur création, les bons de commande en route, les
+        // factures qui attendent leur solde.
+        let cles: Vec<&str> = p.gantts.iter().map(|g| g.cle.as_str()).collect();
+        assert_eq!(cles, ["projets", "devis", "bons_travail", "operations", "ventes", "achats", "factures"]);
+        let jours = |cle: &str| -> Vec<(String, String, String)> {
+            gantt(cle).taches.iter().map(|t| (t.id.clone(), t.debut.clone(), t.fin.clone())).collect()
+        };
+        let j = |id: &str, d: i64, f: i64| (id.to_string(), jour(d), jour(f));
+        assert_eq!(
+            jours("devis"),
+            [j("devis-29", -20, 0), j("devis-35", -1, 0), j("devis-33", 18, 30), j("devis-31", 25, 60)]
+        );
+        assert_eq!(jours("achats"), [j("bc-5", -6, 3)]);
+        assert_eq!(jours("factures"), [j("facture-211", -4, 26), j("facture-212", -3, 27)]);
+        let ventes = jours("ventes");
+        assert_eq!(ventes.len(), 5, "les ventes ouvertes");
+        assert!(ventes.iter().all(|(_, d, _)| *d == jour(-30)), "créées il y a un mois : {ventes:?}");
+        // Au calendrier : chaque soumission et chaque vente, avec son tableau.
+        let de = |cle: &str| p.evenements.iter().filter(|e| e.tableau.as_deref() == Some(cle)).count();
+        assert_eq!((de("devis"), de("ventes")), (4, 5));
 
         // Le Kanban : ses tableaux dans l'ordre du planning ; dans chacun, les colonnes de l'ERP, ce qu'il y compte
         // (les variantes d'un statut réunies) et les cartes lues ; un statut hors de ses colonnes, après elles ; les

@@ -4674,10 +4674,12 @@ mod faux_constructo {
                             "created_at": modifie(-1), "updated_at": modifie(0) }),
                     json!({ "id": 33, "numero_devis": "DEV-2026-033", "nom_projet": "Terrasse, rang du Modèle",
                             "statut": "En attente", "investissement_total": null, "prix_estime": 12800.0,
-                            "date_soumis": jour(-3), "updated_at": modifie(-2) }),
+                            "date_soumis": jour(-3), "updated_at": modifie(-2), "date_prevu": jour(18),
+                            "date_fin": jour(30) }),
                     json!({ "id": 31, "numero_devis": "DEV-2026-031", "nom_projet": "Garage double, rue des Exemples",
                             "client_nom_cache": "Habitations Modèle inc.", "statut": "Envoye",
-                            "investissement_total": 48000.0, "date_soumis": jour(-12), "updated_at": modifie(-12) }),
+                            "investissement_total": 48000.0, "date_soumis": jour(-12), "updated_at": modifie(-12),
+                            "date_prevu": jour(25), "date_fin": jour(60) }),
                     json!({ "id": 29, "numero_devis": "DEV-2026-029", "nom_projet": "Cuisine, avenue de l'Essai",
                             "client_nom_cache": null, "client_nom_direct": "Sam Exemple", "statut": "Envoye",
                             "investissement_total": 31500.0, "date_soumis": jour(-20), "updated_at": modifie(-15) }),
@@ -5550,7 +5552,7 @@ struct SceneDuTheme {
 /// calendrier, le Gantt, le Kanban des chantiers et celui des opérations, tels que le centre les fait de
 /// l'`entreprise.json` du dossier local — une vraie lecture, celle d'une Eve d'essai reliée au faux Constructo AI
 /// (`eve --essai-constructo`) : rien n'y est imposé ni écrit.
-static SCENES_DU_THEME: [SceneDuTheme; 48] = [
+static SCENES_DU_THEME: [SceneDuTheme; 59] = [
     SceneDuTheme { nom: "tableau", duree: 6.0, taille: Some([1560.0, 900.0]) },
     SceneDuTheme { nom: "reflexion", duree: 4.0, taille: None },
     SceneDuTheme { nom: "reponse", duree: 5.0, taille: None },
@@ -5591,6 +5593,9 @@ static SCENES_DU_THEME: [SceneDuTheme; 48] = [
     SceneDuTheme { nom: "vitrine-operations", duree: 5.0, taille: Some([2100.0, 1180.0]) },
     SceneDuTheme { nom: "vitrine-gantt-etroit", duree: 5.0, taille: Some([1180.0, 880.0]) },
     SceneDuTheme { nom: "vitrine-kanban-etroit", duree: 5.0, taille: Some([1180.0, 880.0]) },
+    SceneDuTheme { nom: "vitrine-calendrier-factures", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "vitrine-gantt-soumissions", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "vitrine-gantt-factures", duree: 5.0, taille: Some([2100.0, 1180.0]) },
     SceneDuTheme { nom: "planning-non-relie", duree: 5.0, taille: Some([1560.0, 900.0]) },
     SceneDuTheme { nom: "planning-lecture", duree: 4.0, taille: None },
     SceneDuTheme { nom: "planning-famille", duree: 4.0, taille: None },
@@ -5599,6 +5604,14 @@ static SCENES_DU_THEME: [SceneDuTheme; 48] = [
     SceneDuTheme { nom: "lue-gantt", duree: 6.0, taille: Some([2100.0, 1180.0]) },
     SceneDuTheme { nom: "lue-kanban", duree: 5.0, taille: Some([2100.0, 1180.0]) },
     SceneDuTheme { nom: "lue-operations", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "lue-gantt-soumissions", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "lue-gantt-bons", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "lue-gantt-operations", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "lue-gantt-ventes", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "lue-gantt-achats", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "lue-gantt-factures", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "lue-calendrier-factures", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "lue-calendrier-semaine", duree: 5.0, taille: Some([2100.0, 1180.0]) },
 ];
 
 /// Le fichier qui dit que l'`entreprise.json` du dossier local est celui de l'essai du thème : l'essai le réécrit.
@@ -6099,7 +6112,7 @@ struct MomentDeLaVitrine {
 /// de l'après-midi (la petite qui fait de la fièvre : l'empathie) ; la fin de l'après-midi (le hockey du garçon :
 /// l'amusement ; puis la famille) ; enfin, quelques minutes plus tard, son planning (le calendrier, le Gantt, le
 /// Kanban : [`planning_invente`]).
-const MOMENTS_DE_LA_VITRINE: [MomentDeLaVitrine; 16] = [
+const MOMENTS_DE_LA_VITRINE: [MomentDeLaVitrine; 19] = [
     MomentDeLaVitrine {
         scene: "vitrine-joie",
         heure: 8 * 3600 + 12 * 60,
@@ -6238,6 +6251,33 @@ const MOMENTS_DE_LA_VITRINE: [MomentDeLaVitrine; 16] = [
     MomentDeLaVitrine {
         scene: "vitrine-kanban-etroit",
         heure: 16 * 3600 + 51 * 60,
+        vue: "entreprise",
+        emotion: None,
+        lignes: 11,
+        meteo: (7.1, 3),
+        non_lus: (1, 4, false),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-calendrier-factures",
+        heure: 16 * 3600 + 52 * 60,
+        vue: "entreprise",
+        emotion: None,
+        lignes: 11,
+        meteo: (7.1, 3),
+        non_lus: (1, 4, false),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-gantt-soumissions",
+        heure: 16 * 3600 + 53 * 60,
+        vue: "entreprise",
+        emotion: None,
+        lignes: 11,
+        meteo: (7.1, 3),
+        non_lus: (1, 4, false),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-gantt-factures",
+        heure: 16 * 3600 + 54 * 60,
         vue: "entreprise",
         emotion: None,
         lignes: 11,
@@ -8765,7 +8805,7 @@ fn parcours_des_profils() -> VecDeque<PasDesProfils> {
     };
     use PasDesProfils::*;
     let facture = Evenement("Facture · Usinage Vermeil");
-    let (acier, cpe) = (Tache("op-1352"), Carte("chantiers", "projet-141", 0));
+    let (acier, cpe) = (Tache("op-1352"), Carte("projets", "projet-141", 0));
     VecDeque::from([
         Touches(&[egui::Key::A, egui::Key::S]),
         Pause(1.2),
@@ -10605,6 +10645,9 @@ static DEPLIES_DE_LA_VITRINE: [&str; 3] = ["projet-135", "projet-133", "projet-1
 /// Les chantiers du faux Constructo AI, dépliés au Gantt des scènes du planning lu.
 static DEPLIES_DU_FAUX_SERVEUR: [&str; 4] = ["projet-9", "projet-14", "projet-12", "projet-16"];
 
+/// Ses bons de travail au travail, dépliés au Gantt des bons de travail.
+static DEPLIES_DES_BONS: [&str; 2] = ["bt-41", "bt-42"];
+
 /// Ce que chaque scène de l'essai du thème montre du planning : l'onglet, le calendrier au mois ou à la semaine, le
 /// Gantt aux semaines ou aux mois et ses chantiers dépliés, le tableau du Kanban ; les autres scènes, le tableau de
 /// bord.
@@ -10622,7 +10665,17 @@ fn planning_de_la_scene(nom: &str) -> crate::natif::planning::Montre<'static> {
         "lue-gantt" => Montre { deplies: &DEPLIES_DU_FAUX_SERVEUR, ..montre(Onglet::Gantt) },
         "lue-kanban" => Montre { tableau: "projets", ..montre(Onglet::Kanban) },
         "lue-operations" => Montre { tableau: "operations", ..montre(Onglet::Kanban) },
-        "vitrine-kanban" | "vitrine-kanban-etroit" => Montre { tableau: "soumissions", ..montre(Onglet::Kanban) },
+        "lue-gantt-soumissions" | "vitrine-gantt-soumissions" => Montre { tableau: "devis", ..montre(Onglet::Gantt) },
+        "lue-gantt-bons" => Montre { tableau: "bons_travail", deplies: &DEPLIES_DES_BONS, ..montre(Onglet::Gantt) },
+        "lue-gantt-operations" => Montre { tableau: "operations", ..montre(Onglet::Gantt) },
+        "lue-gantt-ventes" => Montre { tableau: "ventes", ..montre(Onglet::Gantt) },
+        "lue-gantt-achats" => Montre { tableau: "achats", ..montre(Onglet::Gantt) },
+        "lue-gantt-factures" | "vitrine-gantt-factures" => Montre { tableau: "factures", ..montre(Onglet::Gantt) },
+        "lue-calendrier-factures" | "vitrine-calendrier-factures" => {
+            Montre { tableau: "factures", ..montre(Onglet::Calendrier) }
+        }
+        "lue-calendrier-semaine" => Montre { semaine: true, ..montre(Onglet::Calendrier) },
+        "vitrine-kanban" | "vitrine-kanban-etroit" => Montre { tableau: "devis", ..montre(Onglet::Kanban) },
         "vitrine-operations" => Montre { tableau: "operations", ..montre(Onglet::Kanban) },
         "vitrine-gantt-etroit" => Montre { deplies: &deplies[..1], ..montre(Onglet::Gantt) },
         "planning-non-relie" | "planning-famille" => montre(Onglet::Gantt),
@@ -10945,6 +10998,7 @@ fn planning_invente(jour: i64, entreprise: bool) -> crate::planning::Planning {
             id: format!("projet-{court}"),
             parent: None,
             titre: (*nom).into(),
+            detail: format!("{numero} · {client}"),
             debut: d(debut),
             fin: d(*fin),
             avancement: Some(fait),
@@ -10963,6 +11017,7 @@ fn planning_invente(jour: i64, entreprise: bool) -> crate::planning::Planning {
                 id,
                 parent: Some(format!("projet-{court}")),
                 titre: o.titre.into(),
+                detail: String::new(),
                 debut: d(o.de),
                 fin: d(o.a),
                 avancement: o.fait,
@@ -11017,7 +11072,7 @@ fn planning_invente(jour: i64, entreprise: bool) -> crate::planning::Planning {
         c
     };
     let projets = Tableau {
-        cle: "chantiers".into(),
+        cle: "projets".into(),
         titre: "Chantiers".into(),
         colonnes: vec![
             colonne(
@@ -11071,7 +11126,7 @@ fn planning_invente(jour: i64, entreprise: bool) -> crate::planning::Planning {
         c
     };
     let soumissions = Tableau {
-        cle: "soumissions".into(),
+        cle: "devis".into(),
         titre: "Soumissions".into(),
         colonnes: vec![
             colonne("BROUILLON", "Brouillon", 1, vec![soumission("DEV-2026-0219", 12)]),
@@ -11139,7 +11194,7 @@ fn planning_invente(jour: i64, entreprise: bool) -> crate::planning::Planning {
         c
     };
     let bons = Tableau {
-        cle: "bons-de-travail".into(),
+        cle: "bons_travail".into(),
         titre: "Bons de travail".into(),
         colonnes: vec![
             colonne(
@@ -11273,10 +11328,110 @@ fn planning_invente(jour: i64, entreprise: bool) -> crate::planning::Planning {
             .collect(),
         garde: None,
     };
+    // Au calendrier, chaque chose de l'entreprise a son tableau du suivi ; les soumissions s'y ajoutent au début prévu
+    // de leurs travaux (deux semaines après leur réponse attendue), les ventes à leur clôture prévue.
+    for e in evenements.iter_mut().filter(|e| e.cote == Cote::Entreprise) {
+        let tableau = match e.sorte {
+            Sorte::Chantier => Some("projets"),
+            Sorte::Operation => Some("operations"),
+            Sorte::Facture => Some("factures"),
+            Sorte::Livraison => Some("achats"),
+            _ => None,
+        };
+        e.tableau = tableau.map(Into::into);
+    }
+    let au_calendrier = |c: &Carte, quand: i64, (sorte, tableau, quoi): (Sorte, &str, &str)| {
+        let jour = crate::centre::date_du_numero(quand);
+        let (detail, de) = (format!("{quoi} · {}", c.detail), (sorte, Cote::Entreprise));
+        let mut e = crate::planning::evenement((&jour, None, None), c.titre.clone(), detail, de, c.source.clone())?;
+        e.tableau = Some(tableau.into());
+        Some(e)
+    };
+    for c in soumissions.colonnes.iter().flat_map(|col| &col.cartes) {
+        let Some(n) = c.echeance.as_deref().and_then(crate::centre::numero_du_jour) else { continue };
+        evenements.extend(au_calendrier(c, n + 14, (Sorte::Soumission, "devis", "Début prévu des travaux")));
+    }
+    for (k, c) in ventes.colonnes.iter().flat_map(|col| &col.cartes).enumerate() {
+        evenements.extend(au_calendrier(c, jour + 9 + 11 * k as i64, (Sorte::Vente, "ventes", "Clôture prévue")));
+    }
+    // Les Gantt : les chantiers et leurs opérations ; les opérations, chacune sur sa rangée ; les factures du
+    // calendrier, de leur jour à leur échéance ; et chaque autre tableau, ses cartes autour de leur échéance (sans elle,
+    // une échéance inventée qui vient) — dans la couleur de leur colonne.
+    let gantt = |cle: &str, titre: &str, taches: Vec<Tache>, toutes: &[Dependance]| {
+        let la = |id: &str| taches.iter().any(|t| t.id == id);
+        let dependances = toutes.iter().filter(|x| la(&x.de) && la(&x.vers)).cloned().collect();
+        crate::planning::Gantt { cle: cle.into(), titre: titre.into(), taches, dependances }
+    };
+    let ranger = |taches: &mut Vec<Tache>| taches.sort_by(|a, b| (&a.debut, &a.titre).cmp(&(&b.debut, &b.titre)));
+    let des_cartes = |t: &Tableau, (avant, apres): (i64, i64)| -> Vec<Tache> {
+        let mut taches: Vec<Tache> = t
+            .colonnes
+            .iter()
+            .flat_map(|col| col.cartes.iter().map(move |c| (col, c)))
+            .enumerate()
+            .map(|(k, (col, c))| {
+                let echeance = c.echeance.as_deref().and_then(crate::centre::numero_du_jour);
+                let echeance = echeance.unwrap_or(jour + 20 + 9 * k as i64);
+                Tache {
+                    id: c.id.clone(),
+                    parent: None,
+                    titre: c.titre.clone(),
+                    detail: c.detail.clone(),
+                    debut: crate::centre::date_du_numero(echeance + avant),
+                    fin: crate::centre::date_du_numero(echeance + apres),
+                    avancement: None,
+                    statut: crate::planning::titre_de_statut(&col.statut),
+                    prevu: None,
+                    responsables: c.responsables.clone(),
+                    source: c.source.clone(),
+                }
+            })
+            .collect();
+        ranger(&mut taches);
+        taches
+    };
+    let mut operations_seules: Vec<Tache> = taches
+        .iter()
+        .filter(|t| t.parent.is_some())
+        .map(|t| {
+            let chantier = taches.iter().find(|c| Some(&c.id) == t.parent.as_ref()).map(|c| c.titre.clone());
+            Tache { parent: None, detail: chantier.unwrap_or_default(), ..t.clone() }
+        })
+        .collect();
+    ranger(&mut operations_seules);
+    let mut factures: Vec<Tache> = evenements
+        .iter()
+        .filter(|e| e.sorte == Sorte::Facture)
+        .enumerate()
+        .filter_map(|(k, e)| {
+            let n = crate::centre::numero_du_jour(&e.debut)?;
+            Some(Tache {
+                id: format!("facture-{}", k + 1),
+                parent: None,
+                titre: e.titre.trim_start_matches("Facture · ").to_string(),
+                detail: e.detail.clone(),
+                debut: crate::centre::date_du_numero(n - 30),
+                fin: e.debut.clone(),
+                avancement: None,
+                statut: "Envoyée".into(),
+                prevu: None,
+                responsables: Vec::new(),
+                source: e.source.clone(),
+            })
+        })
+        .collect();
+    ranger(&mut factures);
+    let gantts = vec![
+        gantt("devis", "Soumissions", des_cartes(&soumissions, (14, 60)), &[]),
+        gantt("bons_travail", "Bons de travail", des_cartes(&bons, (-12, 0)), &[]),
+        gantt("operations", "Opérations", operations_seules, &dependances),
+        gantt("ventes", "Ventes", des_cartes(&ventes, (-50, 0)), &[]),
+        gantt("factures", "Factures", factures, &[]),
+    ];
+    let gantts = std::iter::once(gantt("projets", "Chantiers", taches, &dependances)).chain(gantts).collect();
     Planning {
         evenements,
-        taches,
-        dependances,
+        gantts,
         tableaux: vec![projets, soumissions, bons, suivi, ventes],
         lu: format!("{} 16:40", d(0)),
     }
@@ -11299,7 +11454,8 @@ mod essais_du_planning_de_la_vitrine {
     fn il_se_tient_avec_la_vitrine() {
         let jour = crate::centre::numero_du_jour(JOUR_DE_LA_VITRINE).unwrap();
         let p = planning_invente(jour, true);
-        let chantiers: Vec<&crate::planning::Tache> = p.taches.iter().filter(|t| t.parent.is_none()).collect();
+        let g = p.gantts.iter().find(|g| g.cle == "projets").expect("le Gantt des chantiers");
+        let chantiers: Vec<&crate::planning::Tache> = g.taches.iter().filter(|t| t.parent.is_none()).collect();
         assert_eq!(chantiers.len(), CHANTIERS_DE_LA_VITRINE.len());
         for (numero, _, _, _, fin) in CHANTIERS_DE_LA_VITRINE {
             let id = format!("projet-{}", numero_court(numero));
@@ -11307,22 +11463,41 @@ mod essais_du_planning_de_la_vitrine {
             assert_eq!(t.fin, crate::centre::date_du_numero(jour + fin), "{numero} finit comme sur la carte");
             assert!(t.source.contains(numero), "la source dit son numéro dans l'ERP");
         }
-        for t in p.taches.iter().filter(|t| t.parent.is_some()) {
+        for t in g.taches.iter().filter(|t| t.parent.is_some()) {
             assert!(chantiers.iter().any(|c| Some(&c.id) == t.parent.as_ref()), "{} a son chantier", t.id);
             assert!(t.debut <= t.fin, "{}", t.id);
         }
         // Dans l'ordre d'affichage : chaque chantier, puis les siennes.
         let mut parent = None;
-        for t in &p.taches {
+        for t in &g.taches {
             match &t.parent {
                 None => parent = Some(&t.id),
                 Some(x) => assert_eq!(Some(x), parent, "{} suit son chantier", t.id),
             }
         }
-        for dep in &p.dependances {
-            assert!(p.taches.iter().any(|t| t.id == dep.de) && p.taches.iter().any(|t| t.id == dep.vers), "{dep:?}");
+        for g in &p.gantts {
+            for dep in &g.dependances {
+                let la = |id: &str| g.taches.iter().any(|t| t.id == id);
+                assert!(la(&dep.de) && la(&dep.vers), "{} : {dep:?}", g.cle);
+            }
+            // Chaque tâche a ses jours ; une chose d'un tableau du Kanban (pas celles qui sont sous elle : les
+            // opérations d'un chantier) a sa carte — sauf les opérations, dont le Kanban ne montre que celles du moment.
+            let kanban = p.tableaux.iter().find(|t| t.cle == g.cle);
+            for t in &g.taches {
+                assert!(t.debut <= t.fin, "{} : {}", g.cle, t.id);
+                let carte = kanban.is_none_or(|k| k.colonnes.iter().flat_map(|c| &c.cartes).any(|c| c.id == t.id));
+                let du_tableau = t.parent.is_none() && g.cle != "operations";
+                assert!(carte || !du_tableau, "{} : {} a sa carte au Kanban", g.cle, t.id);
+            }
         }
-        let soumissions = p.tableaux.iter().find(|t| t.cle == "soumissions").unwrap();
+        let cles: Vec<&str> = p.gantts.iter().map(|g| g.cle.as_str()).collect();
+        assert_eq!(cles, ["projets", "devis", "bons_travail", "operations", "ventes", "factures"]);
+        // Au calendrier, les choses de l'entreprise ont leur tableau, celles de la maison aucun.
+        assert!(p.evenements.iter().filter(|e| e.cote == crate::planning::Cote::Famille).all(|e| e.tableau.is_none()));
+        for cle in ["projets", "devis", "ventes", "factures"] {
+            assert!(p.evenements.iter().any(|e| e.tableau.as_deref() == Some(cle)), "{cle} au calendrier");
+        }
+        let soumissions = p.tableaux.iter().find(|t| t.cle == "devis").unwrap();
         for (numero, _, _, statut, _, _, _) in SOUMISSIONS_DE_LA_VITRINE {
             let id = format!("devis-{}", numero_court(numero));
             let colonne = soumissions.colonnes.iter().find(|c| c.cartes.iter().any(|x| x.id == id));
@@ -11331,7 +11506,7 @@ mod essais_du_planning_de_la_vitrine {
         }
         let operations = p.tableaux.iter().find(|t| t.cle == "operations").unwrap();
         for c in operations.colonnes.iter().flat_map(|c| &c.cartes) {
-            assert!(p.taches.iter().any(|t| t.id == c.id), "{} : la même id au Gantt et au Kanban", c.id);
+            assert!(g.taches.iter().any(|t| t.id == c.id), "{} : la même id au Gantt et au Kanban", c.id);
         }
         for (numero, ..) in RETARDS_DE_LA_VITRINE {
             assert!(p.evenements.iter().any(|e| e.detail.starts_with(numero)), "{numero} au calendrier");
@@ -11340,7 +11515,7 @@ mod essais_du_planning_de_la_vitrine {
         assert_eq!(crate::ambiance::date_longue(&coulee.debut).get(..5), Some("JEUDI"));
         assert!(!p.lu.is_empty());
         let maison = planning_invente(jour, false);
-        assert!(maison.taches.is_empty() && maison.tableaux.is_empty() && maison.lu.is_empty());
+        assert!(maison.gantts.is_empty() && maison.tableaux.is_empty() && maison.lu.is_empty());
         assert!(maison.evenements.iter().all(|e| e.cote == crate::planning::Cote::Famille));
         assert_eq!(numero_court("PROJ-2026-00137"), "137");
         assert_eq!(numero_court("DEV-2026-0214"), "214");

@@ -3340,7 +3340,8 @@ mod essais {
             ("EVE_AGENDA", json!({ "t": 1.0, "rdv": [{ "d": "2026-10-29", "h": "9:30", "titre": "Dentiste" }] })),
         ]);
         let p = c.planning("2026-10-28");
-        assert!(p.taches.is_empty() && p.dependances.is_empty() && p.tableaux.is_empty() && p.lu.is_empty());
+        assert!(p.gantts.is_empty() && p.tableaux.is_empty() && p.lu.is_empty());
+        assert!(p.evenements.iter().all(|e| e.tableau.is_none()), "la maison n'est d'aucun tableau du suivi");
         let vu: Vec<(&str, Option<&str>, &str, Sorte)> =
             p.evenements.iter().map(|e| (e.debut.as_str(), e.heure.as_deref(), e.titre.as_str(), e.sorte)).collect();
         assert_eq!(

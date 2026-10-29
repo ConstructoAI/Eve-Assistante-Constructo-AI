@@ -14,7 +14,9 @@ use eve::parole::normaliser;
 use serde::{Deserialize, Serialize};
 
 use crate::centre::{date_du_numero, numero_du_jour};
-use crate::entreprise::{self, BonDeTravail, Entreprise, FactureOuverte, Operation, Projet, TableauDuKanban};
+use crate::entreprise::{
+    self, BonDeTravail, Commande, Devis, Entreprise, FactureOuverte, Operation, Opportunite, Projet, TableauDuKanban,
+};
 
 /// D'où vient une chose : le filtre « Tout · Entreprise · Famille » du tableau de bord (`vue_du_tableau`) vaut pour
 /// le planning aussi.
@@ -41,6 +43,10 @@ pub enum Sorte {
     Facture,
     /// Une livraison ou une commande attendue.
     Livraison,
+    /// Une soumission : le début prévu de ses travaux, sinon le jour où elle a été soumise.
+    Soumission,
+    /// Une vente du CRM, à sa clôture prévue.
+    Vente,
     /// Un rappel d'Eve (`rappels.json`).
     Rappel,
     Anniversaire,
@@ -62,16 +68,24 @@ pub struct Evenement {
     pub detail: String,
     pub sorte: Sorte,
     pub cote: Cote,
+    /// Le tableau du suivi de l'ERP dont elle est ([`TABLEAUX`] : `projets`, `devis`, `bons_travail`…), que choisit le
+    /// calendrier ; rien pour une note de l'ERP, ni pour la maison.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tableau: Option<String>,
     /// Ce qu'Eve en dit à Claude quand on lui en parle (« la facture F-1042 de Toitures Exemple, échue le 2 novembre »).
     pub source: String,
 }
 
-/// Une tâche du Gantt : un chantier (sans parent) ou l'une de ses opérations (son chantier pour parent).
+/// Une tâche du Gantt : une chose d'un tableau du suivi (un chantier, une soumission, un bon de travail, une facture…),
+/// ou l'une des siennes, en retrait sous elle (une opération de son chantier, de son bon de travail : `parent`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Tache {
     pub id: String,
     pub parent: Option<String>,
     pub titre: String,
+    /// Ce qui la situe, dans sa bulle (« FACT-2026-00211 · À recevoir ») ; vide d'office.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
     pub debut: String,
     pub fin: String,
     /// De 0 à 1, si l'ERP le dit.
@@ -126,12 +140,22 @@ pub struct Carte {
     pub source: String,
 }
 
+/// Le Gantt d'un tableau du suivi de l'ERP, celui du Kanban qui a la même clé ([`TABLEAUX`]) : ses tâches, dans l'ordre
+/// où elles se montrent (chacune, puis les siennes), et les dépendances de l'ERP entre elles.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Gantt {
+    pub cle: String,
+    pub titre: String,
+    pub taches: Vec<Tache>,
+    pub dependances: Vec<Dependance>,
+}
+
 /// Le planning entier, d'un coup : ce que dessinent les trois vues.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Planning {
     pub evenements: Vec<Evenement>,
-    pub taches: Vec<Tache>,
-    pub dependances: Vec<Dependance>,
+    /// Un Gantt par tableau du suivi, dans l'ordre de [`TABLEAUX`] : les chantiers et leurs opérations d'abord.
+    pub gantts: Vec<Gantt>,
     pub tableaux: Vec<Tableau>,
     /// Quand l'entreprise en a été lue (« 2026-10-28 14:02 ») ; vide : pas encore (ou pas reliée).
     pub lu: String,
@@ -140,7 +164,7 @@ pub struct Planning {
 // ---- Le remplir : la fenêtre, les jours, les statuts, l'entreprise ------------------------------------------------
 //
 // Ce que la dernière lecture de l'ERP a gardé (`entreprise.json`, `entreprise::Entreprise`) devient ici les événements
-// de l'entreprise, les tâches et les dépendances du Gantt, les tableaux du Kanban ; la maison s'y ajoute dans
+// de l'entreprise, le Gantt et le tableau du Kanban de chaque tableau du suivi ; la maison s'y ajoute dans
 // `Centre::planning`, qui tient les fichiers de la maison.
 
 /// La fenêtre du planning autour d'`aujourdhui` (« AAAA-MM-JJ ») : du premier jour du mois d'avant au dernier jour du
@@ -440,6 +464,45 @@ fn facture_dite(f: &FactureOuverte) -> String {
     format!("la facture{numero}{tiers}{id}{projet}, {} {sens}", entreprise::dollars(f.solde))
 }
 
+/// « la soumission DEV-2026-031 « Garage double, rue des Exemples » pour Habitations Modèle inc. (devis n° 31 de
+/// l'ERP), 48 000 $ ».
+fn soumission_dite(d: &Devis) -> String {
+    let numero = d.numero.as_deref().map(|n| format!(" {n}")).unwrap_or_default();
+    let de = d.client.as_deref().map(|c| format!(" pour {c}")).unwrap_or_default();
+    let n = d.id.map(|i| format!(" (devis n° {i} de l'ERP)")).unwrap_or_default();
+    let valeur = d.valeur.map(|v| format!(", {}", entreprise::dollars(v))).unwrap_or_default();
+    format!("la soumission{numero} « {} »{de}{n}{valeur}", d.nom)
+}
+
+/// « la vente « Garage double, rang du Modèle » (opportunité n° 12 du CRM de l'ERP), 60 000 $, 50 % de chances ».
+fn vente_dite(o: &Opportunite) -> String {
+    let montant = o.montant.map(|m| format!(", {}", entreprise::dollars(m))).unwrap_or_default();
+    let chances = o.probabilite.map(|p| format!(", {p} % de chances")).unwrap_or_default();
+    format!("la vente « {} » (opportunité n° {} du CRM de l'ERP){montant}{chances}", o.nom, o.id)
+}
+
+/// « le bon de commande BC-2026-005 (de Bois Exemple inc., n° 5 de l'ERP), du chantier « … » ».
+fn commande_dite(c: &Commande) -> String {
+    let quoi = entre_parentheses(&[
+        c.fournisseur.as_deref().map(|f| format!("de {f}")).as_deref(),
+        c.id.map(|i| format!("n° {i} de l'ERP")).as_deref(),
+    ]);
+    let chantier = c.projet.as_deref().map(|p| format!(", du chantier « {p} »")).unwrap_or_default();
+    format!("le bon de commande {}{quoi}{chantier}", c.numero.as_deref().unwrap_or(""))
+}
+
+/// Les soumissions en cours, et celles qui attendent une réponse : une seule fois chacune.
+fn soumissions(e: &Entreprise) -> Vec<&Devis> {
+    let mut vus = HashSet::new();
+    e.soumissions.iter().flatten().chain(e.devis.iter().flatten()).filter(|d| vus.insert(id_de_soumission(d))).collect()
+}
+
+/// L'id d'une soumission, celui de sa carte du Kanban et de sa tâche du Gantt (« devis-31 ») : son numéro dans l'ERP ;
+/// sans lui, son numéro de document, sinon son nom.
+fn id_de_soumission(d: &Devis) -> String {
+    d.id.map(|i| format!("devis-{i}")).or_else(|| d.numero.clone()).unwrap_or_else(|| d.nom.clone())
+}
+
 // ---- Le calendrier : les événements de l'entreprise -----------------------------------------------------------------
 
 /// Un événement du calendrier, s'il se place : `quand` — son premier jour (« AAAA-MM-JJ »), son dernier (compris ;
@@ -465,8 +528,14 @@ pub(crate) fn evenement(
         detail,
         sorte,
         cote,
+        tableau: None,
         source,
     })
+}
+
+/// Un événement du tableau du suivi `tableau` (sa clé dans [`TABLEAUX`]).
+fn du_tableau(e: Option<Evenement>, tableau: &str) -> Option<Evenement> {
+    e.map(|e| Evenement { tableau: Some(tableau.into()), ..e })
 }
 
 /// Une heure comme le contrat l'écrit, « 08:30 », d'après « 8:30 », « 08:30 » ou « 08:30:00 » ; rien si ce n'en est
@@ -477,11 +546,12 @@ fn heure_du_calendrier(h: &str) -> Option<String> {
     (hh < 24 && mm < 60).then(|| format!("{hh:02}:{mm:02}"))
 }
 
-/// Les événements de l'entreprise : les notes du calendrier de l'ERP ; le début et la fin de ses chantiers (en cours et
-/// à venir) ; ses bons de travail, du début à la fin (sinon à leur échéance, comme le calendrier de l'ERP les place) ;
-/// les opérations du suivi de production, s'il a été lu ; les factures qui attendent leur solde, à leur échéance ; les
-/// livraisons et les commandes attendues ; les bons d'achat à commander, à leur échéance. Ni ce qui est annulé, ni ce
-/// qui n'a pas de date.
+/// Les événements de l'entreprise, chacun avec son tableau du suivi : les notes du calendrier de l'ERP (d'aucun) ; le
+/// début et la fin de ses chantiers (en cours et à venir) ; ses soumissions, au début prévu de leurs travaux (sinon au
+/// jour où elles ont été soumises) ; ses bons de travail, du début à la fin (sinon à leur échéance, comme le calendrier
+/// de l'ERP les place) ; les opérations du suivi de production, s'il a été lu ; ses ventes, à leur clôture prévue
+/// (comme le calendrier de l'ERP) ; les factures qui attendent leur solde, à leur échéance ; les livraisons, les
+/// commandes attendues et les bons d'achat à commander, aux achats. Ni ce qui est annulé, ni ce qui n'a pas de date.
 fn evenements_de_l_entreprise(e: &Entreprise, aujourdhui: &str) -> Vec<Evenement> {
     let mut ev = Vec::new();
     let de = |sorte| (sorte, Cote::Entreprise);
@@ -495,13 +565,30 @@ fn evenements_de_l_entreprise(e: &Entreprise, aujourdhui: &str) -> Vec<Evenement
         if let Some(d) = &p.debut {
             let detail = joint(&[Some("Début du chantier"), Some(&qui)]);
             let source = format!("le début de {}, {}", chantier_dit(p), jour_dit(d));
-            ev.extend(evenement((d, None, None), p.nom.clone(), detail, de(Sorte::Chantier), source));
+            let x = evenement((d, None, None), p.nom.clone(), detail, de(Sorte::Chantier), source);
+            ev.extend(du_tableau(x, "projets"));
         }
         if let Some(f) = &p.fin {
             let detail = joint(&[Some("Fin du chantier"), Some(&qui)]);
             let source = format!("la fin prévue de {}, {}", chantier_dit(p), jour_dit(f));
-            ev.extend(evenement((f, None, None), p.nom.clone(), detail, de(Sorte::Chantier), source));
+            let x = evenement((f, None, None), p.nom.clone(), detail, de(Sorte::Chantier), source);
+            ev.extend(du_tableau(x, "projets"));
         }
+    }
+    for d in soumissions(e) {
+        let statut = titre_de_statut(&d.statut).to_lowercase();
+        let (jour, quoi, quand) = match (&d.debut, &d.depuis) {
+            (Some(debut), _) => {
+                let fin = d.fin.as_deref().filter(|f| *f > debut.as_str()).unwrap_or(debut);
+                (debut, "Début prévu des travaux".to_string(), format!("ses travaux prévus {}", du_au(debut, fin)))
+            }
+            (None, Some(depuis)) => (depuis, format!("Soumission {statut}"), format!("depuis {}", jour_dit(depuis))),
+            _ => continue,
+        };
+        let detail = joint(&[Some(&quoi), d.client.as_deref()]);
+        let source = format!("{}, statut {statut}, {quand}", soumission_dite(d));
+        let x = evenement((jour, None, None), d.nom.clone(), detail, de(Sorte::Soumission), source);
+        ev.extend(du_tableau(x, "devis"));
     }
     let bons: HashMap<u64, &BonDeTravail> = e.bons_travail.iter().flatten().map(|b| (b.id, b)).collect();
     for b in e.bons_travail.iter().flatten().filter(|b| !annule(&b.statut)) {
@@ -512,7 +599,10 @@ fn evenements_de_l_entreprise(e: &Entreprise, aujourdhui: &str) -> Vec<Evenement
         let detail = joint(&[numero.as_deref(), b.projet.as_deref()]);
         let statut = titre_de_statut(b.statut.as_deref().unwrap_or("")).to_lowercase();
         let source = format!("{}, {}, statut {statut}", bon_dit(b), du_au(debut, fin.unwrap_or(debut)));
-        ev.extend(evenement((debut, fin, None), titre, detail, de(Sorte::Operation), source));
+        ev.extend(du_tableau(
+            evenement((debut, fin, None), titre, detail, de(Sorte::Operation), source),
+            "bons_travail",
+        ));
     }
     for o in e.operations.iter().flatten() {
         let bt = o.bt_id.and_then(|i| bons.get(&i).copied());
@@ -524,7 +614,17 @@ fn evenements_de_l_entreprise(e: &Entreprise, aujourdhui: &str) -> Vec<Evenement
         let qui = o.responsable.as_deref().or(sous_traitant(o));
         let detail = joint(&[o.bt_numero.as_deref(), bt.and_then(|b| b.projet.as_deref()), qui]);
         let source = format!("{}, prévue {}", operation_dite(o, bt), du_au(debut, fin.unwrap_or(debut)));
-        ev.extend(evenement((debut, fin, None), o.nom.clone(), detail, de(Sorte::Operation), source));
+        let x = evenement((debut, fin, None), o.nom.clone(), detail, de(Sorte::Operation), source);
+        ev.extend(du_tableau(x, "operations"));
+    }
+    for o in e.opportunites.iter().flatten() {
+        let Some(d) = o.cloture.as_deref() else { continue };
+        let montant = o.montant.map(entreprise::dollars);
+        let chances = o.probabilite.map(|p| format!("{p} % de chances"));
+        let detail = joint(&[Some("Clôture prévue"), montant.as_deref(), chances.as_deref()]);
+        let etape = titre_de_statut(o.statut.as_deref().unwrap_or("")).to_lowercase();
+        let source = format!("{}, à l'étape {etape}, clôture prévue {}", vente_dite(o), jour_dit(d));
+        ev.extend(du_tableau(evenement((d, None, None), o.nom.clone(), detail, de(Sorte::Vente), source), "ventes"));
     }
     for f in e.factures_ouvertes.iter().flatten() {
         let Some(d) = f.echeance.as_deref() else { continue };
@@ -534,7 +634,8 @@ fn evenements_de_l_entreprise(e: &Entreprise, aujourdhui: &str) -> Vec<Evenement
         let detail = joint(&[f.numero.as_deref(), Some(&combien)]);
         let quand = if d < aujourdhui { "échue" } else { "à échéance" };
         let source = format!("{}, {quand} {}", facture_dite(f), jour_dit(d));
-        ev.extend(evenement((d, None, None), format!("Facture · {tiers}"), detail, de(Sorte::Facture), source));
+        let x = evenement((d, None, None), format!("Facture · {tiers}"), detail, de(Sorte::Facture), source);
+        ev.extend(du_tableau(x, "factures"));
     }
     for c in e.commandes.iter().flatten() {
         let Some(d) = c.date.as_deref() else { continue };
@@ -549,7 +650,8 @@ fn evenements_de_l_entreprise(e: &Entreprise, aujourdhui: &str) -> Vec<Evenement
                     c.heure.as_deref().map(|h| format!(" à {}", crate::centre::heure_parlee(h))).unwrap_or_default();
                 let quoi = entre_parentheses(&[numero, c.texte.as_deref(), id.as_deref()]);
                 let source = format!("la livraison{quoi}{chantier}, prévue {}{a}", jour_dit(d));
-                ev.extend(evenement((d, None, c.heure.as_deref()), titre, detail, de(Sorte::Livraison), source));
+                let x = evenement((d, None, c.heure.as_deref()), titre, detail, de(Sorte::Livraison), source);
+                ev.extend(du_tableau(x, "achats"));
             }
             "commande" => {
                 let titre = format!("Livraison · {}", c.fournisseur.as_deref().or(numero).unwrap_or("une commande"));
@@ -562,7 +664,10 @@ fn evenements_de_l_entreprise(e: &Entreprise, aujourdhui: &str) -> Vec<Evenement
                     numero.unwrap_or(""),
                     jour_dit(d)
                 );
-                ev.extend(evenement((d, None, None), titre, detail, de(Sorte::Livraison), source));
+                ev.extend(du_tableau(
+                    evenement((d, None, None), titre, detail, de(Sorte::Livraison), source),
+                    "achats",
+                ));
             }
             "a_commander" => {
                 let titre = format!("À commander · {}", c.texte.as_deref().or(numero).unwrap_or("un achat"));
@@ -574,7 +679,7 @@ fn evenements_de_l_entreprise(e: &Entreprise, aujourdhui: &str) -> Vec<Evenement
                     numero.unwrap_or(""),
                     jour_dit(d)
                 );
-                ev.extend(evenement((d, None, None), titre, detail, de(Sorte::Echeance), source));
+                ev.extend(du_tableau(evenement((d, None, None), titre, detail, de(Sorte::Echeance), source), "achats"));
             }
             _ => {}
         }
@@ -599,15 +704,18 @@ pub fn ranger(evenements: &mut [Evenement]) {
     }
 }
 
-// ---- Le Gantt : les chantiers et leurs opérations ----------------------------------------------------------------
+// ---- Le Gantt : chaque tableau du suivi dans le temps -----------------------------------------------------------
 
-/// L'id d'une tâche du Gantt d'après la sorte que lui donne l'ERP (`project`, `bt`, `op`) et son numéro — celui de la
-/// carte du Kanban qui montre la même chose. Les autres sortes de l'ERP (`devis`, `bc`, `opp`) n'ont pas de tâche ici.
+/// L'id d'une tâche du Gantt d'après la sorte que lui donne l'ERP (`project`, `bt`, `op`, `devis`, `bc`, `opp`) et son
+/// numéro — celui de la carte du Kanban qui montre la même chose.
 fn id_de_tache(sorte: &str, id: &str) -> Option<String> {
     match sorte {
         "project" => Some(format!("projet-{id}")),
         "bt" => Some(format!("bt-{id}")),
         "op" => Some(format!("op-{id}")),
+        "devis" => Some(format!("devis-{id}")),
+        "bc" => Some(format!("bc-{id}")),
+        "opp" => Some(format!("opportunite-{id}")),
         _ => None,
     }
 }
@@ -633,62 +741,108 @@ fn statut_d_ensemble(taches: &[Tache]) -> String {
     statut.into()
 }
 
-/// Les tâches du Gantt et leurs dépendances : les chantiers en cours et à venir, et sous chacun ses opérations (le
-/// suivi de production, lu à la demande) — un bon de travail dont aucune opération n'est lue s'y montre à leur place ;
-/// un bon de travail sans chantier connu tient lieu de chantier aux siennes. Ni les bons de travail annulés ni leurs
-/// opérations (l'ERP les écarte de son Gantt), ni les opérations annulées, ni ce qui n'a pas de date. Un chantier
-/// commencé sans date de fin dure au moins jusqu'à aujourd'hui ; sans dates, il prend celles de ses opérations. Les
-/// tâches vont dans l'ordre où elles se montrent : chaque chantier (par son début), puis les siennes. Les dépendances :
-/// celles de l'ERP entre deux tâches qui y sont.
-fn gantt(e: &Entreprise, aujourdhui: &str) -> (Vec<Tache>, Vec<Dependance>) {
-    let references: HashMap<(String, String), (String, String)> = e
-        .references
-        .iter()
-        .flatten()
-        .map(|r| {
-            let fin = r.fin.clone().filter(|f| *f >= r.debut).unwrap_or_else(|| r.debut.clone());
-            ((r.sorte.clone(), r.id.clone()), (r.debut.clone(), fin))
-        })
-        .collect();
-    let prevu = |sorte: &str, id: u64| references.get(&(sorte.to_string(), id.to_string())).cloned();
-    let bons: Vec<&BonDeTravail> = e.bons_travail.iter().flatten().filter(|b| !annule(&b.statut)).collect();
-    let annules: HashSet<u64> = e.bons_travail.iter().flatten().filter(|b| annule(&b.statut)).map(|b| b.id).collect();
-    // Les opérations de chaque bon de travail, dans l'ordre de l'ERP (le bon, puis le rang de chacune).
-    let mut ordre_des_bons: Vec<u64> = Vec::new();
-    let mut operations: HashMap<u64, Vec<&Operation>> = HashMap::new();
-    for o in e.operations.iter().flatten() {
-        let Some(bt) = o.bt_id else { continue };
-        if annules.contains(&bt) || annule(&o.statut) || (o.debut.is_none() && o.fin.is_none()) {
-            continue;
-        }
-        if !operations.contains_key(&bt) {
-            ordre_des_bons.push(bt);
-        }
-        operations.entry(bt).or_default().push(o);
-    }
-    let chantiers: Vec<&Projet> = chantiers(e);
-    let ids_des_chantiers: HashSet<u64> = chantiers.iter().filter_map(|p| p.id).collect();
+/// Le statut d'une chose de l'ERP tel qu'il se lit (« Envoyé », « Proposition ») ; vide sans lui : le Gantt dit alors
+/// son état d'après ses dates.
+fn statut_lisible(statut: Option<&str>) -> String {
+    statut.map(str::trim).filter(|s| !s.is_empty()).map(titre_de_statut).unwrap_or_default()
+}
 
-    let tache_d_operation = |o: &Operation, parent: &str, bt: Option<&BonDeTravail>| -> Tache {
+/// Des tâches dans l'ordre de leur début ; à égalité, dans celui de l'ERP.
+fn ranger_par_debut(taches: &mut [Tache]) {
+    taches.sort_by(|a, b| a.debut.cmp(&b.debut));
+}
+
+/// Des tâches qui se montrent chacune sur sa rangée, dans l'ordre de leur début, puis de leur titre.
+fn ranger_par_debut_et_titre(taches: &mut [Tache]) {
+    taches.sort_by(|a, b| (&a.debut, &a.titre).cmp(&(&b.debut, &b.titre)));
+}
+
+/// Des groupes — une tâche, puis les siennes — dans l'ordre où ils se montrent (par début, puis par titre), à plat.
+fn a_plat(mut groupes: Vec<(Tache, Vec<Tache>)>) -> Vec<Tache> {
+    groupes.sort_by(|(a, _), (b, _)| (&a.debut, &a.titre).cmp(&(&b.debut, &b.titre)));
+    groupes.into_iter().flat_map(|(t, enfants)| std::iter::once(t).chain(enfants)).collect()
+}
+
+/// La fin d'une chose qui court encore : la sienne, si elle en a une (au plus tôt son début) ; sinon aujourd'hui (au
+/// plus tôt son début) — une soumission qui attend sa réponse, une vente sans clôture prévue.
+fn fin_ou_aujourdhui(debut: &str, fin: Option<&str>, aujourdhui: &str) -> String {
+    match fin.filter(|f| *f >= debut) {
+        Some(f) => f.to_string(),
+        None => debut.max(aujourdhui).to_string(),
+    }
+}
+
+/// Ce que les Gantt des tableaux partagent : l'entreprise lue ; les références de son Gantt (ses lignes de base : par
+/// sorte et numéro, les jours prévus) ; ses bons de travail, sans les annulés (l'ERP les écarte de son Gantt, et leurs
+/// opérations avec eux) ; les opérations datées de chacun (le suivi de production, lu à la demande) ; aujourd'hui.
+struct Suivi<'a> {
+    e: &'a Entreprise,
+    references: HashMap<(String, String), (String, String)>,
+    bons: Vec<&'a BonDeTravail>,
+    /// Les bons de travail dont des opérations sont lues, dans l'ordre de l'ERP (le bon, puis le rang de chacune).
+    ordre_des_bons: Vec<u64>,
+    operations: HashMap<u64, Vec<&'a Operation>>,
+    aujourdhui: &'a str,
+}
+
+impl<'a> Suivi<'a> {
+    fn de(e: &'a Entreprise, aujourdhui: &'a str) -> Suivi<'a> {
+        let references = e
+            .references
+            .iter()
+            .flatten()
+            .map(|r| {
+                let fin = r.fin.clone().filter(|f| *f >= r.debut).unwrap_or_else(|| r.debut.clone());
+                ((r.sorte.clone(), r.id.clone()), (r.debut.clone(), fin))
+            })
+            .collect();
+        let annules: HashSet<u64> =
+            e.bons_travail.iter().flatten().filter(|b| annule(&b.statut)).map(|b| b.id).collect();
+        let mut ordre_des_bons: Vec<u64> = Vec::new();
+        let mut operations: HashMap<u64, Vec<&Operation>> = HashMap::new();
+        for o in e.operations.iter().flatten() {
+            let Some(bt) = o.bt_id else { continue };
+            if annules.contains(&bt) || annule(&o.statut) || (o.debut.is_none() && o.fin.is_none()) {
+                continue;
+            }
+            if !operations.contains_key(&bt) {
+                ordre_des_bons.push(bt);
+            }
+            operations.entry(bt).or_default().push(o);
+        }
+        let bons = e.bons_travail.iter().flatten().filter(|b| !annule(&b.statut)).collect();
+        Suivi { e, references, bons, ordre_des_bons, operations, aujourdhui }
+    }
+
+    /// Les jours prévus d'une chose (sa sorte dans l'ERP, son numéro), si son Gantt en a gardé.
+    fn prevu(&self, sorte: &str, id: u64) -> Option<(String, String)> {
+        self.references.get(&(sorte.to_string(), id.to_string())).cloned()
+    }
+
+    /// La tâche d'une opération, sous `parent` (son chantier, son bon de travail) ou seule : ses jours, son avancement,
+    /// son statut, sa référence, qui la fait.
+    fn tache_d_operation(&self, o: &Operation, parent: Option<&str>, bt: Option<&BonDeTravail>) -> Tache {
         let debut = o.debut.clone().or_else(|| o.fin.clone()).unwrap_or_default();
         let fin = o.fin.clone().filter(|f| *f >= debut).unwrap_or_else(|| debut.clone());
         let responsables =
             [o.responsable.as_deref(), sous_traitant(o)].into_iter().flatten().map(str::to_string).collect();
         Tache {
             id: format!("op-{}", o.id),
-            parent: Some(parent.to_string()),
+            parent: parent.map(str::to_string),
             titre: o.nom.clone(),
+            detail: joint(&[o.bt_numero.as_deref(), bt.and_then(|b| b.projet.as_deref())]),
             source: format!("{}, prévue {}", operation_dite(o, bt), du_au(&debut, &fin)),
             debut,
             fin,
             avancement: avancement(o),
             statut: statut_du_gantt(o.statut.as_deref().unwrap_or("")),
-            prevu: prevu("op", o.id),
+            prevu: self.prevu("op", o.id),
             responsables,
         }
-    };
-    // Un bon de travail : ses dates, sinon celles de ses opérations, sinon son échéance (l'ordre de l'ERP).
-    let tache_de_bon = |b: &BonDeTravail, parent: Option<String>, ops: &[&Operation]| -> Option<Tache> {
+    }
+
+    /// La tâche d'un bon de travail : ses dates, sinon celles de ses opérations, sinon son échéance (l'ordre de l'ERP).
+    fn tache_de_bon(&self, b: &BonDeTravail, parent: Option<String>, ops: &[&Operation]) -> Option<Tache> {
         let (debut_des_ops, fin_des_ops) = etendue(ops);
         let debut = b.debut.clone().or(debut_des_ops).or_else(|| b.echeance.clone()).or_else(|| b.fin.clone())?;
         let mut fin = b.fin.clone().or_else(|| b.echeance.clone());
@@ -708,29 +862,82 @@ fn gantt(e: &Entreprise, aujourdhui: &str) -> (Vec<Tache>, Vec<Dependance>) {
             id: format!("bt-{}", b.id),
             parent,
             titre: b.nom.clone().or_else(|| b.numero.clone()).unwrap_or_else(|| format!("Bon de travail {}", b.id)),
+            detail: joint(&[b.numero.as_deref(), b.projet.as_deref()]),
             debut,
             fin,
             avancement: None,
             statut: statut_du_gantt(statut),
-            prevu: prevu("bt", b.id),
+            prevu: self.prevu("bt", b.id),
             responsables: Vec::new(),
             source,
         })
-    };
-    let ranger_les_enfants = |enfants: &mut Vec<Tache>| enfants.sort_by(|a, b| a.debut.cmp(&b.debut));
+    }
 
-    // Chaque chantier et les siens.
+    /// Un bon de travail, et ses opérations sous lui.
+    fn groupe_du_bon(&self, b: &BonDeTravail) -> Option<(Tache, Vec<Tache>)> {
+        let ops = self.operations.get(&b.id).map(Vec::as_slice).unwrap_or(&[]);
+        let tache = self.tache_de_bon(b, None, ops)?;
+        let mut enfants: Vec<Tache> = ops.iter().map(|o| self.tache_d_operation(o, Some(&tache.id), Some(b))).collect();
+        ranger_par_debut(&mut enfants);
+        Some((tache, enfants))
+    }
+
+    /// Les bons de travail que l'ERP n'a pas rendus (au-delà des plus récents), d'après leurs opérations : chacun, et
+    /// les siennes sous lui.
+    fn bons_d_apres_leurs_operations(&self) -> Vec<(Tache, Vec<Tache>)> {
+        let connus: HashSet<u64> = self.e.bons_travail.iter().flatten().map(|b| b.id).collect();
+        let mut groupes = Vec::new();
+        for bt in self.ordre_des_bons.iter().filter(|bt| !connus.contains(bt)) {
+            let id = format!("bt-{bt}");
+            let ops = &self.operations[bt];
+            let mut enfants: Vec<Tache> = ops.iter().map(|o| self.tache_d_operation(o, Some(&id), None)).collect();
+            ranger_par_debut(&mut enfants);
+            let premier = enfants.iter().map(|t| t.debut.clone()).min();
+            let dernier = enfants.iter().map(|t| t.fin.clone()).max();
+            let (Some(debut), Some(fin)) = (premier, dernier) else { continue };
+            let numero = ops.iter().find_map(|o| o.bt_numero.clone());
+            let titre = format!("Bon de travail {}", numero.clone().unwrap_or_else(|| bt.to_string()));
+            let numero = numero.map(|n| format!(" {n}")).unwrap_or_default();
+            let source =
+                format!("le bon de travail{numero} (bon de travail n° {bt} de l'ERP), {}", du_au(&debut, &fin));
+            let statut = statut_d_ensemble(&enfants);
+            let tache = Tache {
+                id,
+                parent: None,
+                titre,
+                detail: String::new(),
+                debut,
+                fin,
+                avancement: None,
+                statut,
+                prevu: self.prevu("bt", *bt),
+                responsables: Vec::new(),
+                source,
+            };
+            groupes.push((tache, enfants));
+        }
+        groupes
+    }
+}
+
+/// Les chantiers en cours et à venir, et sous chacun ses opérations (le suivi de production, lu à la demande) — un bon
+/// de travail dont aucune opération n'est lue s'y montre à leur place ; un bon de travail sans chantier connu tient lieu
+/// de chantier aux siennes. Ni les opérations annulées, ni ce qui n'a pas de date. Un chantier commencé sans date de fin
+/// dure au moins jusqu'à aujourd'hui ; sans dates, il prend celles de ses opérations.
+fn taches_des_chantiers(s: &Suivi) -> Vec<Tache> {
+    let chantiers: Vec<&Projet> = chantiers(s.e);
+    let ids_des_chantiers: HashSet<u64> = chantiers.iter().filter_map(|p| p.id).collect();
     let mut groupes: Vec<(Tache, Vec<Tache>)> = Vec::new();
     for p in &chantiers {
         let parent = format!("projet-{}", cle_du_chantier(p));
         let mut enfants: Vec<Tache> = Vec::new();
-        for b in bons.iter().filter(|b| p.id.is_some() && b.projet_id == p.id) {
-            match operations.get(&b.id) {
-                Some(ops) => enfants.extend(ops.iter().map(|o| tache_d_operation(o, &parent, Some(*b)))),
-                None => enfants.extend(tache_de_bon(b, Some(parent.clone()), &[])),
+        for b in s.bons.iter().filter(|b| p.id.is_some() && b.projet_id == p.id) {
+            match s.operations.get(&b.id) {
+                Some(ops) => enfants.extend(ops.iter().map(|o| s.tache_d_operation(o, Some(&parent), Some(*b)))),
+                None => enfants.extend(s.tache_de_bon(b, Some(parent.clone()), &[])),
             }
         }
-        ranger_les_enfants(&mut enfants);
+        ranger_par_debut(&mut enfants);
         let premier = enfants.iter().map(|t| t.debut.clone()).min();
         let dernier = enfants.iter().map(|t| t.fin.clone()).max();
         let Some(debut) = p.debut.clone().or(premier) else { continue };
@@ -739,7 +946,7 @@ fn gantt(e: &Entreprise, aujourdhui: &str) -> (Vec<Tache>, Vec<Dependance>) {
             Some(f) => f,
             // Sans date de fin : jusqu'à son dernier travail, et en cours, au moins jusqu'à aujourd'hui.
             None => {
-                let jusqua = (statut == "En cours").then(|| aujourdhui.to_string());
+                let jusqua = (statut == "En cours").then(|| s.aujourdhui.to_string());
                 dernier.max(jusqua).filter(|f| *f >= debut).unwrap_or_else(|| debut.clone())
             }
         };
@@ -754,59 +961,186 @@ fn gantt(e: &Entreprise, aujourdhui: &str) -> (Vec<Tache>, Vec<Dependance>) {
             id: parent,
             parent: None,
             titre: p.nom.clone(),
+            detail: joint(&[p.numero.as_deref(), p.client.as_deref()]),
             debut,
             fin,
             avancement: None,
             statut,
-            prevu: p.id.and_then(|id| prevu("project", id)),
+            prevu: p.id.and_then(|id| s.prevu("project", id)),
             responsables: Vec::new(),
             source,
         };
         groupes.push((tache, enfants));
     }
     // Les bons de travail sans chantier connu, avec leurs opérations.
-    for b in bons.iter().filter(|b| b.projet_id.is_none_or(|p| !ids_des_chantiers.contains(&p))) {
-        let ops = operations.get(&b.id).map(Vec::as_slice).unwrap_or(&[]);
-        let Some(tache) = tache_de_bon(b, None, ops) else { continue };
-        let mut enfants: Vec<Tache> = ops.iter().map(|o| tache_d_operation(o, &tache.id, Some(*b))).collect();
-        ranger_les_enfants(&mut enfants);
-        groupes.push((tache, enfants));
+    for b in s.bons.iter().filter(|b| b.projet_id.is_none_or(|p| !ids_des_chantiers.contains(&p))) {
+        groupes.extend(s.groupe_du_bon(b));
     }
-    // Les bons de travail que l'ERP n'a pas rendus (au-delà des plus récents), d'après leurs opérations.
-    let connus: HashSet<u64> = e.bons_travail.iter().flatten().map(|b| b.id).collect();
-    for bt in ordre_des_bons.iter().filter(|bt| !connus.contains(bt)) {
-        let id = format!("bt-{bt}");
-        let mut enfants: Vec<Tache> = operations[bt].iter().map(|o| tache_d_operation(o, &id, None)).collect();
-        ranger_les_enfants(&mut enfants);
-        let premier = enfants.iter().map(|t| t.debut.clone()).min();
-        let dernier = enfants.iter().map(|t| t.fin.clone()).max();
-        let (Some(debut), Some(fin)) = (premier, dernier) else { continue };
-        let numero = operations[bt].iter().find_map(|o| o.bt_numero.clone());
-        let titre = format!("Bon de travail {}", numero.clone().unwrap_or_else(|| bt.to_string()));
-        let numero = numero.map(|n| format!(" {n}")).unwrap_or_default();
-        let source = format!("le bon de travail{numero} (bon de travail n° {bt} de l'ERP), {}", du_au(&debut, &fin));
-        let statut = statut_d_ensemble(&enfants);
-        let tache = Tache {
-            id,
-            parent: None,
-            titre,
-            debut,
-            fin,
-            avancement: None,
-            statut,
-            prevu: prevu("bt", *bt),
-            responsables: Vec::new(),
-            source,
-        };
-        groupes.push((tache, enfants));
-    }
-    groupes.sort_by(|(a, _), (b, _)| (&a.debut, &a.titre).cmp(&(&b.debut, &b.titre)));
-    let taches: Vec<Tache> = groupes.into_iter().flat_map(|(t, enfants)| std::iter::once(t).chain(enfants)).collect();
+    groupes.extend(s.bons_d_apres_leurs_operations());
+    a_plat(groupes)
+}
 
-    // Les dépendances entre deux tâches du Gantt.
+/// Les bons de travail (sans les annulés), chacun ses opérations sous lui, comme le Gantt des bons de travail de
+/// l'ERP ; ceux qu'il n'a pas rendus, d'après leurs opérations.
+fn taches_des_bons(s: &Suivi) -> Vec<Tache> {
+    let mut groupes: Vec<(Tache, Vec<Tache>)> = s.bons.iter().filter_map(|b| s.groupe_du_bon(b)).collect();
+    groupes.extend(s.bons_d_apres_leurs_operations());
+    a_plat(groupes)
+}
+
+/// Les opérations du suivi de production, chacune sur sa rangée, comme le Gantt des opérations de l'ERP.
+fn taches_des_operations(s: &Suivi) -> Vec<Tache> {
+    let mut taches: Vec<Tache> = s
+        .ordre_des_bons
+        .iter()
+        .flat_map(|bt| {
+            let bon = s.bons.iter().find(|b| b.id == *bt).copied();
+            s.operations[bt].iter().map(move |o| s.tache_d_operation(o, None, bon))
+        })
+        .collect();
+    ranger_par_debut_et_titre(&mut taches);
+    taches
+}
+
+/// Les soumissions en cours et celles qui attendent une réponse, comme le Gantt des devis de l'ERP : leurs travaux
+/// prévus ; sans eux, depuis le jour où elles ont été soumises. Sans fin, une soumission court jusqu'à aujourd'hui :
+/// elle attend encore sa réponse, elle n'est pas en retard.
+fn taches_des_soumissions(s: &Suivi) -> Vec<Tache> {
+    let mut taches: Vec<Tache> = soumissions(s.e)
+        .into_iter()
+        .filter_map(|d| {
+            let debut = d.debut.clone().or_else(|| d.depuis.clone())?;
+            let fin = fin_ou_aujourdhui(&debut, d.fin.as_deref(), s.aujourdhui);
+            let quand = match &d.debut {
+                Some(_) => format!("ses travaux prévus {}", du_au(&debut, &fin)),
+                None => format!("depuis {}", jour_dit(&debut)),
+            };
+            let statut = statut_lisible(Some(&d.statut));
+            Some(Tache {
+                id: id_de_soumission(d),
+                parent: None,
+                titre: d.nom.clone(),
+                detail: joint(&[d.numero.as_deref(), d.client.as_deref()]),
+                source: format!("{}, statut {}, {quand}", soumission_dite(d), statut.to_lowercase()),
+                debut,
+                fin,
+                avancement: None,
+                statut,
+                prevu: d.id.and_then(|id| s.prevu("devis", id)),
+                responsables: Vec::new(),
+            })
+        })
+        .collect();
+    ranger_par_debut_et_titre(&mut taches);
+    taches
+}
+
+/// Les ventes ouvertes du CRM, comme le Gantt des ventes de l'ERP : de leur début (prévu, sinon le jour où elles ont
+/// été créées) à leur clôture prévue — sans elle, jusqu'à aujourd'hui.
+fn taches_des_ventes(s: &Suivi) -> Vec<Tache> {
+    let mut taches: Vec<Tache> = s
+        .e
+        .opportunites
+        .iter()
+        .flatten()
+        .filter_map(|o| {
+            let debut = o.debut.clone().or_else(|| o.cloture.clone())?;
+            let fin = fin_ou_aujourdhui(&debut, o.cloture.as_deref(), s.aujourdhui);
+            let statut = statut_lisible(o.statut.as_deref());
+            let cloture = o.cloture.as_deref().map(|c| format!(", clôture prévue {}", jour_dit(c))).unwrap_or_default();
+            let (montant, chances) =
+                (o.montant.map(entreprise::dollars), o.probabilite.map(|p| format!("{p} % de chances")));
+            Some(Tache {
+                id: format!("opportunite-{}", o.id),
+                parent: None,
+                titre: o.nom.clone(),
+                detail: joint(&[montant.as_deref(), chances.as_deref()]),
+                source: format!("{}, à l'étape {}{cloture}", vente_dite(o), statut.to_lowercase()),
+                debut,
+                fin,
+                avancement: None,
+                statut,
+                prevu: s.prevu("opp", o.id),
+                responsables: Vec::new(),
+            })
+        })
+        .collect();
+    ranger_par_debut_et_titre(&mut taches);
+    taches
+}
+
+/// Les bons de commande pas encore reçus, comme le Gantt des bons de commande de l'ERP : du jour où ils ont été
+/// commandés à leur livraison prévue.
+fn taches_des_achats(s: &Suivi) -> Vec<Tache> {
+    let mut taches: Vec<Tache> = s
+        .e
+        .commandes
+        .iter()
+        .flatten()
+        .filter(|c| c.sorte == "commande")
+        .filter_map(|c| {
+            let debut = c.depuis.clone().or_else(|| c.date.clone())?;
+            let fin = c.date.clone().filter(|f| *f >= debut).unwrap_or_else(|| debut.clone());
+            let statut = statut_lisible(c.statut.as_deref());
+            let commande = c.depuis.as_deref().map(|d| format!(", commandé {}", jour_dit(d))).unwrap_or_default();
+            let livraison =
+                c.date.as_deref().map(|d| format!(", livraison prévue {}", jour_dit(d))).unwrap_or_default();
+            Some(Tache {
+                id: c.id.map(|i| format!("bc-{i}")).or_else(|| c.numero.clone()).unwrap_or_default(),
+                parent: None,
+                titre: c.fournisseur.clone().or_else(|| c.numero.clone()).unwrap_or_else(|| "Bon de commande".into()),
+                detail: joint(&[c.numero.as_deref(), c.projet.as_deref()]),
+                source: format!("{}{commande}{livraison}, statut {}", commande_dite(c), statut.to_lowercase()),
+                debut,
+                fin,
+                avancement: None,
+                statut,
+                prevu: c.id.and_then(|i| s.prevu("bc", i)),
+                responsables: Vec::new(),
+            })
+        })
+        .collect();
+    ranger_par_debut_et_titre(&mut taches);
+    taches
+}
+
+/// Les factures qui attendent leur solde, des clients et des fournisseurs : de leur jour à leur échéance.
+fn taches_des_factures(s: &Suivi) -> Vec<Tache> {
+    let mut taches: Vec<Tache> = s
+        .e
+        .factures_ouvertes
+        .iter()
+        .flatten()
+        .filter_map(|f| {
+            let debut = f.date.clone().or_else(|| f.echeance.clone())?;
+            let fin = f.echeance.clone().filter(|x| *x >= debut).unwrap_or_else(|| debut.clone());
+            let statut = statut_lisible(f.statut.as_deref());
+            let sens = if f.sorte == "fournisseur" { "À payer" } else { "À recevoir" };
+            let combien = format!("{sens} : {}", entreprise::dollars(f.solde));
+            let echeance = f.echeance.as_deref().map(|d| format!(", à échéance {}", jour_dit(d))).unwrap_or_default();
+            Some(Tache {
+                id: f.id.map(|i| format!("facture-{i}")).or_else(|| f.numero.clone()).unwrap_or_default(),
+                parent: None,
+                titre: f.tiers.clone().or_else(|| f.numero.clone()).unwrap_or_else(|| "Facture".into()),
+                detail: joint(&[f.numero.as_deref(), Some(&combien)]),
+                source: format!("{}{echeance}, statut {}", facture_dite(f), statut.to_lowercase()),
+                debut,
+                fin,
+                avancement: None,
+                statut,
+                prevu: None,
+                responsables: Vec::new(),
+            })
+        })
+        .collect();
+    ranger_par_debut_et_titre(&mut taches);
+    taches
+}
+
+/// Les dépendances de l'ERP entre deux tâches d'un même Gantt, d'une sorte connue ; ni d'une tâche à elle-même.
+fn dependances_entre(e: &Entreprise, taches: &[Tache]) -> Vec<Dependance> {
     let ids: HashSet<&str> = taches.iter().map(|t| t.id.as_str()).collect();
-    let dependances = e
-        .dependances
+    e.dependances
         .iter()
         .flatten()
         .filter_map(|d| {
@@ -826,15 +1160,43 @@ fn gantt(e: &Entreprise, aujourdhui: &str) -> (Vec<Tache>, Vec<Dependance>) {
                 decalage: d.decalage.clamp(-3650, 3650) as i32,
             })
         })
-        .collect();
-    (taches, dependances)
+        .collect()
+}
+
+/// Les Gantt du planning : un par tableau du suivi ([`TABLEAUX`], dans cet ordre) — ceux que montre le Kanban
+/// (`kanban`), et ceux qui ont des tâches —, chacun avec les dépendances de l'ERP entre les siennes.
+fn gantts(e: &Entreprise, aujourdhui: &str, kanban: &[Tableau]) -> Vec<Gantt> {
+    let s = Suivi::de(e, aujourdhui);
+    TABLEAUX
+        .iter()
+        .filter_map(|(cle, titre)| {
+            let taches = match *cle {
+                "projets" => taches_des_chantiers(&s),
+                "devis" => taches_des_soumissions(&s),
+                "bons_travail" => taches_des_bons(&s),
+                "operations" => taches_des_operations(&s),
+                "ventes" => taches_des_ventes(&s),
+                "achats" => taches_des_achats(&s),
+                "factures" => taches_des_factures(&s),
+                _ => Vec::new(),
+            };
+            let au_kanban = kanban.iter().any(|t| t.cle == *cle);
+            (au_kanban || !taches.is_empty()).then(|| Gantt {
+                cle: cle.to_string(),
+                titre: titre.to_string(),
+                dependances: dependances_entre(e, &taches),
+                taches,
+            })
+        })
+        .collect()
 }
 
 // ---- Le Kanban : les tableaux du suivi de l'ERP --------------------------------------------------------------------
 
-/// Les tableaux du Kanban que le planning montre, dans cet ordre, avec leur titre. L'ERP en a un de plus,
-/// `operations_sdp` (la vue fine du Dernier Planificateur), dont les cartes demandent ce qu'Eve ne lit pas.
-const TABLEAUX: [(&str, &str); 7] = [
+/// Les tableaux du suivi de l'ERP que le planning montre — au Kanban, au Gantt, au choix du calendrier —, dans cet
+/// ordre, avec leur titre. L'ERP en a un de plus, `operations_sdp` (la vue fine du Dernier Planificateur), dont les
+/// cartes demandent ce qu'Eve ne lit pas.
+pub const TABLEAUX: [(&str, &str); 7] = [
     ("projets", "Chantiers"),
     ("devis", "Soumissions"),
     ("bons_travail", "Bons de travail"),
@@ -929,22 +1291,11 @@ fn cartes_du_tableau(e: &Entreprise, cle: &str) -> Vec<(String, Carte)> {
             }
         }
         "devis" => {
-            // Les soumissions en cours, et celles qui attendent une réponse (une seule fois chacune).
-            let mut vus = HashSet::new();
-            for d in e.soumissions.iter().flatten().chain(e.devis.iter().flatten()) {
-                let id =
-                    d.id.map(|i| format!("devis-{i}")).or_else(|| d.numero.clone()).unwrap_or_else(|| d.nom.clone());
-                if !vus.insert(id.clone()) {
-                    continue;
-                }
+            for d in soumissions(e) {
                 let s = statut(Some(&d.statut));
-                let mut c =
-                    carte(id, d.nom.clone(), joint(&[d.numero.as_deref(), d.client.as_deref()]), (d.valeur, None));
-                let numero = d.numero.as_deref().map(|n| format!(" {n}")).unwrap_or_default();
-                let de = d.client.as_deref().map(|c| format!(" pour {c}")).unwrap_or_default();
-                let n = d.id.map(|i| format!(" (devis n° {i} de l'ERP)")).unwrap_or_default();
-                let valeur = d.valeur.map(|v| format!(", {}", entreprise::dollars(v))).unwrap_or_default();
-                c.source = format!("la soumission{numero} « {} »{de}{n}{valeur}, statut {}", d.nom, dit(&s));
+                let detail = joint(&[d.numero.as_deref(), d.client.as_deref()]);
+                let mut c = carte(id_de_soumission(d), d.nom.clone(), detail, (d.valeur, None));
+                c.source = format!("{}, statut {}", soumission_dite(d), dit(&s));
                 cartes.push((s, c));
             }
         }
@@ -981,16 +1332,9 @@ fn cartes_du_tableau(e: &Entreprise, cle: &str) -> Vec<(String, Carte)> {
                 let detail = joint(&[chances.as_deref(), o.origine.as_deref()]);
                 let mut c =
                     carte(format!("opportunite-{}", o.id), o.nom.clone(), detail, (o.montant, o.cloture.clone()));
-                let montant = o.montant.map(|m| format!(", {}", entreprise::dollars(m))).unwrap_or_default();
-                let chances = o.probabilite.map(|p| format!(", {p} % de chances")).unwrap_or_default();
                 let cloture =
                     o.cloture.as_deref().map(|d| format!(", clôture prévue {}", jour_dit(d))).unwrap_or_default();
-                c.source = format!(
-                    "la vente « {} » (opportunité n° {} du CRM de l'ERP){montant}, à l'étape {}{chances}{cloture}",
-                    o.nom,
-                    o.id,
-                    dit(&s)
-                );
+                c.source = format!("{}, à l'étape {}{cloture}", vente_dite(o), dit(&s));
                 cartes.push((s, c));
             }
         }
@@ -1002,17 +1346,9 @@ fn cartes_du_tableau(e: &Entreprise, cle: &str) -> Vec<(String, Carte)> {
                     b.fournisseur.clone().or_else(|| b.numero.clone()).unwrap_or_else(|| "Bon de commande".into());
                 let detail = joint(&[b.numero.as_deref(), b.projet.as_deref()]);
                 let mut c = carte(id, titre, detail, (b.montant, b.date.clone()));
-                let quoi = entre_parentheses(&[
-                    b.fournisseur.as_deref().map(|f| format!("de {f}")).as_deref(),
-                    b.id.map(|i| format!("n° {i} de l'ERP")).as_deref(),
-                ]);
                 let livraison =
                     b.date.as_deref().map(|d| format!(", livraison prévue {}", jour_dit(d))).unwrap_or_default();
-                c.source = format!(
-                    "le bon de commande {}{quoi}{livraison}, statut {}",
-                    b.numero.as_deref().unwrap_or(""),
-                    dit(&s)
-                );
+                c.source = format!("{}{livraison}, statut {}", commande_dite(b), dit(&s));
                 cartes.push((s, c));
             }
         }
@@ -1037,20 +1373,19 @@ fn cartes_du_tableau(e: &Entreprise, cle: &str) -> Vec<(String, Carte)> {
 
 // ---- L'entreprise entière -------------------------------------------------------------------------------------------
 
-/// Le planning de l'entreprise d'après sa dernière lecture (`entreprise.json`) : ses événements du calendrier, les
-/// tâches et les dépendances du Gantt, les tableaux du Kanban, et l'heure de la lecture (« 2026-10-28 14:02 »). Rien
-/// d'une Eve qui n'est pas reliée à l'ERP. `aujourdhui` : une facture d'avant est échue ; un chantier commencé sans
-/// date de fin dure au moins jusque-là.
+/// Le planning de l'entreprise d'après sa dernière lecture (`entreprise.json`) : ses événements du calendrier, le Gantt
+/// et le tableau du Kanban de chaque tableau du suivi, et l'heure de la lecture (« 2026-10-28 14:02 »). Rien d'une Eve
+/// qui n'est pas reliée à l'ERP. `aujourdhui` : une facture d'avant est échue ; un chantier commencé sans date de fin
+/// dure au moins jusque-là, et une soumission qui attend sa réponse, aussi.
 pub fn de_l_entreprise(e: &Entreprise, aujourdhui: &str) -> Planning {
     if e.etat == entreprise::NON_CONNECTE {
         return Planning::default();
     }
-    let (taches, dependances) = gantt(e, aujourdhui);
+    let tableaux = kanban(e);
     Planning {
         evenements: evenements_de_l_entreprise(e, aujourdhui),
-        taches,
-        dependances,
-        tableaux: kanban(e),
+        gantts: gantts(e, aujourdhui, &tableaux),
+        tableaux,
         lu: e.lu_a.as_deref().and_then(|a| a.get(..16)).map(|a| a.replace('T', " ")).unwrap_or_default(),
     }
 }
@@ -1203,11 +1538,17 @@ mod essais {
         }
     }
 
+    /// Le Gantt d'un tableau du planning.
+    fn gantt<'a>(p: &'a Planning, cle: &str) -> &'a Gantt {
+        p.gantts.iter().find(|g| g.cle == cle).unwrap_or_else(|| panic!("le Gantt « {cle} »"))
+    }
+
     #[test]
     fn le_gantt_des_chantiers_et_de_leurs_operations() {
         let p = de_l_entreprise(&entreprise_inventee(), "2026-10-28");
+        let g = gantt(&p, "projets");
         let vu: Vec<(&str, Option<&str>, &str, &str)> =
-            p.taches.iter().map(|t| (t.id.as_str(), t.parent.as_deref(), t.debut.as_str(), t.fin.as_str())).collect();
+            g.taches.iter().map(|t| (t.id.as_str(), t.parent.as_deref(), t.debut.as_str(), t.fin.as_str())).collect();
         assert_eq!(
             vu,
             [
@@ -1220,13 +1561,20 @@ mod essais {
                 ("op-70", Some("projet-1"), "2026-10-20", "2026-10-20"),
             ]
         );
-        assert_eq!((p.taches[0].statut.as_str(), p.taches[1].statut.as_str()), ("En cours", "En attente"));
-        assert_eq!(p.taches[3].avancement, Some(1.0), "plus d'heures faites que prévues : au plus 1");
-        assert!(p.taches[2].source.contains("sans date de fin dans l'ERP"), "{}", p.taches[2].source);
+        assert_eq!((g.taches[0].statut.as_str(), g.taches[1].statut.as_str()), ("En cours", "En attente"));
+        assert_eq!(g.taches[3].avancement, Some(1.0), "plus d'heures faites que prévues : au plus 1");
+        assert!(g.taches[2].source.contains("sans date de fin dans l'ERP"), "{}", g.taches[2].source);
         // Les dépendances entre deux tâches du Gantt, d'une sorte connue ; ni d'une tâche à elle-même.
         let deps: Vec<(&str, &str, &str, i32)> =
-            p.dependances.iter().map(|d| (d.de.as_str(), d.vers.as_str(), d.sorte.as_str(), d.decalage)).collect();
+            g.dependances.iter().map(|d| (d.de.as_str(), d.vers.as_str(), d.sorte.as_str(), d.decalage)).collect();
         assert_eq!(deps, [("op-70", "bt-8", "SS", 2)]);
+        // Le Gantt des bons de travail : chacun, ses opérations sous lui ; celui des opérations, chacune seule.
+        let bons: Vec<(&str, Option<&str>)> =
+            gantt(&p, "bons_travail").taches.iter().map(|t| (t.id.as_str(), t.parent.as_deref())).collect();
+        assert_eq!(bons, [("bt-7", None), ("op-70", Some("bt-7")), ("bt-8", None)]);
+        let ops: Vec<(&str, Option<&str>)> =
+            gantt(&p, "operations").taches.iter().map(|t| (t.id.as_str(), t.parent.as_deref())).collect();
+        assert_eq!(ops, [("op-70", None)]);
         assert_eq!(p.lu, "2026-10-28 14:02");
         // Le calendrier : une note sans date lisible ne s'y place pas ; un bon de travail, à son échéance.
         assert!(p.evenements.iter().any(|e| e.titre == "Inspection" && e.sorte == Sorte::Note));
@@ -1260,8 +1608,142 @@ mod essais {
         };
         let e = Entreprise { etat: entreprise::A_JOUR.into(), projets: Some(vec![chantier]), ..Entreprise::default() };
         let p = de_l_entreprise(&e, "2026-10-28");
-        assert_eq!(p.taches.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["projet-PROJ-2026-00031"]);
+        let g = gantt(&p, "projets");
+        assert_eq!(g.taches.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["projet-PROJ-2026-00031"]);
         assert_eq!(p.tableaux[0].colonnes[0].cartes[0].id, "projet-PROJ-2026-00031");
-        assert_eq!(p.taches[0].prevu, None);
+        assert_eq!(g.taches[0].prevu, None);
+    }
+
+    /// Les soumissions, les ventes, les achats et les factures, au Gantt et au calendrier : leurs jours (une soumission
+    /// qui attend court jusqu'à aujourd'hui), leurs ids (ceux de leurs cartes du Kanban), leurs dépendances, leur
+    /// tableau.
+    #[test]
+    fn chaque_tableau_a_son_gantt_et_ses_evenements() {
+        let devis = |id: u64, statut: &str, depuis: Option<&str>, travaux: (Option<&str>, Option<&str>)| Devis {
+            id: Some(id),
+            numero: Some(format!("DEV-{id}")),
+            nom: format!("Soumission {id}"),
+            statut: statut.into(),
+            depuis: depuis.map(Into::into),
+            debut: travaux.0.map(Into::into),
+            fin: travaux.1.map(Into::into),
+            ..Devis::default()
+        };
+        let lien = |de: (&str, &str), vers: (&str, &str)| DependanceDuGantt {
+            de_sorte: de.0.into(),
+            de_id: de.1.into(),
+            vers_sorte: vers.0.into(),
+            vers_id: vers.1.into(),
+            sorte: "finish_to_start".into(),
+            decalage: 0,
+        };
+        let e = Entreprise {
+            etat: entreprise::A_JOUR.into(),
+            soumissions: Some(vec![
+                devis(31, "Envoye", Some("2026-10-16"), (Some("2026-11-09"), Some("2026-12-04"))),
+                devis(33, "En attente", Some("2026-10-25"), (None, None)),
+                devis(35, "Brouillon", None, (None, None)),
+            ]),
+            // Une soumission en attente est aussi un devis en attente : une seule fois.
+            devis: Some(vec![devis(33, "En attente", Some("2026-10-25"), (None, None))]),
+            opportunites: Some(vec![Opportunite {
+                id: 12,
+                nom: "Garage double".into(),
+                statut: Some("PROPOSITION".into()),
+                montant: Some(60000.0),
+                probabilite: Some(50),
+                debut: Some("2026-09-28".into()),
+                cloture: Some("2026-11-25".into()),
+                ..Opportunite::default()
+            }]),
+            commandes: Some(vec![
+                Commande {
+                    sorte: "commande".into(),
+                    id: Some(5),
+                    numero: Some("BC-2026-005".into()),
+                    fournisseur: Some("Bois Exemple inc.".into()),
+                    statut: Some("commande".into()),
+                    depuis: Some("2026-10-22".into()),
+                    date: Some("2026-10-31".into()),
+                    ..Commande::default()
+                },
+                Commande {
+                    sorte: "livraison".into(),
+                    id: Some(8),
+                    date: Some("2026-11-02".into()),
+                    ..Commande::default()
+                },
+            ]),
+            factures_ouvertes: Some(vec![FactureOuverte {
+                sorte: "client".into(),
+                id: Some(211),
+                numero: Some("FACT-2026-00211".into()),
+                tiers: Some("Construction Exemple inc.".into()),
+                statut: Some("ENVOYEE".into()),
+                date: Some("2026-10-24".into()),
+                echeance: Some("2026-11-23".into()),
+                solde: 28743.75,
+                ..FactureOuverte::default()
+            }]),
+            dependances: Some(vec![lien(("devis", "31"), ("devis", "33")), lien(("bc", "5"), ("devis", "31"))]),
+            ..Entreprise::default()
+        };
+        let p = de_l_entreprise(&e, "2026-10-28");
+        let cles: Vec<&str> = p.gantts.iter().map(|g| g.cle.as_str()).collect();
+        assert_eq!(cles, ["devis", "ventes", "achats", "factures"], "l'ordre des tableaux, ceux qui ont quelque chose");
+        let jours = |cle: &str| -> Vec<(String, String, String)> {
+            gantt(&p, cle).taches.iter().map(|t| (t.id.clone(), t.debut.clone(), t.fin.clone())).collect()
+        };
+        let j = |id: &str, d: &str, f: &str| (id.to_string(), d.to_string(), f.to_string());
+        assert_eq!(
+            jours("devis"),
+            [
+                // Sans travaux prévus, elle attend sa réponse depuis qu'elle est soumise : jusqu'à aujourd'hui.
+                j("devis-33", "2026-10-25", "2026-10-28"),
+                j("devis-31", "2026-11-09", "2026-12-04"),
+            ],
+            "un brouillon sans aucune date ne se place pas"
+        );
+        assert_eq!(jours("ventes"), [j("opportunite-12", "2026-09-28", "2026-11-25")]);
+        assert_eq!(
+            jours("achats"),
+            [j("bc-5", "2026-10-22", "2026-10-31")],
+            "une livraison n'est pas un bon de commande"
+        );
+        assert_eq!(jours("factures"), [j("facture-211", "2026-10-24", "2026-11-23")]);
+        let detail = &gantt(&p, "factures").taches[0].detail;
+        assert!(detail.starts_with("FACT-2026-00211 · À recevoir : 28"), "{detail}");
+        assert_eq!(gantt(&p, "devis").taches[1].statut, "Envoyé", "le statut tel qu'il se lit");
+        // Les dépendances d'un Gantt : entre deux des siennes seulement.
+        let deps: Vec<(&str, &str)> =
+            gantt(&p, "devis").dependances.iter().map(|d| (d.de.as_str(), d.vers.as_str())).collect();
+        assert_eq!(deps, [("devis-31", "devis-33")]);
+        // Les mêmes ids qu'au Kanban.
+        for g in &p.gantts {
+            let Some(t) = p.tableaux.iter().find(|t| t.cle == g.cle) else { continue };
+            for tache in &g.taches {
+                let carte = t.colonnes.iter().flat_map(|c| &c.cartes).any(|c| c.id == tache.id);
+                assert!(carte, "{} : la même id au Gantt et au Kanban", tache.id);
+            }
+        }
+        // Le calendrier : chaque chose avec son tableau ; une soumission au début prévu de ses travaux, sinon au jour
+        // où elle a été soumise ; une vente à sa clôture prévue.
+        let du = |titre: &str| p.evenements.iter().find(|e| e.titre == titre).unwrap_or_else(|| panic!("{titre}"));
+        let s31 = du("Soumission 31");
+        assert_eq!(
+            (s31.debut.as_str(), s31.sorte, s31.tableau.as_deref()),
+            ("2026-11-09", Sorte::Soumission, Some("devis"))
+        );
+        assert!(s31.source.contains("ses travaux prévus du lundi 9 novembre au vendredi 4 décembre"), "{}", s31.source);
+        assert_eq!(du("Soumission 33").debut, "2026-10-25");
+        let vente = du("Garage double");
+        assert_eq!(
+            (vente.debut.as_str(), vente.sorte, vente.tableau.as_deref()),
+            ("2026-11-25", Sorte::Vente, Some("ventes"))
+        );
+        assert_eq!(du("Facture · Construction Exemple inc.").tableau.as_deref(), Some("factures"));
+        assert!(
+            p.evenements.iter().filter(|e| e.sorte == Sorte::Livraison).all(|e| e.tableau.as_deref() == Some("achats"))
+        );
     }
 }
