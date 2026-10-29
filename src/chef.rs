@@ -655,6 +655,11 @@ pub struct Chef {
     entreprise_renouvelee: Option<Instant>,
     /// Une écriture de Claude dans l'ERP a réussi pendant une lecture, qui ne l'a peut-être pas vue : une autre suit.
     entreprise_apres_lecture: bool,
+    /// Le Gantt s'est ouvert (le geste `planning_lire`) : la prochaine lecture prend le suivi de production ; et quand
+    /// une lecture l'a pris pour la dernière fois — jamais plus d'une fois par demi-heure
+    /// (`entreprise::SUIVI_INTERVALLE`).
+    suivi_voulu: bool,
+    suivi_tente_a: Option<Instant>,
     /// Le dossier porte sa propre consigne (`EVE_CONSIGNE.md`, un poste d'architecture) : ce n'est pas l'Adjointe de la
     /// trousse — ni la base d'Entrepreneur Général, ni le `Scan\` où classer une numérisation.
     propre: bool,
@@ -908,6 +913,8 @@ impl Chef {
             entreprise_refuse: None,
             entreprise_renouvelee: None,
             entreprise_apres_lecture: false,
+            suivi_voulu: false,
+            suivi_tente_a: None,
             propre,
             profil,
             laisses: Laisses::default(),
@@ -1355,6 +1362,8 @@ impl Chef {
             ("constructo_deconnecter", _) => self.deconnecter(),
             // Le tableau de bord : « Actualiser » — l'ERP relu tout de suite.
             ("entreprise_lire", _) => self.actualiser_l_entreprise(),
+            // Le Gantt du tableau de bord s'ouvre : le suivi de production de l'ERP, s'il a plus d'une demi-heure.
+            ("planning_lire", _) => self.vouloir_le_suivi(),
             ("navigateur_erreur", Some(e)) => self.systeme(&format!("Le navigateur ne s'ouvre pas : {e}")),
             ("fenetre_fermee", _) => self.fenetre_fermee = true,
             ("quitter", _) => self.quitter = true,
@@ -2222,11 +2231,39 @@ impl Chef {
         }
         self.entreprise_occupee = true;
         self.montrer_l_entreprise(self.entreprise.en_cours());
+        let suivi = std::mem::take(&mut self.suivi_voulu) && self.suivi_permis();
+        if suivi {
+            self.suivi_tente_a = Some(Instant::now());
+        }
         let (tour, emis, rapport) = (self.connexion_tour, self.connexion.emis, self.rapport.clone());
         let (ressource, jeton) = (self.lien.ressource(), self.connexion.acces.clone());
-        entreprise::lire_dans_un_fil(ressource, jeton, journal::date(), move |duree, issue| {
+        entreprise::lire_dans_un_fil(ressource, jeton, journal::date(), suivi, move |duree, issue| {
             let _ = rapport.send(Evt::Entreprise { tour, emis, duree, issue });
         });
+    }
+
+    /// Le suivi de production peut-il se lire ? Jamais plus d'une fois par demi-heure : ni depuis la dernière lecture
+    /// qui l'a pris (son heure, dans `entreprise.json`, survit à un redémarrage), ni depuis la dernière qui l'a tenté.
+    fn suivi_permis(&self) -> bool {
+        entreprise::suivi_a_relire(&self.entreprise)
+            && self.suivi_tente_a.is_none_or(|t| t.elapsed() >= entreprise::SUIVI_INTERVALLE)
+    }
+
+    /// Le Gantt du tableau de bord s'ouvre (le geste `planning_lire`) : le suivi de production de l'ERP — ses
+    /// opérations, les dépendances et les références du Gantt — se lit avec la prochaine lecture, aussitôt (ou dès la
+    /// fin de celle en cours), s'il a plus d'une demi-heure ; sinon, le Gantt montre celui qu'il a. Il ne se lit jamais
+    /// toutes les dix minutes : `suivi_lister_operations` pose treize `ALTER TABLE` à chaque appel.
+    fn vouloir_le_suivi(&mut self) {
+        if !self.espace.constructo || !self.connexion.connectee() || !self.suivi_permis() {
+            return;
+        }
+        self.suivi_voulu = true;
+        if self.entreprise_occupee {
+            self.entreprise_apres_lecture = true;
+        } else {
+            self.entreprise_a = None;
+            self.entreprise_delai = entreprise::APRES_UNE_PANNE;
+        }
     }
 
     /// Une lecture de l'ERP a fini : `entreprise.json` prend la nouvelle (`a_jour`), ou garde l'ancienne et dit
@@ -2250,7 +2287,8 @@ impl Chef {
                     entreprise::INTERVALLE
                 };
                 self.entreprise_a = Some(Instant::now() + apres);
-                self.montrer_l_entreprise(Entreprise::lue(&l, &a));
+                // Le suivi de production d'avant reste, quand celle-ci ne l'a pas relu.
+                self.montrer_l_entreprise(self.entreprise.suite(&l, &a));
             }
             Err(Panne::Jeton) => {
                 journal::ecrire(&format!(

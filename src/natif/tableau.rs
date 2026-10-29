@@ -44,6 +44,7 @@ use eframe::egui::{
 };
 use serde_json::Value;
 
+use super::planning::Onglet;
 use super::theme::{
     self, Action, BoutonErp, Chiffre, Clic, ECART, LigneDeMenu, Liste, PetitChiffre, Rangee, erp, pictos,
 };
@@ -150,7 +151,7 @@ const SIX: usize = 6;
 /// Où en est la liaison d'Eve à Constructo AI, d'après ce qu'en publie le chef (`constructo` : `permis`, `etat`) et ce
 /// que dit la lecture (`permis` faux : pas permis).
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Liaison {
+pub(super) enum Liaison {
     /// Constructo AI n'est pas permis à cette Eve : le tableau n'a pas d'entreprise.
     Absente,
     /// Pas reliée (ou plus) : la carte qui invite à se relier.
@@ -1743,6 +1744,14 @@ impl Fenetre {
         }
     }
 
+    /// Une vue choisie d'un geste (le choix en segments, ou un état vide du planning qui y invite) : tenue ici le temps
+    /// que le chef la publie, et dite au chef, qui l'inscrit dans `reglages.json`.
+    pub(super) fn choisir_la_vue(&self, ctx: &egui::Context, vue: Vue) {
+        let maintenant = ctx.input(|i| i.time);
+        ctx.data_mut(|d| d.insert_temp(egui::Id::unique(VUE_TENUE), (vue.rang(), maintenant)));
+        self.geste("vue_du_tableau", Value::String(VUES_DU_TABLEAU[vue.rang()].0.into()));
+    }
+
     /// L'ordre des cartes que la personne a donné en les déplaçant : celui que publie le chef, ou celui qu'on vient de
     /// donner d'un geste, tenu le temps qu'il le publie.
     fn ordre_du_tableau(&self, ctx: &egui::Context) -> Vec<String> {
@@ -1791,8 +1800,9 @@ impl Fenetre {
         self.geste("ordre_du_tableau", Value::from(ordre));
     }
 
-    /// Le tableau de bord sous sa bannière : la rangée du choix et de la fraîcheur ; le bandeau d'une lecture manquée
-    /// ou d'une liaison perdue ; les tuiles des chiffres ; les cartes en maçonnerie.
+    /// Le tableau de bord sous sa bannière : ses onglets (le tableau de bord, puis le planning : [`super::planning`]) ;
+    /// la rangée du choix et de la fraîcheur ; le bandeau d'une lecture manquée ou d'une liaison perdue ; puis, au
+    /// tableau de bord, les tuiles des chiffres et les cartes en maçonnerie — ailleurs, la vue du planning.
     pub(super) fn page_du_tableau(&mut self, ui: &mut egui::Ui, aujourdhui: &str, heure: &str) {
         let lecture = self.centre.entreprise();
         let liaison = Liaison::de(&self.etat["constructo"], lecture.as_ref());
@@ -1800,9 +1810,12 @@ impl Fenetre {
         let m = Maintenant::du_poste();
         let vue = if liaison == Liaison::Absente { Vue::Famille } else { self.vue_du_tableau(ui.ctx()) };
         let (entreprise, famille) = (vue != Vue::Famille, vue != Vue::Entreprise);
+        let onglet = self.rangee_des_onglets(ui, liaison != Liaison::Absente);
+        let au_tableau = onglet == Onglet::Tableau;
+        ui.add_space(14.0);
         let ordre_des_cartes = self.ordre_du_tableau(ui.ctx());
         let f = (entreprise && liaison != Liaison::Absente).then(|| fraicheur(liaison, lecture.as_ref(), &m));
-        self.rangee_du_choix(ui, vue, f.as_ref(), liaison, !ordre_des_cartes.is_empty());
+        self.rangee_du_choix(ui, vue, f.as_ref(), liaison, au_tableau, !ordre_des_cartes.is_empty());
         ui.add_space(14.0);
         let lue = lecture.as_ref().and_then(|l| l.as_ref().ok()).filter(|v| a_des_chiffres(v)).cloned();
         // Le bandeau : une lecture manquée (les chiffres d'avant restent), ou une liaison perdue (ils pâlissent).
@@ -1829,6 +1842,11 @@ impl Fenetre {
                 }
                 ui.add_space(ECART);
             }
+        }
+        if !au_tableau {
+            let erreur = erreur_de_lecture(lecture.as_ref());
+            self.page_du_planning(ui, onglet, vue, liaison, lue.is_some(), erreur, aujourdhui);
+            return;
         }
         // Les tuiles : les chiffres de la vue, dans son ordre, six au plus.
         let mut chiffres = if famille { self.centre.chiffres(aujourdhui, heure) } else { Vec::new() };
@@ -1877,14 +1895,7 @@ impl Fenetre {
                     cartes.push((rang::ALERTES_HAUTES, false, Carte::Invitation));
                 }
                 (None, _) => {
-                    let erreur = match &lecture {
-                        Some(Err(raison)) => Some(format!("Sa dernière lecture (entreprise.json) {raison}.")),
-                        Some(Ok(v)) if texte_de(v, "etat") == "erreur" => match texte_de(v, "erreur") {
-                            "" => Some("La lecture n'a pas abouti.".to_string()),
-                            raison => Some(phrase(raison)),
-                        },
-                        _ => None,
-                    };
+                    let erreur = erreur_de_lecture(lecture.as_ref());
                     cartes.push((rang::ALERTES_HAUTES, false, erreur.map_or(Carte::PremiereLecture, Carte::Erreur)));
                 }
             }
@@ -1930,15 +1941,17 @@ impl Fenetre {
         }
     }
 
-    /// La rangée au-dessus de tout (le filtre des tableaux de bord : un seul, au-dessus de ce qu'il touche) : le choix
-    /// de la vue en segments ; à droite, quand l'entreprise se montre, l'heure de sa dernière lecture et le bouton qui
-    /// la relit (reliée seulement ; une roue pendant qu'Eve lit).
+    /// La rangée au-dessus de tout (le filtre des tableaux de bord : un seul, au-dessus de ce qu'il touche, et il vaut
+    /// pour les onglets du planning) : le choix de la vue en segments ; au tableau de bord (`cartes`), « Ajouter » et
+    /// « Ordre d'office » ; à droite, quand l'entreprise se montre, l'heure de sa dernière lecture et le bouton qui la
+    /// relit (reliée seulement ; une roue pendant qu'Eve lit).
     fn rangee_du_choix(
         &mut self,
         ui: &mut egui::Ui,
         vue: Vue,
         f: Option<&Fraicheur>,
         liaison: Liaison,
+        cartes: bool,
         ordre_donne: bool,
     ) {
         let largeur = ui.available_width();
@@ -1948,17 +1961,18 @@ impl Fenetre {
             && let Some(choisie) = segments_du_tableau(&mut gauche, vue)
             && choisie != vue
         {
-            let maintenant = ui.input(|i| i.time);
-            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique(VUE_TENUE), (choisie.rang(), maintenant)));
-            self.geste("vue_du_tableau", Value::String(VUES_DU_TABLEAU[choisie.rang()].0.into()));
+            self.choisir_la_vue(ui.ctx(), choisie);
         }
-        // De quoi épingler une carte : une note, tout de suite ; ou une demande à Eve, qui épingle n'importe quoi.
-        if liaison != Liaison::Absente {
+        // De quoi épingler une carte (au tableau de bord seulement) : une note, tout de suite ; ou une demande à Eve,
+        // qui épingle n'importe quoi.
+        if liaison != Liaison::Absente && cartes {
             gauche.add_space(10.0);
         }
-        self.bouton_ajouter(&mut gauche);
+        if cartes {
+            self.bouton_ajouter(&mut gauche);
+        }
         // Les cartes déplacées : de quoi revenir à l'ordre d'office (ce qui presse en tête).
-        if ordre_donne {
+        if cartes && ordre_donne {
             gauche.add_space(10.0);
             let rep = theme::bouton_erp(&mut gauche, Some(pictos::RELIRE), "Ordre d'office", BoutonErp::Fantome);
             if rep.on_hover_text("Les cartes reprennent leur place d'office : ce qui presse en tête").clicked() {
@@ -2270,7 +2284,7 @@ impl Fenetre {
     /// L'invitation à relier Eve à Constructo AI : ce que le tableau montrera, et le bouton qui ouvre la page de
     /// connexion (le geste `constructo_connecter`) ; la page déjà ouverte, une roue, la ligne du chef, et de quoi la
     /// rouvrir.
-    fn invitation(&mut self, ui: &mut egui::Ui, liaison: Liaison) {
+    pub(super) fn invitation(&mut self, ui: &mut egui::Ui, liaison: Liaison) {
         let detail = self.etat["constructo"]["detail"].as_str().unwrap_or("").to_string();
         let mut clic = false;
         theme::carte(ui, Some(erp::BLEU.pastel), 0.0, |ui| {
@@ -2314,7 +2328,7 @@ impl Fenetre {
     }
 
     /// Une lecture qui n'a pas abouti, sans chiffres d'avant : pourquoi, et « Réessayer » (le geste `entreprise_lire`).
-    fn carte_d_erreur(&mut self, ui: &mut egui::Ui, raison: &str) {
+    pub(super) fn carte_d_erreur(&mut self, ui: &mut egui::Ui, raison: &str) {
         let mut clic = false;
         theme::carte(ui, Some(erp::ROUGE.pastel), 0.0, |ui| {
             theme::tete_de_carte(ui, "Constructo AI ne répond pas", pictos::ALERTES, erp::ROUGE, true, None);
@@ -2330,9 +2344,22 @@ impl Fenetre {
     }
 }
 
+/// Pourquoi la lecture de l'entreprise n'a pas de chiffres à montrer, quand elle a échoué : le fichier qui ne se lit
+/// pas, ou l'erreur que la lecture a notée ; `None` si elle n'a pas échoué (elle se fait, ou elle se fera).
+fn erreur_de_lecture(lecture: Option<&Result<Arc<Value>, String>>) -> Option<String> {
+    match lecture {
+        Some(Err(raison)) => Some(format!("Sa dernière lecture (entreprise.json) {raison}.")),
+        Some(Ok(v)) if texte_de(v, "etat") == "erreur" => match texte_de(v, "erreur") {
+            "" => Some("La lecture n'a pas abouti.".to_string()),
+            raison => Some(phrase(raison)),
+        },
+        _ => None,
+    }
+}
+
 /// La première lecture de l'entreprise, pas encore là : une roue, et ce qu'Eve fait (le serveur de Constructo AI,
 /// endormi, se réveille en une trentaine de secondes).
-fn premiere_lecture(ui: &mut egui::Ui) {
+pub(super) fn premiere_lecture(ui: &mut egui::Ui) {
     theme::carte(ui, Some(erp::BLEU.pastel), 0.0, |ui| {
         theme::tete_de_carte(ui, "Entreprise", pictos::ENTREPRISE, erp::BLEU, false, None);
         ui.horizontal(|ui| {
@@ -2370,61 +2397,17 @@ fn capitale(t: &str) -> String {
     c.next().map_or_else(String::new, |p| p.to_uppercase().collect::<String>() + c.as_str())
 }
 
-/// Le choix de la vue, en segments sur une piste blanche en pilule : chacun son icône et son nom ; celui qui est choisi
-/// en pilule marine (le dégradé de la bannière), son texte blanc ; un survol, un lavis gris. Rend la vue cliquée.
+/// Le choix de la vue, en segments sur une piste blanche en pilule ([`theme::segments_erp`]) : chacun son icône et son
+/// nom. Rend la vue cliquée.
 fn segments_du_tableau(ui: &mut egui::Ui, choisie: Vue) -> Option<Vue> {
-    let police = FontId::new(13.5, FontFamily::Name(SEMI.into()));
-    let icones = FontId::new(13.0, FontFamily::Name(ICONES.into()));
-    let p = ui.painter().clone();
-    let aucune = Color32::PLACEHOLDER;
-    let mises: Vec<_> = VUES
+    let aides = ["L'entreprise et la famille ensemble", "L'entreprise : Constructo AI", "La famille et la maison"];
+    let choix: Vec<theme::Segment> = VUES
         .iter()
         .zip(VUES_DU_TABLEAU)
-        .map(|((_, icone), (_, mot))| {
-            let g_icone = p.layout_no_wrap(icone.to_string(), icones.clone(), aucune);
-            let g_mot = p.layout_no_wrap(mot.to_string(), police.clone(), aucune);
-            let l = 16.0 + g_icone.size().x + 8.0 + g_mot.size().x + 18.0;
-            (g_icone, g_mot, l)
-        })
+        .zip(aides)
+        .map(|(((_, icone), (_, mot)), aide)| theme::Segment { icone: Some(*icone), mot, aide })
         .collect();
-    let (marge, ecart) = (4.0, 2.0);
-    let total = mises.iter().map(|m| m.2).sum::<f32>() + 2.0 * marge + ecart * (mises.len() - 1) as f32;
-    let (piste, _) = ui.allocate_exact_size(vec2(total, 38.0), Sense::hover());
-    p.add(theme::ombre_marine(piste, 19, 2, 8, 16));
-    p.rect(piste, 19.0, Color32::from_white_alpha(225), Stroke::new(1.0, erp::FILET_DE_CARTE), StrokeKind::Inside);
-    let mut x = piste.left() + marge;
-    let mut clic = None;
-    for (k, (g_icone, g_mot, l)) in mises.into_iter().enumerate() {
-        let r = Rect::from_min_size(pos2(x, piste.top() + marge), vec2(l, piste.height() - 2.0 * marge));
-        x += l + ecart;
-        let vue = VUES[k].0;
-        let rep = ui.interact(r, egui::Id::unique(("vue-du-tableau", k)), Sense::click());
-        let choisi = vue == choisie;
-        if choisi {
-            p.add(theme::ombre_marine(r, 15, 2, 6, 40));
-            let arrets = [erp::MARINE_HAUT, erp::AZUR];
-            p.add(theme::rectangle_degrade(r, r.height() / 2.0, |q| theme::degrade_css(r, 100.0, &arrets, q)));
-        } else if rep.hovered() {
-            p.rect_filled(r, r.height() / 2.0, erp::SURVOL);
-        }
-        let encre = match (choisi, rep.hovered()) {
-            (true, _) => Color32::WHITE,
-            (false, true) => erp::TEXTE,
-            _ => erp::TEXTE_2,
-        };
-        let l_icone = g_icone.size().x;
-        p.galley(pos2(r.left() + 16.0, r.center().y - g_icone.size().y / 2.0), g_icone, encre);
-        p.galley(pos2(r.left() + 16.0 + l_icone + 8.0, r.center().y - g_mot.size().y / 2.0), g_mot, encre);
-        let aide = match vue {
-            Vue::Tout => "L'entreprise et la famille ensemble",
-            Vue::Entreprise => "L'entreprise : Constructo AI",
-            Vue::Famille => "La famille et la maison",
-        };
-        if rep.on_hover_text(aide).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-            clic = Some(vue);
-        }
-    }
-    clic
+    theme::segments_erp(ui, "vue-du-tableau", &choix, choisie.rang(), 38.0).map(|k| VUES[k].0)
 }
 
 /// L'heure de la dernière lecture de l'entreprise, en gris comme le modèle (« Mis à jour à 15 h 40 ») : un point devant
@@ -2515,7 +2498,7 @@ fn puce(ui: &mut egui::Ui, icone: char, mot: &str, teinte: erp::Teinte) {
 /// Un bandeau au-dessus des chiffres, comme les alertes de l'ERP (`.erp-alert-*`) : ambre pour une lecture qui n'a pas
 /// abouti (`avertissement`), bleu pâle pour une liaison perdue ; son icône, son texte, et son bouton contre le bord
 /// droit (dessous, dans une place étroite). Rend vrai si le bouton est cliqué.
-fn bandeau(ui: &mut egui::Ui, avertissement: bool, texte: &str, (mot, icone): (&str, char)) -> bool {
+pub(super) fn bandeau(ui: &mut egui::Ui, avertissement: bool, texte: &str, (mot, icone): (&str, char)) -> bool {
     let (fond, bord, encre, picto) = if avertissement {
         (erp::AVERTISSEMENT_FOND, erp::AVERTISSEMENT_BORD, erp::AVERTISSEMENT_ENCRE, pictos::ALERTES)
     } else {

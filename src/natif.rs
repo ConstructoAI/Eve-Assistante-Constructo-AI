@@ -15,6 +15,7 @@
 
 pub(crate) mod graphiques;
 pub(crate) mod pieces;
+pub(crate) mod planning;
 pub(crate) mod portrait;
 pub(crate) mod profils;
 pub(crate) mod tableau;

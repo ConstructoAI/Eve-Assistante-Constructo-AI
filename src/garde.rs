@@ -401,6 +401,13 @@ const LECTURES_CONSTRUCTO: &[&str] = &[
     "hover_obtenir_job",
 ];
 
+/// Les lectures qu'Eve tient pour telles en plus de la copie du serveur : des outils qui ne font que lire, et que son
+/// classement manque faute d'un verbe de lecture en tête. `suivi_colonnes` rend les colonnes et les gardes de chaque
+/// tableau du Kanban de l'ERP sans toucher à sa base (sa docstring le dit : « Lecture (aucune BD) ») ; le planning du
+/// tableau de bord en prend l'ordre des colonnes. Le jour où `mcp_profils._OUTILS_LECTURE_EXPLICITES` l'aura, il
+/// passera dans la copie, et cette liste se videra.
+const LECTURES_D_EVE: &[&str] = &["suivi_colonnes"];
+
 /// Un outil de l'ERP de Constructo AI : celui de la connexion d'Eve (`mcp__constructo-ai__…`), ou celui du connecteur
 /// de claude.ai (`mcp__claude_ai_Constructo_AI__…`, quand une Eve a les connecteurs : le nom du connecteur dit
 /// « Constructo »). Rend son nom sans son serveur.
@@ -411,9 +418,12 @@ pub fn outil_erp(outil: &str) -> Option<&str> {
 }
 
 /// Un outil de Constructo AI (son nom, sans son serveur) ne fait-il que lire ? Comme `mcp_profils._verbe_en_tete` : le
-/// verbe est l'un des deux premiers segments du nom (`lister_factures`, `banque_lister_comptes`), jamais plus loin.
+/// verbe est l'un des deux premiers segments du nom (`lister_factures`, `banque_lister_comptes`), jamais plus loin ; et
+/// les lectures que le serveur nomme, ou qu'Eve tient pour telles en plus ([`LECTURES_D_EVE`]).
 pub fn est_lecture_constructo(nom: &str) -> bool {
-    LECTURES_CONSTRUCTO.contains(&nom) || nom.splitn(3, '_').take(2).any(|s| VERBES_LECTURE_CONSTRUCTO.contains(&s))
+    LECTURES_CONSTRUCTO.contains(&nom)
+        || LECTURES_D_EVE.contains(&nom)
+        || nom.splitn(3, '_').take(2).any(|s| VERBES_LECTURE_CONSTRUCTO.contains(&s))
 }
 
 /// L'accord qu'une écriture dans Constructo AI demande, s'il en est une dans cet appel : une écriture dans l'ERP ne se
@@ -2462,6 +2472,8 @@ mod essais {
             "cao_quantites", "config_lire_infos_employeur", "obtenir_previsions_meteo",
             // Un brouillon ne part pas : la personne l'envoie de l'ERP.
             "email_creer_brouillon",
+            // Les colonnes du Kanban : le serveur ne les lit dans aucune base (`LECTURES_D_EVE`).
+            "suivi_colonnes",
         ] {
             assert_eq!(constructo(nom, json!({})), None, "{nom}");
             assert_eq!(examiner(&format!("mcp__claude_ai_Constructo_AI__{nom}"), &json!({})), Decision::Libre, "{nom}");
@@ -2540,10 +2552,18 @@ mod essais {
         assert_eq!(noms("lectures_explicites"), explicites);
         let liste = serveur["outils"].as_array().unwrap();
         assert!(liste.len() > 400, "la liste du serveur est-elle complète ? {}", liste.len());
+        // Les lectures qu'Eve ajoute : de vrais outils du serveur, qu'il ne tient pas (encore) pour des lectures.
+        for nom in LECTURES_D_EVE {
+            let o = liste.iter().find(|o| o["nom"] == *nom);
+            assert!(
+                o.is_some_and(|o| o["lecture"] == false),
+                "{nom} : le serveur le tient-il désormais pour une lecture ?"
+            );
+        }
         let mut ecarts = Vec::new();
         for o in liste {
             let nom = o["nom"].as_str().unwrap();
-            let lecture = o["lecture"].as_bool().unwrap();
+            let lecture = o["lecture"].as_bool().unwrap() || LECTURES_D_EVE.contains(&nom);
             if est_lecture_constructo(nom) != lecture {
                 ecarts.push(nom.to_string());
             }

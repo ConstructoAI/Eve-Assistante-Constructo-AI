@@ -24,6 +24,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -108,6 +109,11 @@ pub struct Centre {
     entreprise: Arc<Mutex<Option<Result<Arc<Value>, String>>>>,
     /// Réveille le fil : une comptabilité nommée se lit aussitôt. `None` sans fil.
     reveil: Option<mpsc::Sender<()>>,
+    /// Combien de fois ce que lit le centre a changé (le fil le compte, et la fenêtre quand elle lui donne la famille
+    /// de secours ou la comptabilité) ; le planning se refait quand il change, ou le jour.
+    generation: Arc<AtomicU64>,
+    /// Le dernier planning fait : son jour, la génération d'où il vient, lui.
+    planning_fait: Mutex<Option<(String, u64, Arc<crate::planning::Planning>)>>,
 }
 
 /// La comptabilité que lit la fenêtre : le dossier que nomme le réglage (vide : aucune), et ce que dit son tableau — ce
@@ -298,17 +304,23 @@ impl Centre {
         if dossier.is_some() || journal.is_some() {
             let (reveil, attente) = mpsc::channel();
             centre.reveil = Some(reveil);
-            let (valeurs, journee, comptabilite, entreprise) = (
+            let (valeurs, journee, comptabilite, entreprise, generation) = (
                 centre.valeurs.clone(),
                 centre.journee.clone(),
                 centre.comptabilite.clone(),
                 centre.entreprise.clone(),
+                centre.generation.clone(),
             );
             thread::spawn(move || {
                 let activite = dossier.as_ref().map(|d| d.join("activite"));
                 let travail = dossier.unwrap_or_default();
-                let lus =
-                    Lus { valeurs: &valeurs, journee: &journee, comptabilite: &comptabilite, entreprise: &entreprise };
+                let lus = Lus {
+                    valeurs: &valeurs,
+                    journee: &journee,
+                    comptabilite: &comptabilite,
+                    entreprise: &entreprise,
+                    generation: &generation,
+                };
                 relire(activite.as_deref(), journal.as_deref(), &travail, lus, &attente, &ctx);
             });
         }
@@ -324,10 +336,95 @@ impl Centre {
     /// Le planning du tableau de bord ([`crate::planning`]) : le calendrier, le Gantt et le Kanban, d'après la dernière
     /// lecture de l'entreprise et les fichiers de la maison, `aujourdhui` (« AAAA-MM-JJ ») pour repère. Le point de
     /// rencontre de l'équipe du planning : ses données le remplissent, ses vues le dessinent.
-    #[allow(dead_code)]
-    pub fn planning(&self, aujourdhui: &str) -> crate::planning::Planning {
-        let _ = aujourdhui;
-        crate::planning::Planning::default()
+    ///
+    /// L'entreprise : `entreprise.json` du dossier local, tel que le fil l'a lu (`planning::de_l_entreprise` en fait
+    /// les événements, les tâches, les dépendances et les tableaux) ; rien d'une Eve qui n'y est pas reliée, ni d'un
+    /// fichier qui ne se lit pas. La maison, sur les mêmes fichiers que le tableau de bord
+    /// ([`Centre::evenements_de_la_maison`]). Il ne se refait que quand ce que lit le centre a changé, ou le jour, et
+    /// se rend partagé : la fenêtre peut le demander à chaque image, sans le recopier.
+    pub fn planning(&self, aujourdhui: &str) -> Arc<crate::planning::Planning> {
+        let generation = self.generation.load(Ordering::Acquire);
+        if let Ok(fait) = self.planning_fait.lock()
+            && let Some((jour, g, p)) = fait.as_ref()
+            && jour == aujourdhui
+            && *g == generation
+        {
+            return Arc::clone(p);
+        }
+        let lue = match self.entreprise() {
+            Some(Ok(v)) => <crate::entreprise::Entreprise as serde::Deserialize>::deserialize(&*v).ok(),
+            _ => self.donnee("EVE_ENTREPRISE").and_then(|v| serde_json::from_value(v).ok()),
+        };
+        let mut p = lue.map(|e| crate::planning::de_l_entreprise(&e, aujourdhui)).unwrap_or_default();
+        p.evenements.extend(self.evenements_de_la_maison(aujourdhui));
+        crate::planning::ranger(&mut p.evenements);
+        let p = Arc::new(p);
+        if let Ok(mut fait) = self.planning_fait.lock() {
+            *fait = Some((aujourdhui.to_string(), generation, Arc::clone(&p)));
+        }
+        p
+    }
+
+    /// Les événements de la maison au calendrier du planning : les échéances (`echeances.js`, et celles de la
+    /// comptabilité nommée : [`Centre::echeances_lues`]) — celles de l'école à part —, la décision du jour à son
+    /// échéance, les rappels d'Eve à venir (`rappels.json` ; pas les minuteries), les anniversaires de la famille
+    /// (`famille.js`, de la fenêtre du planning à l'an prochain) et l'agenda de la maison (`outlook.js`).
+    fn evenements_de_la_maison(&self, aujourdhui: &str) -> Vec<crate::planning::Evenement> {
+        use crate::planning::{Cote, Sorte, evenement, jour_dit};
+        let maison = |sorte| (sorte, Cote::Famille);
+        let mut ev = Vec::new();
+        for x in self.echeances_lues().as_array().into_iter().flatten() {
+            let (d, q) = (champ(x, "d"), champ(x, "q").trim());
+            let (sorte, quoi) = match champ(x, "t") {
+                "ecole" => (Sorte::Ecole, "École"),
+                "fiscal" => (Sorte::Echeance, "Échéance fiscale"),
+                "auto" => (Sorte::Echeance, "Auto"),
+                "famille" => (Sorte::Echeance, "Famille"),
+                _ => (Sorte::Echeance, "Échéance"),
+            };
+            let source = format!("l'échéance « {q} » ({}), {}", quoi.to_lowercase(), jour_dit(d));
+            ev.extend(evenement((d, None, None), q.to_string(), quoi.to_string(), maison(sorte), source));
+        }
+        let decision = self.valeur("EVE_DECISION");
+        let (texte, avant) = (champ(&decision, "texte").trim(), champ(&decision, "avant"));
+        if !texte.is_empty() {
+            let source = format!("la décision du jour « {texte} », à prendre avant {}", jour_dit(avant));
+            let titre = format!("Décision : {}", texte.trim_end_matches(['.', ' ']));
+            let detail = "Décision du jour".to_string();
+            ev.extend(evenement((avant, None, None), titre, detail, maison(Sorte::Echeance), source));
+        }
+        for r in self.valeur("EVE_RAPPELS").as_array().into_iter().flatten() {
+            if r["minuterie"].as_bool() == Some(true) {
+                continue;
+            }
+            let (a, texte) = (champ(r, "a"), champ(r, "texte").trim());
+            let (Some(jour), heure) = (a.get(..10), a.get(11..16)) else { continue };
+            let quand = heure.map(|h| format!(" à {}", heure_parlee(h))).unwrap_or_default();
+            let source = format!("le rappel d'Eve « {texte} », {}{quand}", jour_dit(jour));
+            let detail = "Rappel d'Eve".to_string();
+            ev.extend(evenement((jour, None, heure), texte.to_string(), detail, maison(Sorte::Rappel), source));
+        }
+        let (debut, _) = crate::planning::fenetre(aujourdhui);
+        let fin = numero_du_jour(aujourdhui).map(|n| date_du_numero(n + 366)).unwrap_or_default();
+        for (_, p, nom) in personnes_nommees(&self.famille()) {
+            for (jour, age) in anniversaires(champ(p, "anniversaire"), &debut, &fin) {
+                let ans = age.map(|a| if a > 1 { format!("{a} ans") } else { format!("{a} an") });
+                let titre = format!("Anniversaire {}", de(nom));
+                let quand = ans.as_deref().map(|a| format!(" ({a})")).unwrap_or_default();
+                let source = format!("l'anniversaire {}{quand}, {}", de(nom), jour_dit(&jour));
+                let detail = ans.unwrap_or_default();
+                ev.extend(evenement((&jour, None, None), titre, detail, maison(Sorte::Anniversaire), source));
+            }
+        }
+        for r in self.valeur("EVE_AGENDA")["rdv"].as_array().into_iter().flatten() {
+            let (d, h, titre) = (champ(r, "d"), champ(r, "h").trim(), champ(r, "titre").trim());
+            let heure = Some(h).filter(|h| minutes(h).is_some());
+            let a = heure.map(|h| format!(" à {}", heure_parlee(h))).unwrap_or_default();
+            let source = format!("le rendez-vous « {titre} » de l'agenda de la maison, {}{a}", jour_dit(d));
+            let detail = "Agenda de la maison".to_string();
+            ev.extend(evenement((d, None, heure), titre.to_string(), detail, maison(Sorte::RendezVous), source));
+        }
+        ev
     }
 
     /// Un centre lu d'un coup, sans fil ni fenêtre : les fichiers d'`activite\` du dossier de travail (`dossier`), la
@@ -425,6 +522,7 @@ impl Centre {
             && c.dossier != dossier
         {
             *c = Comptabilite { dossier: dossier.to_string(), tableau: None };
+            self.generation.fetch_add(1, Ordering::Release);
             if let Some(r) = &self.reveil {
                 let _ = r.send(());
             }
@@ -492,8 +590,11 @@ impl Centre {
 
     /// La famille de secours, quand le dossier de travail n'a pas de `famille.js` : celle de `reglages.json`.
     pub fn famille_de_secours(&self, v: Value) {
-        if let Ok(mut s) = self.secours.lock() {
+        if let Ok(mut s) = self.secours.lock()
+            && *s != v
+        {
             *s = v;
+            self.generation.fetch_add(1, Ordering::Release);
         }
     }
 
@@ -1378,6 +1479,36 @@ fn prochain_anniversaire(naissance: &str, aujourdhui: &str) -> Option<(i64, i64)
     None
 }
 
+/// Les anniversaires d'une date de naissance (« AAAA-MM-JJ », ou « MM-JJ » sans l'année) du jour `debut` au jour `fin`,
+/// compris : chaque jour, et l'âge qu'il donne quand l'année est connue (rien avant le premier). Le 29 février se fête
+/// le 1er mars les autres années, comme au compte à rebours.
+fn anniversaires(naissance: &str, debut: &str, fin: &str) -> Vec<(String, Option<i64>)> {
+    let p: Vec<&str> = naissance.trim().split('-').collect();
+    let (annee, m, j) = match p[..] {
+        [a, m, j] if a.len() == 4 => (Some(a.parse::<i64>()), m, j),
+        [m, j] => (None, m, j),
+        _ => return Vec::new(),
+    };
+    let annee = match annee {
+        Some(Ok(a)) => Some(a),
+        Some(Err(_)) => return Vec::new(),
+        None => None,
+    };
+    let (Ok(m), Some(Ok(j))) = (m.parse::<u32>(), j.get(..2).map(str::parse::<u32>)) else { return Vec::new() };
+    let an = |d: &str| d.get(..4).and_then(|a| a.parse::<i64>().ok());
+    let (Some(premier), Some(dernier)) = (an(debut), an(fin)) else { return Vec::new() };
+    let mut jours = Vec::new();
+    for a in premier..=dernier {
+        let Some(n) = numero_du_jour(&format!("{a:04}-{m:02}-{j:02}")) else { continue };
+        let jour = date_du_numero(n);
+        let age = annee.map(|naissance| a - naissance);
+        if jour.as_str() >= debut && jour.as_str() <= fin && age.is_none_or(|x| x >= 1) {
+            jours.push((jour, age));
+        }
+    }
+    jours
+}
+
 /// « de Léa », « d'Émile » : l'élision devant une voyelle ou un h.
 fn de(nom: &str) -> String {
     let voyelle = nom.chars().next().is_some_and(|c| "aàâäeéèêëiîïoôöuùûühAÀÂÄEÉÈÊËIÎÏOÔÖUÙÛÜH".contains(c));
@@ -1478,12 +1609,13 @@ fn decompter(journal: &str, date: &str, dossier_de_travail: &Path) -> Decompte {
 }
 
 /// Ce que le fil tient à jour pour la fenêtre : les valeurs d'`activite\`, la journée en chiffres, la comptabilité, la
-/// dernière lecture de l'entreprise.
+/// dernière lecture de l'entreprise ; et combien de fois l'un d'eux a changé.
 struct Lus<'a> {
     valeurs: &'a Mutex<HashMap<String, Value>>,
     journee: &'a Mutex<Journee>,
     comptabilite: &'a Mutex<Comptabilite>,
     entreprise: &'a Mutex<Option<Result<Arc<Value>, String>>>,
+    generation: &'a AtomicU64,
 }
 
 /// Relit sans fin `activite\` — un fichier changé (sa date) se relit, ses affectations remplacent les anciennes —, le
@@ -1499,7 +1631,7 @@ fn relire(
     attente: &mpsc::Receiver<()>,
     ctx: &egui::Context,
 ) {
-    let Lus { valeurs, journee, comptabilite, entreprise } = lus;
+    let Lus { valeurs, journee, comptabilite, entreprise, generation } = lus;
     // Les rappels du dossier local (`rappels.json`, leur seule source) : ceux à venir, sous `EVE_RAPPELS`.
     let mut rappels = journal.map(crate::rappels::Rappels::ouvrir);
     let mut vus: HashMap<&str, SystemTime> = HashMap::new();
@@ -1542,6 +1674,7 @@ fn relire(
             }
         }
         if change {
+            generation.fetch_add(1, Ordering::Release);
             ctx.request_repaint();
         }
         if let Err(mpsc::RecvTimeoutError::Disconnected) = attente.recv_timeout(PAS) {
@@ -3171,5 +3304,75 @@ mod essais {
         assert!(debut.elapsed() < Duration::from_millis(1500), "lue en {:?}", debut.elapsed());
         drop(c);
         let _ = std::fs::remove_dir_all(&travail);
+    }
+
+    /// Le planning de la maison, sur les fichiers du tableau de bord : les échéances (l'école à part), la décision du
+    /// jour, les rappels (pas les minuteries), les anniversaires de la fenêtre à l'an prochain (pas avant le premier),
+    /// l'agenda — tout du côté de la famille, dans l'ordre du calendrier. Sans l'entreprise, ni Gantt ni Kanban.
+    #[test]
+    fn le_planning_de_la_maison() {
+        use crate::planning::{Cote, Sorte};
+        let c = centre(&[
+            (
+                "EVE_ECHEANCES",
+                json!([
+                    { "d": "2026-11-13", "q": "Journée pédagogique", "t": "ecole" },
+                    { "d": "2026-11-02", "q": "Pneus d'hiver", "t": "auto" },
+                    { "d": "pas une date", "q": "Perdue", "t": "famille" }
+                ]),
+            ),
+            ("EVE_DECISION", json!({ "texte": "Réserver la gardienne.", "avant": "2026-10-30" })),
+            (
+                "EVE_RAPPELS",
+                json!([
+                    { "a": "2026-10-28 17:00:00", "texte": "appeler le plombier", "minuterie": false },
+                    { "a": "2026-10-28 16:10:00", "texte": "La minuterie de 10 minutes est finie.", "minuterie": true }
+                ]),
+            ),
+            (
+                "EVE_FAMILLE",
+                json!({ "personnes": [
+                    { "nom": "Léa", "anniversaire": "2020-12-01" },
+                    { "nom": "Émile", "anniversaire": "03-15" },
+                    { "nom": "Bébé", "anniversaire": "2027-01-10" }
+                ] }),
+            ),
+            ("EVE_AGENDA", json!({ "t": 1.0, "rdv": [{ "d": "2026-10-29", "h": "9:30", "titre": "Dentiste" }] })),
+        ]);
+        let p = c.planning("2026-10-28");
+        assert!(p.taches.is_empty() && p.dependances.is_empty() && p.tableaux.is_empty() && p.lu.is_empty());
+        let vu: Vec<(&str, Option<&str>, &str, Sorte)> =
+            p.evenements.iter().map(|e| (e.debut.as_str(), e.heure.as_deref(), e.titre.as_str(), e.sorte)).collect();
+        assert_eq!(
+            vu,
+            [
+                ("2026-10-28", Some("17:00"), "appeler le plombier", Sorte::Rappel),
+                ("2026-10-29", Some("09:30"), "Dentiste", Sorte::RendezVous),
+                ("2026-10-30", None, "Décision : Réserver la gardienne", Sorte::Echeance),
+                ("2026-11-02", None, "Pneus d'hiver", Sorte::Echeance),
+                ("2026-11-13", None, "Journée pédagogique", Sorte::Ecole),
+                ("2026-12-01", None, "Anniversaire de Léa", Sorte::Anniversaire),
+                ("2027-03-15", None, "Anniversaire d'Émile", Sorte::Anniversaire),
+            ]
+        );
+        assert!(p.evenements.iter().all(|e| e.cote == Cote::Famille));
+        let lea = &p.evenements[5];
+        assert_eq!(lea.detail, "6 ans");
+        assert_eq!(lea.source, "l'anniversaire de Léa (6 ans), le mardi 1er décembre");
+        assert_eq!(p.evenements[0].source, "le rappel d'Eve « appeler le plombier », le mercredi 28 octobre à 17 h");
+        assert_eq!(p.evenements[4].detail, "École");
+        // Le planning ne se refait que quand ce que lit le centre a changé (le fil le compte) : la fenêtre peut le
+        // demander à chaque image.
+        c.valeurs.lock().unwrap().insert("EVE_DECISION".into(), json!({}));
+        assert!(Arc::ptr_eq(&c.planning("2026-10-28"), &p), "rien de compté : le même, pas refait");
+        c.generation.fetch_add(1, Ordering::Release);
+        assert_eq!(c.planning("2026-10-28").evenements.len(), 6, "la décision prise, elle s'en va");
+        // Les anniversaires d'une date de naissance : son âge quand l'année est connue ; le 29 février, le 1er mars.
+        assert_eq!(
+            anniversaires("2016-02-29", "2027-01-01", "2028-12-31"),
+            [("2027-03-01".to_string(), Some(11)), ("2028-02-29".to_string(), Some(12))]
+        );
+        assert_eq!(anniversaires("11-02", "2026-09-01", "2027-10-29"), [("2026-11-02".to_string(), None)]);
+        assert!(anniversaires("le 2 novembre", "2026-09-01", "2027-10-29").is_empty());
     }
 }

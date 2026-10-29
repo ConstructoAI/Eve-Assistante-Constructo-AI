@@ -398,16 +398,35 @@ fn animations_de_windows() -> bool {
     true
 }
 
-/// Le fondu du haut du fil défilé, de la couleur du fond là où il est (le fond respire : pas de couleur unie).
+/// Le fondu du haut du fil défilé ([`fondu_du_bord`]).
 pub(super) fn fondu(p: &egui::Painter, rect: Rect) {
+    fondu_du_bord(p, rect, Bord::Haut);
+}
+
+/// Le bord de ce qui s'estompe dans le fond.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Bord {
+    Haut,
+    Gauche,
+    Droite,
+}
+
+/// Un fondu contre un bord de `rect`, de la couleur du fond là où il est (le fond respire : pas de couleur unie) :
+/// opaque contre le bord, transparent vers l'intérieur — le haut du fil défilé, les côtés de ce qui défile de côté.
+pub(super) fn fondu_du_bord(p: &egui::Painter, rect: Rect, bord: Bord) {
     let Some(fond) = p.ctx().data(|d| d.get_temp::<Fond>(egui::Id::unique(FOND))) else { return };
     let mut m = Mesh::default();
     let n = 8;
     for i in 0..=n {
-        let x = egui::lerp(rect.x_range(), i as f32 / n as f32);
-        let haut = pos2(x, rect.top());
-        m.colored_vertex(haut, fond.couleur(haut));
-        m.colored_vertex(pos2(x, rect.bottom()), Color32::TRANSPARENT);
+        let f = i as f32 / n as f32;
+        let (x, y) = (egui::lerp(rect.x_range(), f), egui::lerp(rect.y_range(), f));
+        let (plein, vide) = match bord {
+            Bord::Haut => (pos2(x, rect.top()), pos2(x, rect.bottom())),
+            Bord::Gauche => (pos2(rect.left(), y), pos2(rect.right(), y)),
+            Bord::Droite => (pos2(rect.right(), y), pos2(rect.left(), y)),
+        };
+        m.colored_vertex(plein, fond.couleur(plein));
+        m.colored_vertex(vide, Color32::TRANSPARENT);
         if i > 0 {
             let k = 2 * i as u32;
             m.add_triangle(k - 2, k - 1, k);
@@ -1045,29 +1064,15 @@ pub(crate) fn tete_avec_menu(
 pub(crate) fn menu_du_bouton(rep: &egui::Response, cle: &str, lignes: &[LigneDeMenu], a_droite: bool) -> Option<usize> {
     let armee_id = egui::Id::unique(("menu-arme", cle));
     let armee = rep.ctx.data(|d| d.get_temp::<usize>(armee_id));
-    let style = |s: &mut egui::Style| {
-        visuels_du_panneau(&mut s.visuals);
-        egui::containers::menu::menu_style(s);
-    };
-    let pan = &super::PANNEAU_CLAIR;
-    let cadre = egui::Frame::new()
-        .fill(pan.fond)
-        .stroke((1.0, pan.filet))
-        .corner_radius(10)
-        .inner_margin(Margin::same(6))
-        .shadow(pan.ombres[1]);
     let mut choisie = None;
     let (place, sinon) = if a_droite {
         (egui::RectAlign::BOTTOM_END, [egui::RectAlign::TOP_END])
     } else {
         (egui::RectAlign::BOTTOM_START, [egui::RectAlign::TOP_START])
     };
-    let menu = egui::Popup::menu(rep)
+    let menu = menu_blanc(rep)
         .align(place)
         .align_alternatives(&sinon)
-        .gap(4.0)
-        .frame(cadre)
-        .style(style)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
@@ -1091,9 +1096,26 @@ pub(crate) fn menu_du_bouton(rep: &egui::Response, cle: &str, lignes: &[LigneDeM
     choisie
 }
 
+/// Le menu blanc du tableau de bord, qu'ouvre un clic sur `rep` (une rangée, un bouton, une chose du planning), sur sa
+/// propre couche : le cadre et les visuels des panneaux du thème, leur ombre. Ses lignes : [`ligne_du_menu`].
+pub(crate) fn menu_blanc<'a>(rep: &egui::Response) -> egui::Popup<'a> {
+    let style = |s: &mut egui::Style| {
+        visuels_du_panneau(&mut s.visuals);
+        egui::containers::menu::menu_style(s);
+    };
+    let pan = &super::PANNEAU_CLAIR;
+    let cadre = egui::Frame::new()
+        .fill(pan.fond)
+        .stroke((1.0, pan.filet))
+        .corner_radius(10)
+        .inner_margin(Margin::same(6))
+        .shadow(pan.ombres[1]);
+    egui::Popup::menu(rep).gap(4.0).frame(cadre).style(style)
+}
+
 /// Une ligne d'un menu du tableau de bord : son icône, de l'accent (rouge si elle demande confirmation), et ce qu'elle
 /// fait ; au survol, un fond.
-fn ligne_du_menu(ui: &mut egui::Ui, icone: char, mot: &str, danger: bool, id: egui::Id) -> egui::Response {
+pub(crate) fn ligne_du_menu(ui: &mut egui::Ui, icone: char, mot: &str, danger: bool, id: egui::Id) -> egui::Response {
     let (rect, _) = ui.allocate_exact_size(vec2(LARGEUR_DU_MENU, 32.0), Sense::hover());
     let rep = ui.interact(rect, id, Sense::click());
     let p = ui.painter();
@@ -1318,19 +1340,8 @@ fn rangee_de_liste(ui: &mut egui::Ui, r: &Rangee, cle: (&str, usize), actions: &
     }
     let rep = rep.on_hover_cursor(egui::CursorIcon::PointingHand);
     // Son menu, sur sa propre couche : blanc comme les panneaux du thème, ses lignes à la largeur de la plus longue.
-    let style = |s: &mut egui::Style| {
-        visuels_du_panneau(&mut s.visuals);
-        egui::containers::menu::menu_style(s);
-    };
-    let p = &super::PANNEAU_CLAIR;
-    let cadre = egui::Frame::new()
-        .fill(p.fond)
-        .stroke((1.0, p.filet))
-        .corner_radius(10)
-        .inner_margin(Margin::same(6))
-        .shadow(p.ombres[1]);
     let mut choisie = None;
-    egui::Popup::menu(&rep).gap(4.0).frame(cadre).style(style).show(|ui| {
+    menu_blanc(&rep).show(|ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
         for a in actions.iter().chain(Action::PARTOUT.iter()) {
             if ligne_d_action(ui, *a, cle).clicked() {
@@ -1673,6 +1684,80 @@ pub(super) fn bouton_erp_nomme(
         p.galley(pos2(x, rect.center().y - g_texte.size().y / 2.0), g_texte, encre);
     }
     rep.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Un segment d'un choix ([`segments_erp`]) : son icône (au besoin), son mot, et ce que dit sa bulle.
+pub(crate) struct Segment<'a> {
+    pub(crate) icone: Option<char>,
+    pub(crate) mot: &'a str,
+    pub(crate) aide: &'a str,
+}
+
+/// Un choix en segments sur une piste blanche en pilule, celui des tableaux de bord : chaque segment son icône et son
+/// mot ; celui qui est choisi en pilule marine (le dégradé de la bannière), son texte blanc ; un survol, un lavis gris.
+/// `cle` nomme ses segments (`(cle, k)`) ; `hauteur` : 38 points pour le choix de la vue du tableau de bord, moins pour
+/// ceux d'une vue. Rend le rang du segment cliqué.
+pub(crate) fn segments_erp(
+    ui: &mut egui::Ui,
+    cle: &str,
+    choix: &[Segment<'_>],
+    choisi: usize,
+    hauteur: f32,
+) -> Option<usize> {
+    let taille = if hauteur >= 36.0 { 13.5 } else { 13.0 };
+    let police = FontId::new(taille, FontFamily::Name(SEMI.into()));
+    let icones = FontId::new(taille - 0.5, FontFamily::Name(ICONES.into()));
+    let p = ui.painter().clone();
+    let aucune = Color32::PLACEHOLDER;
+    let (marge, ecart, cote) = (4.0, 2.0, if hauteur >= 36.0 { 16.0 } else { 13.0 });
+    let mises: Vec<_> = choix
+        .iter()
+        .map(|s| {
+            let g_icone = s.icone.map(|c| p.layout_no_wrap(c.to_string(), icones.clone(), aucune));
+            let g_mot = p.layout_no_wrap(s.mot.to_string(), police.clone(), aucune);
+            let l_icone = g_icone.as_ref().map_or(0.0, |g| g.size().x + 8.0);
+            let l = cote + l_icone + g_mot.size().x + cote + 2.0;
+            (g_icone, g_mot, l)
+        })
+        .collect();
+    let total = mises.iter().map(|m| m.2).sum::<f32>() + 2.0 * marge + ecart * (mises.len().max(1) - 1) as f32;
+    let (piste, _) = ui.allocate_exact_size(vec2(total, hauteur), Sense::hover());
+    let rayon = hauteur / 2.0;
+    p.add(ombre_marine(piste, rayon as u8, 2, 8, 16));
+    p.rect(piste, rayon, Color32::from_white_alpha(225), Stroke::new(1.0, erp::FILET_DE_CARTE), StrokeKind::Inside);
+    let mut x = piste.left() + marge;
+    let mut clic = None;
+    for (k, (g_icone, g_mot, l)) in mises.into_iter().enumerate() {
+        let r = Rect::from_min_size(pos2(x, piste.top() + marge), vec2(l, piste.height() - 2.0 * marge));
+        x += l + ecart;
+        let rep = ui.interact(r, egui::Id::unique((cle, k)), Sense::click());
+        let choisi = k == choisi;
+        if choisi {
+            p.add(ombre_marine(r, (r.height() / 2.0) as u8, 2, 6, 40));
+            let arrets = [erp::MARINE_HAUT, erp::AZUR];
+            p.add(rectangle_degrade(r, r.height() / 2.0, |q| degrade_css(r, 100.0, &arrets, q)));
+        } else if rep.hovered() {
+            p.rect_filled(r, r.height() / 2.0, erp::SURVOL);
+        }
+        let encre = match (choisi, rep.hovered()) {
+            (true, _) => Color32::WHITE,
+            (false, true) => erp::TEXTE,
+            _ => erp::TEXTE_2,
+        };
+        let mut gauche = r.left() + cote;
+        if let Some(g) = g_icone {
+            let l_icone = g.size().x;
+            p.galley(pos2(gauche, r.center().y - g.size().y / 2.0), g, encre);
+            gauche += l_icone + 8.0;
+        }
+        p.galley(pos2(gauche, r.center().y - g_mot.size().y / 2.0), g_mot, encre);
+        let aide = choix[k].aide;
+        let rep = if aide.is_empty() { rep } else { rep.on_hover_text(aide) };
+        if rep.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            clic = Some(k);
+        }
+    }
+    clic
 }
 
 /// Un rectangle aux coins arrondis peint d'un dégradé : ses sommets prennent la couleur de `couleur` à leur place (un

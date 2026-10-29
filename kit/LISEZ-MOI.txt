@@ -87,6 +87,15 @@ LUI PARLER
   données », dans son menu, le montre en tableau. « Actualiser », dans le menu d'une carte d'Eve, la lui fait
   refaire ; « Retirer » l'enlève (un second clic le confirme). Ce qui y est épinglé vit dans epingles.json, dans son
   dossier local.
+· En tête du tableau de bord, ses onglets : « Calendrier » (le mois ou la semaine : les chantiers, leurs opérations,
+  les factures à échéance, les livraisons, les notes de Constructo AI, et la maison — ses échéances, ses rappels, les
+  anniversaires), « Gantt » (les chantiers et leurs opérations dans le temps, ce qui les lie, ce qui glisse ; « Voir
+  les données » le montre en tableau) et « Kanban » (les tableaux du suivi de Constructo AI : les chantiers, les
+  soumissions, les bons de travail, les opérations, les ventes…). « Tout · Entreprise · Famille » vaut pour les
+  quatre. Un clic sur une chose offre d'en parler à Eve, de te la rappeler demain, de la replanifier ou de la
+  déplacer : c'est une demande à Eve, que Claude fait avec ton accord là où il le faut ; le tableau, lui, n'écrit
+  jamais dans l'ERP. Les opérations du suivi de production se lisent quand le Gantt s'ouvre, au plus une fois par
+  demi-heure : leur lecture pèse sur l'ERP.
 · Quand sa fenêtre n'est pas devant, un rappel qui sonne, une réponse longue qu'elle a finie ou un accord qu'elle
   attend s'annoncent aussi par une notification de Windows ; un clic ramène sa fenêtre. Réglages, Sur ce poste,
   « Notifications de Windows » les coupe.

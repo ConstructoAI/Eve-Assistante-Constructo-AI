@@ -3949,7 +3949,7 @@ pub fn constructo(args: &[String]) -> i32 {
         "faux Constructo AI : http://127.0.0.1:{} — des jetons de {duree} s, {} outils ; Ctrl+C l'arrête.\n\
          Une Eve d'essai s'y relie avec EVE_CONSTRUCTO_MCP=http://127.0.0.1:{} et EVE_SANS_NAVIGATEUR=1.",
         faux.port,
-        faux_constructo::OUTILS.len() + nombreux,
+        faux_constructo::OUTILS.len() + faux_planning::OUTILS.len() + nombreux,
         faux.port
     );
     let mut vus = 0;
@@ -4531,13 +4531,16 @@ mod faux_constructo {
                     format!("Paiement de {} $ enregistré sur la facture {}.", x("montant"), x("invoice_id"))
                 }
                 o if o.starts_with("lister_registre_") => "Aucune entrée.".into(),
-                o => entreprise_inventee(o, a).ok_or_else(|| format!("Unknown tool: {o}"))?,
+                o => entreprise_inventee(o, a)
+                    .or_else(|| super::faux_planning::lecture(o, a))
+                    .ok_or_else(|| format!("Unknown tool: {o}"))?,
             })
         }
 
         fn outils(&self) -> Vec<Value> {
             let mut liste: Vec<Value> = OUTILS
                 .iter()
+                .chain(super::faux_planning::OUTILS.iter())
                 .map(|(nom, description, proprietes, requis)| {
                     let p: serde_json::Map<String, Value> =
                         proprietes.iter().map(|(n, t)| (n.to_string(), json!({ "type": t }))).collect();
@@ -4648,6 +4651,11 @@ mod faux_constructo {
                             "ville_chantier": "Démoville" }),
                     json!({ "id": 7, "nom_projet": "Cuisine, 5 avenue du Modèle", "numero_projet": "PROJ-2026-00007",
                             "statut": "Termine", "budget_total": 54000.0 }),
+                    // Le chantier à venir du planning : il commence dans deux semaines.
+                    json!({ "id": 16, "nom_projet": "Garage détaché, 4 rang de l'Essai",
+                            "numero_projet": "PROJ-2026-00016", "client_nom_cache": "Habitations Modèle inc.",
+                            "statut": "En attente", "priorite": "Moyenne", "budget_total": 96000.0,
+                            "date_debut_reel": jour(14), "date_fin_reel": jour(45), "ville_chantier": "Démoville" }),
                 ];
                 let voulu = statut(&a["statut"]);
                 let l: Vec<Value> = projets
@@ -4691,7 +4699,7 @@ mod faux_constructo {
                             "created_by_name": "Sam Exemple", "created_at": format!("{}T08:00:00", jour(-30)) })
                 };
                 let notes = [
-                    note(40, 20, "Hors de la fenêtre : une note dans trois semaines"),
+                    note(40, 20, "Une note dans trois semaines"),
                     note(31, 6, "Livraison des fermes de toit"),
                     note(29, 1, "Visite de chantier, 12 rue des Exemples"),
                     note(27, 0, "Réunion de chantier, 8 h"),
@@ -5534,8 +5542,15 @@ struct SceneDuTheme {
 /// ([`EnLigne`]) : l'ordinaire (le haut de la page, puis son bas), un incident (et des erreurs dans la dernière heure,
 /// un paiement échoué : leurs cartes montent ; puis dans une fenêtre moyenne), des lectures manquées (pendant la
 /// première lecture de l'entreprise : ses cartes n'y sont pas encore). Puis la vitrine (`--vitrine`), les moments
-/// d'une même journée ([`MOMENTS_DE_LA_VITRINE`]) : la première attend le portrait et ses poses.
-static SCENES_DU_THEME: [SceneDuTheme; 30] = [
+/// d'une même journée ([`MOMENTS_DE_LA_VITRINE`]) : la première attend le portrait et ses poses ; ses dernières, à la
+/// fin de la journée, son planning — le calendrier au mois, à la semaine, puis étroit ; le Gantt aux semaines et aux
+/// mois, puis en tableau ; le Kanban des soumissions, puis celui des opérations (sa règle) ; le Gantt et le Kanban étroits. Enfin les
+/// états du planning, au jour de l'essai ([`EtatDuTheme::scene_du_planning`]) : le Gantt pas relié, le Kanban à la
+/// première lecture, le Gantt dans la vue de la famille, le Kanban sans tableau. Et le planning lu (« lue-… ») : le
+/// calendrier, le Gantt, le Kanban des chantiers et celui des opérations, tels que le centre les fait de
+/// l'`entreprise.json` du dossier local — une vraie lecture, celle d'une Eve d'essai reliée au faux Constructo AI
+/// (`eve --essai-constructo`) : rien n'y est imposé ni écrit.
+static SCENES_DU_THEME: [SceneDuTheme; 48] = [
     SceneDuTheme { nom: "tableau", duree: 6.0, taille: Some([1560.0, 900.0]) },
     SceneDuTheme { nom: "reflexion", duree: 4.0, taille: None },
     SceneDuTheme { nom: "reponse", duree: 5.0, taille: None },
@@ -5566,6 +5581,24 @@ static SCENES_DU_THEME: [SceneDuTheme; 30] = [
     SceneDuTheme { nom: "vitrine-empathie", duree: 7.0, taille: Some([2100.0, 1180.0]) },
     SceneDuTheme { nom: "vitrine-amusee", duree: 7.0, taille: Some([2100.0, 1180.0]) },
     SceneDuTheme { nom: "vitrine-famille", duree: 6.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "vitrine-calendrier", duree: 6.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "vitrine-semaine", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "vitrine-calendrier-etroit", duree: 5.0, taille: Some([1180.0, 880.0]) },
+    SceneDuTheme { nom: "vitrine-gantt", duree: 6.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "vitrine-gantt-mois", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "vitrine-gantt-donnees", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "vitrine-kanban", duree: 6.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "vitrine-operations", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "vitrine-gantt-etroit", duree: 5.0, taille: Some([1180.0, 880.0]) },
+    SceneDuTheme { nom: "vitrine-kanban-etroit", duree: 5.0, taille: Some([1180.0, 880.0]) },
+    SceneDuTheme { nom: "planning-non-relie", duree: 5.0, taille: Some([1560.0, 900.0]) },
+    SceneDuTheme { nom: "planning-lecture", duree: 4.0, taille: None },
+    SceneDuTheme { nom: "planning-famille", duree: 4.0, taille: None },
+    SceneDuTheme { nom: "planning-vide", duree: 4.0, taille: None },
+    SceneDuTheme { nom: "lue-calendrier", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "lue-gantt", duree: 6.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "lue-kanban", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "lue-operations", duree: 5.0, taille: Some([2100.0, 1180.0]) },
 ];
 
 /// Le fichier qui dit que l'`entreprise.json` du dossier local est celui de l'essai du thème : l'essai le réécrit.
@@ -6064,8 +6097,9 @@ struct MomentDeLaVitrine {
 /// La journée de la vitrine, dans l'ordre : le matin (le chantier de l'école, puis le CPE qui accepte la soumission :
 /// la joie) ; l'avant-midi (qui doit le plus d'argent : le sérieux ; puis l'entreprise, le bas de sa page) ; le début
 /// de l'après-midi (la petite qui fait de la fièvre : l'empathie) ; la fin de l'après-midi (le hockey du garçon :
-/// l'amusement ; puis la famille).
-const MOMENTS_DE_LA_VITRINE: [MomentDeLaVitrine; 6] = [
+/// l'amusement ; puis la famille) ; enfin, quelques minutes plus tard, son planning (le calendrier, le Gantt, le
+/// Kanban : [`planning_invente`]).
+const MOMENTS_DE_LA_VITRINE: [MomentDeLaVitrine; 16] = [
     MomentDeLaVitrine {
         scene: "vitrine-joie",
         heure: 8 * 3600 + 12 * 60,
@@ -6115,6 +6149,96 @@ const MOMENTS_DE_LA_VITRINE: [MomentDeLaVitrine; 6] = [
         scene: "vitrine-famille",
         heure: 16 * 3600 + 41 * 60,
         vue: "famille",
+        emotion: None,
+        lignes: 11,
+        meteo: (7.1, 3),
+        non_lus: (1, 4, false),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-calendrier",
+        heure: 16 * 3600 + 43 * 60,
+        vue: "tout",
+        emotion: None,
+        lignes: 11,
+        meteo: (7.1, 3),
+        non_lus: (1, 4, false),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-semaine",
+        heure: 16 * 3600 + 44 * 60,
+        vue: "tout",
+        emotion: None,
+        lignes: 11,
+        meteo: (7.1, 3),
+        non_lus: (1, 4, false),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-calendrier-etroit",
+        heure: 16 * 3600 + 45 * 60,
+        vue: "tout",
+        emotion: None,
+        lignes: 11,
+        meteo: (7.1, 3),
+        non_lus: (1, 4, false),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-gantt",
+        heure: 16 * 3600 + 46 * 60,
+        vue: "entreprise",
+        emotion: None,
+        lignes: 11,
+        meteo: (7.1, 3),
+        non_lus: (1, 4, false),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-gantt-mois",
+        heure: 16 * 3600 + 47 * 60,
+        vue: "entreprise",
+        emotion: None,
+        lignes: 11,
+        meteo: (7.1, 3),
+        non_lus: (1, 4, false),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-gantt-donnees",
+        heure: 16 * 3600 + 47 * 60 + 30,
+        vue: "entreprise",
+        emotion: None,
+        lignes: 11,
+        meteo: (7.1, 3),
+        non_lus: (1, 4, false),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-kanban",
+        heure: 16 * 3600 + 48 * 60,
+        vue: "entreprise",
+        emotion: None,
+        lignes: 11,
+        meteo: (7.1, 3),
+        non_lus: (1, 4, false),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-operations",
+        heure: 16 * 3600 + 49 * 60,
+        vue: "entreprise",
+        emotion: None,
+        lignes: 11,
+        meteo: (7.1, 3),
+        non_lus: (1, 4, false),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-gantt-etroit",
+        heure: 16 * 3600 + 50 * 60,
+        vue: "entreprise",
+        emotion: None,
+        lignes: 11,
+        meteo: (7.1, 3),
+        non_lus: (1, 4, false),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-kanban-etroit",
+        heure: 16 * 3600 + 51 * 60,
+        vue: "entreprise",
         emotion: None,
         lignes: 11,
         meteo: (7.1, 3),
@@ -6853,6 +6977,10 @@ impl EtatDuTheme {
     fn scene(&mut self, nom: &str) {
         self.parle = None;
         crate::voix::faire_entendre(None);
+        // Le planning de la scène ; une scène des états du planning s'y prépare toute entière.
+        if self.scene_du_planning(nom) {
+            return;
+        }
         // Un moment de la vitrine règle son horloge ; les autres scènes ont la vraie heure.
         if let Some(m) = MOMENTS_DE_LA_VITRINE.iter().find(|m| m.scene == nom) {
             self.moment_de_la_vitrine(m);
@@ -6868,6 +6996,17 @@ impl EtatDuTheme {
         });
         // Le rappel qu'aurait laissé une vitrine d'avant ne sonne pas dans les autres scènes.
         self.ecrire_les_rappels(None);
+        // Le planning lu : Constructo AI relié, l'entreprise et la famille ensemble ; l'`entreprise.json` du dossier
+        // local reste tel qu'une Eve l'a écrit.
+        if nom.starts_with("lue-") {
+            self.vue = "tout".into();
+            self.relier("connectee");
+            self.lecture_finie_a = None;
+            self.emotion = None;
+            self.accord = Value::Null;
+            self.prete();
+            return;
+        }
         // L'émotion de chaque scène : la joie d'une réponse, l'empathie en la disant, le sérieux d'un accord.
         self.emotion = match nom {
             "reponse" => Some("joie"),
@@ -7161,6 +7300,8 @@ fn mener_l_essai_du_theme(
                 if !s.nom.ends_with("suite") {
                     crate::natif::theme::defiler_le_tableau(&ctx, 0.0);
                 }
+                // L'onglet du tableau de bord de la scène, et ce que montrent ses vues du planning.
+                crate::natif::planning::preparer_pour_l_essai(&ctx, &planning_de_la_scene(s.nom));
                 t
             });
             // Le bas de la page, jusqu'à une demi-seconde de la capture : la vue et la taille de la scène se prennent
@@ -7168,6 +7309,12 @@ fn mener_l_essai_du_theme(
             // page à la fin d'une image, et l'image suivante s'y dessine — encore faut-il ne plus le redemander.
             if s.nom.ends_with("suite") && t - depuis < s.duree - 1.5 {
                 let y = if s.nom.starts_with("en-ligne") { 10_000.0 } else { 820.0 };
+                crate::natif::theme::defiler_le_tableau(&ctx, y);
+            }
+            // Une vue du planning de la vitrine, sous la bannière, de même.
+            if let Some(y) = defilement_du_planning(s.nom)
+                && t - depuis < s.duree - 1.5
+            {
                 crate::natif::theme::defiler_le_tableau(&ctx, y);
             }
             if let Some(dossier) = &captures
@@ -8115,8 +8262,10 @@ const PROFILS_D_ESSAI: [(&str, &str, bool); 3] = [
 /// réglages cochent le nouveau —, et ses profils mis à l'épreuve sans la souris de la personne : le nom sous « EVE »
 /// ouvre leur menu, un profil s'y choisit ; le menu ouvert reste à egui pour Windows (pas à la barre de titre, qui
 /// déplacerait la fenêtre) ; la rubrique « Profil » des réglages choisit aussi ; puis le même menu dans le thème
-/// « Constructo AI », et ses réglages défilés jusqu'au portrait d'Eve. Le bilan dit ce qui va. `--captures` : la fenêtre, par elle-même, en PNG, à chaque étape. La
-/// musique du centre se tait (A, S) avant de jouer.
+/// « Constructo AI », et ses réglages défilés jusqu'au portrait d'Eve ; enfin le planning du tableau de bord (le
+/// calendrier, le Gantt, le Kanban : leurs menus, et ce qu'ils demandent à Eve). Le bilan dit ce qui va.
+/// `--captures` : la fenêtre, par elle-même, en PNG, à chaque étape. La musique du centre se tait (A, S) avant de
+/// jouer.
 pub fn profils(args: &[String]) -> i32 {
     let captures = match args {
         [] => None,
@@ -8202,7 +8351,10 @@ pub fn profils(args: &[String]) -> i32 {
                 .to_string(),
             c.choix == ["Estimateur", "Essai", "Designer"],
         ),
-        ("aucun autre geste au chef".to_string(), c.autres.iter().all(|a| a == "quitter")),
+        (
+            "aucun autre geste au chef (sinon la lecture des opérations, que le Gantt demande)".to_string(),
+            c.autres.iter().all(|a| a == "quitter" || a == "planning_lire"),
+        ),
         (
             "la saisie : deux lignes (Maj+Entrée) envoyées d'Entrée, en une seule demande".to_string(),
             c.textes.first().is_some_and(|t| t == "Ligne un\nLigne deux"),
@@ -8248,6 +8400,29 @@ pub fn profils(args: &[String]) -> i32 {
             },
         ),
     ];
+    verifications.extend([
+        (
+            "le calendrier : une chose touchée ouvre son menu, « En parler à Eve » le lui demande, sa source comprise"
+                .to_string(),
+            c.textes.iter().any(|t| {
+                t.starts_with("Parlons de ceci, au calendrier du tableau de bord (« Facture · Usinage Vermeil »")
+                    && t.contains("la facture F-2026-0433 de Usinage Vermeil inc.")
+            }),
+        ),
+        (
+            "le Gantt : il demande ses opérations au chef en se montrant, une fois (le geste `planning_lire`)"
+                .to_string(),
+            c.autres.iter().filter(|a| *a == "planning_lire").count() == 1,
+        ),
+        (
+            "le Kanban : « Déplacer vers… » une autre colonne le demande à Eve, les statuts de l'ERP tels quels"
+                .to_string(),
+            c.textes.iter().any(|t| {
+                t.starts_with("Dans Constructo AI, déplace la carte « Centre de la petite enfance, 80 places »")
+                    && t.contains("du tableau « Chantiers », de « Planifie » vers « En cours ».")
+            }),
+        ),
+    ]);
     verifications.extend(zones);
     verifications.push(("le parcours va jusqu'au bout".to_string(), problemes.is_empty()));
     println!("\nLes profils de la fenêtre native :");
@@ -8289,6 +8464,8 @@ struct ChefDesProfils {
     notes: Vec<(String, String)>,
     retirees: Vec<String>,
     autres: Vec<String>,
+    /// Constructo AI relié (le pas `Planning`) : le Gantt et le Kanban se montrent.
+    relie: bool,
     fini: bool,
 }
 
@@ -8327,6 +8504,7 @@ impl ChefDesProfils {
             notes: Vec::new(),
             retirees: Vec::new(),
             autres: Vec::new(),
+            relie: false,
             fini: false,
         }
     }
@@ -8401,6 +8579,12 @@ impl ChefDesProfils {
             "qui": "Sam",
             "theme": self.theme,
             "ordre_du_tableau": self.ordre,
+            "constructo": if self.relie {
+                serde_json::json!({ "permis": true, "etat": "connectee", "connectee": true, "branchee": true,
+                    "compte": "sam@exemple.ca", "erreur": Value::Null, "detail": "" })
+            } else {
+                Value::Null
+            },
             "epingles": self.epingles.liste(),
             "nom": PROFILS_D_ESSAI[0].0,
             "profil": self.actif,
@@ -8498,6 +8682,11 @@ enum PasDesProfils {
     Capture(&'static str),
     /// Eve épingle ses cartes au tableau de bord, comme si Claude venait de répondre (le chef de l'essai les pose).
     Epingler,
+    /// Le planning de la vitrine imposé aux vues du tableau de bord (autour d'aujourd'hui), Constructo AI relié ; la
+    /// fenêtre à cette taille (en points) ; ce que la saisie doit montrer en tête (une demande commencée).
+    Planning,
+    Taille(f32, f32),
+    SaisieCommence(&'static str),
     Fin,
 }
 
@@ -8522,18 +8711,61 @@ enum CibleDesProfils {
     /// Un point d'une carte épinglée : à tant de points (x, y) du bouton « ⋯ » de sa tête.
     DansLaCarte(&'static str, f32, f32),
     LigneDuMenu(&'static str, usize),
+    /// Un onglet du tableau de bord (son rang : le tableau de bord, le calendrier, le Gantt, le Kanban) ; une chose du
+    /// planning, ou une ligne de son menu (son rang) ; le chevron d'un chantier du Gantt (son id).
+    Onglet(usize),
+    Chose(ChoseDuPlanning),
+    LigneDeLaChose(ChoseDuPlanning, usize),
+    Chevron(&'static str),
     Point(f32, f32),
+}
+
+/// Une chose du planning de l'essai de la fenêtre : un événement du calendrier (son titre), une tâche du Gantt (son
+/// id), une carte du Kanban (la clé de son tableau, son id, son rang dans sa colonne).
+#[derive(Clone, Copy, Debug)]
+enum ChoseDuPlanning {
+    Evenement(&'static str),
+    Tache(&'static str),
+    Carte(&'static str, &'static str, usize),
+}
+
+/// Le jour autour duquel l'essai de la fenêtre invente son planning : le vendredi de cette semaine, comme celui de la
+/// vitrine (ses rendez-vous de chaque semaine tombent ainsi les bons jours).
+fn vendredi_de_la_semaine() -> Option<i64> {
+    let n = crate::centre::numero_du_jour(&crate::journal::date())?;
+    Some(n - (n + 3).rem_euclid(7) + 4)
+}
+
+impl ChoseDuPlanning {
+    /// Le nom que la vue lui donne (celui de son menu) : un événement, son `id` et son jour, dans le planning
+    /// qu'impose le pas `Planning`.
+    fn cle(self) -> Option<String> {
+        Some(match self {
+            ChoseDuPlanning::Evenement(titre) => {
+                let p = planning_invente(vendredi_de_la_semaine()?, true);
+                let e = p.evenements.iter().find(|e| e.titre == titre)?;
+                format!("{}-{}", e.id, crate::centre::numero_du_jour(&e.debut)?)
+            }
+            ChoseDuPlanning::Tache(id) => format!("tache-du-gantt-{id}"),
+            ChoseDuPlanning::Carte(tableau, id, i) => format!("carte-du-kanban-{tableau}-{id}-{i}"),
+        })
+    }
 }
 
 /// Le parcours : le menu de la barre (ouvert, survolé, un profil choisi), la rubrique des réglages (celui d'office
 /// choisi), puis le thème « Constructo AI » et son menu (un troisième profil), le haut de ses réglages et la liste des
-/// voix, clairs comme lui, et ses réglages défilés jusqu'au thème (le portrait d'Eve, qu'il est seul à montrer).
+/// voix, clairs comme lui, et ses réglages défilés jusqu'au thème (le portrait d'Eve, qu'il est seul à montrer) ; la
+/// saisie, le tableau de bord, ses cartes épinglées ; enfin le planning (celui de la vitrine, Constructo AI relié) :
+/// le calendrier, le Gantt et le Kanban, leurs bulles, leurs menus et ce qu'ils demandent à Eve.
 fn parcours_des_profils() -> VecDeque<PasDesProfils> {
+    use ChoseDuPlanning::{Carte, Evenement, Tache};
     use CibleDesProfils::{
-        ActionDeRangee, BoutonAjouter, BoutonDuBas, ChampDeSaisie, DansLaCarte, DansLeFil, DesReglages, DuMenu,
-        LigneDuMenu, Menu, MenuDeCarte, Point, RangeeDeCarte, TeteDeCarte,
+        ActionDeRangee, BoutonAjouter, BoutonDuBas, ChampDeSaisie, Chevron, Chose, DansLaCarte, DansLeFil, DesReglages,
+        DuMenu, LigneDeLaChose, LigneDuMenu, Menu, MenuDeCarte, Onglet, Point, RangeeDeCarte, TeteDeCarte,
     };
     use PasDesProfils::*;
+    let facture = Evenement("Facture · Usinage Vermeil");
+    let (acier, cpe) = (Tache("op-1352"), Carte("chantiers", "projet-141", 0));
     VecDeque::from([
         Touches(&[egui::Key::A, egui::Key::S]),
         Pause(1.2),
@@ -8734,6 +8966,66 @@ fn parcours_des_profils() -> VecDeque<PasDesProfils> {
         Molette(-500.0),
         Pause(1.5),
         Capture("32-graphiques-suite"),
+        // Le planning, dans une fenêtre plus grande : l'onglet du calendrier ; une chose survolée (sa bulle), touchée
+        // (son menu), « En parler à Eve » ; le Gantt, un chantier déplié, une tâche survolée, son menu, « Replanifier… »
+        // (la demande commencée dans la saisie) ; le Kanban, une carte, « Déplacer vers… » une autre colonne.
+        Planning,
+        Taille(1800.0, 1040.0),
+        Pause(1.2),
+        Survol(Point(400.0, 600.0)),
+        Molette(8000.0),
+        Pause(1.0),
+        Survol(Onglet(1)),
+        Appuyer,
+        Relacher,
+        Pause(1.2),
+        Capture("33-calendrier"),
+        Survol(Chose(facture)),
+        Pause(0.8),
+        Capture("34-bulle-du-calendrier"),
+        Appuyer,
+        Relacher,
+        Pause(0.6),
+        Capture("35-menu-du-calendrier"),
+        Survol(LigneDeLaChose(facture, 0)),
+        Appuyer,
+        Relacher,
+        Pause(0.6),
+        Survol(Onglet(2)),
+        Appuyer,
+        Relacher,
+        Pause(1.2),
+        Survol(Chevron("projet-135")),
+        Appuyer,
+        Relacher,
+        Pause(0.8),
+        Capture("36-gantt"),
+        Survol(Chose(acier)),
+        Pause(0.8),
+        Capture("37-bulle-du-gantt"),
+        Appuyer,
+        Relacher,
+        Pause(0.6),
+        Capture("38-menu-du-gantt"),
+        Survol(LigneDeLaChose(acier, 2)),
+        Appuyer,
+        Relacher,
+        Pause(0.6),
+        SaisieCommence("Replanifie dans Constructo AI la tâche « Structure d'acier »"),
+        Survol(Onglet(3)),
+        Appuyer,
+        Relacher,
+        Pause(1.2),
+        Capture("39-kanban"),
+        Survol(Chose(cpe)),
+        Appuyer,
+        Relacher,
+        Pause(0.6),
+        Capture("40-menu-du-kanban"),
+        Survol(LigneDeLaChose(cpe, 2)),
+        Appuyer,
+        Relacher,
+        Pause(0.8),
         Fin,
     ])
 }
@@ -8783,6 +9075,18 @@ impl EssaiDesProfils {
                 return Some(menu.rect.center() + egui::vec2(*dx, *dy));
             }
             CibleDesProfils::LigneDuMenu(cle, k) => egui::Id::unique(("ligne-du-menu", *cle, *k)),
+            CibleDesProfils::Onglet(k) => egui::Id::unique(("onglet-du-tableau", *k)),
+            CibleDesProfils::Chose(chose) => {
+                let cle = chose.cle()?;
+                match chose {
+                    ChoseDuPlanning::Evenement(_) => egui::Id::unique(("evenement-du-calendrier", cle.as_str())),
+                    _ => egui::Id::unique(cle.as_str()),
+                }
+            }
+            CibleDesProfils::LigneDeLaChose(chose, k) => {
+                egui::Id::unique(("ligne-du-planning", chose.cle()?.as_str(), *k))
+            }
+            CibleDesProfils::Chevron(id) => egui::Id::unique(("chevron-du-gantt", *id)),
             CibleDesProfils::Point(x, y) => return Some(egui::pos2(*x, *y)),
         };
         ctx.read_response(id).map(|r| r.rect.center())
@@ -8932,6 +9236,25 @@ impl EssaiDesProfils {
                 PasDesProfils::Epingler => {
                     if let Ok(mut c) = self.chef.lock() {
                         c.epingler();
+                    }
+                    0.0
+                }
+                PasDesProfils::Planning => {
+                    let jour = vendredi_de_la_semaine().unwrap_or(0);
+                    crate::natif::planning::imposer(Some(planning_invente(jour, true)));
+                    if let Ok(mut c) = self.chef.lock() {
+                        c.relie = true;
+                    }
+                    0.0
+                }
+                PasDesProfils::Taille(l, h) => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(l, h)));
+                    0.0
+                }
+                PasDesProfils::SaisieCommence(debut) => {
+                    let vu = self.fenetre.texte_de_la_saisie().to_string();
+                    if !vu.starts_with(debut) {
+                        self.probleme(format!("la saisie montre {vu:?}, au lieu de commencer par {debut:?}"));
                     }
                     0.0
                 }
@@ -9940,4 +10263,1086 @@ pub fn tour(r: &Reglages, args: &[String]) -> i32 {
         moyenne(&attentes[1])
     );
     0
+}
+
+// ---- Le planning : ce que le faux Constructo AI en rend (le calendrier, le Gantt, le Kanban) ------------------------
+
+/// Les lectures du planning sur le faux Constructo AI (`eve --essai-constructo`) : les bons de travail, les ventes, les
+/// colonnes et les comptes du Kanban, et le suivi de production (les opérations, les dépendances et les références du
+/// Gantt, les employés qui les font) — dans les formes de `mcp_server.py`, sur la même entreprise inventée que ses
+/// autres lectures (« Construction Exemple inc. », ses chantiers 14, 12, 9 et 16), chaque date à quelques jours
+/// d'aujourd'hui.
+mod faux_planning {
+    use serde_json::{Value, json};
+
+    use crate::centre::{date_du_numero, numero_du_jour};
+
+    /// Un outil du faux serveur, comme ceux de `faux_constructo` : son nom, sa description, ses paramètres, ceux qu'il
+    /// exige.
+    type Outil = (&'static str, &'static str, &'static [(&'static str, &'static str)], &'static [&'static str]);
+
+    pub const OUTILS: [Outil; 8] = [
+        (
+            "lister_bons_travail",
+            "Liste les bons de travail.",
+            &[("statut", "string"), ("project_id", "integer"), ("client_company_id", "integer"), ("limite", "integer")],
+            &[],
+        ),
+        (
+            "lister_opportunites",
+            "Liste les opportunites CRM (pipeline de ventes).",
+            &[("statut", "string"), ("company_id", "integer"), ("recherche", "string"), ("limite", "integer")],
+            &[],
+        ),
+        (
+            "suivi_colonnes",
+            "Statuts LEGAUX (colonnes) et gardes metier de chaque board. Lecture (aucune BD).",
+            &[("board", "string")],
+            &[],
+        ),
+        (
+            "suivi_etat_kanban",
+            "Etat du Suivi/Kanban : nombre de cartes par colonne. Lecture seule.",
+            &[("board", "string")],
+            &[],
+        ),
+        (
+            "suivi_lister_operations",
+            "Liste les operations (taches Gantt/Calendrier) des bons de travail.",
+            &[("bt_id", "integer"), ("statut", "string"), ("limite", "integer")],
+            &[],
+        ),
+        (
+            "suivi_lister_dependances_gantt",
+            "Liste les dependances entre taches du Gantt. Lecture.",
+            &[("limite", "integer")],
+            &[],
+        ),
+        (
+            "suivi_lister_baselines",
+            "Liste les lignes de base des taches du Gantt. Lecture.",
+            &[("limite", "integer")],
+            &[],
+        ),
+        ("lister_employes", "Liste les employés actifs.", &[("departement", "string"), ("limite", "integer")], &[]),
+    ];
+
+    /// Le jour à `decalage` jours d'aujourd'hui.
+    fn jour(decalage: i64) -> String {
+        date_du_numero(numero_du_jour(&crate::journal::date()).unwrap_or(0) + decalage)
+    }
+
+    /// Une liste comme le serveur la rend : sa ligne d'en-tête, puis son JSON (`indent=2`).
+    fn rendu(entete: &str, l: Vec<Value>) -> String {
+        format!("{entete}\n{}", serde_json::to_string_pretty(&Value::Array(l)).unwrap_or_default())
+    }
+
+    /// Les opérations du suivi, dans l'ordre du serveur (le bon de travail, puis le rang) : (numéro, bon de travail et
+    /// son numéro, nom, statut, début et fin en jours d'aujourd'hui, heures prévues et faites, employé, fournisseur).
+    #[allow(clippy::type_complexity)]
+    fn operations() -> Vec<Value> {
+        let ops: [(u64, u64, &str, &str, &str, (i64, i64), (f64, f64), Option<u64>, &str); 13] = [
+            (
+                120,
+                12,
+                "BT-2026-012",
+                "Réparation de la rampe d'accès",
+                "En cours",
+                (-3, 2),
+                (12.0, 6.0),
+                Some(1),
+                "Interne",
+            ),
+            (300, 30, "BT-2026-030", "Démolition intérieure", "ANNULE", (-20, -18), (24.0, 0.0), None, "Interne"),
+            (
+                380,
+                38,
+                "BT-2026-038",
+                "Coffrage des fondations",
+                "TERMINE",
+                (-75, -70),
+                (40.0, 42.0),
+                Some(1),
+                "Interne",
+            ),
+            (
+                381,
+                38,
+                "BT-2026-038",
+                "Coulée du béton",
+                "TERMINE",
+                (-68, -66),
+                (16.0, 15.0),
+                None,
+                "Béton Exemple ltée",
+            ),
+            (501, 41, "BT-2026-041", "Pose des fermes de toit", "EN_COURS", (-5, -2), (24.0, 20.0), Some(1), "Interne"),
+            (502, 41, "BT-2026-041", "Pontage et membrane", "En attente", (-1, 3), (16.0, 0.0), Some(2), "Interne"),
+            (503, 41, "BT-2026-041", "Bardeaux", "A_FAIRE", (4, 8), (20.0, 0.0), None, "Toitures Exemple"),
+            (504, 41, "BT-2026-041", "Solins et finition", "", (9, 10), (8.0, 0.0), Some(2), "Interne"),
+            (
+                520,
+                42,
+                "BT-2026-042",
+                "Arrachage de l'ancienne couverture",
+                "Termine",
+                (-10, -8),
+                (16.0, 18.0),
+                Some(2),
+                "Interne",
+            ),
+            (
+                521,
+                42,
+                "BT-2026-042",
+                "Pose de la nouvelle couverture",
+                "En cours",
+                (-7, 5),
+                (40.0, 22.0),
+                Some(2),
+                "Interne",
+            ),
+            (522, 42, "BT-2026-042", "Inspection finale", "En attente", (8, 8), (2.0, 0.0), Some(1), "Interne"),
+            (
+                550,
+                45,
+                "BT-2026-045",
+                "Inspection des portes de garage",
+                "En attente",
+                (15, 15),
+                (4.0, 0.0),
+                Some(3),
+                "Interne",
+            ),
+            // Une opération sans date : l'ERP la rend, le planning ne la place nulle part.
+            (551, 45, "BT-2026-045", "Rapport à la municipalité", "En attente", (0, 0), (2.0, 0.0), None, "Interne"),
+        ];
+        ops.into_iter()
+            .enumerate()
+            .map(|(rang, (id, bt, numero, nom, statut, (debut, fin), (prevues, reelles), employe, fournisseur))| {
+                let (debut, fin) =
+                    if id == 551 { (Value::Null, Value::Null) } else { (json!(jour(debut)), json!(jour(fin))) };
+                json!({ "id": id, "formulaire_bt_id": bt, "nom": nom, "description": null, "statut": statut,
+                        "date_debut": debut, "date_fin": fin, "heures_prevues": prevues, "heures_reelles": reelles,
+                        "quantite": 1.0, "employee_id": employe, "fournisseur": fournisseur, "poste_travail": null,
+                        "sequence_number": rang, "bt_numero": numero })
+            })
+            .collect()
+    }
+
+    /// Les statuts d'une liste et combien chacun en compte, comme `suivi_etat_kanban` (vide : « (sans statut) »).
+    fn comptes(l: &[Value]) -> Value {
+        let mut par: serde_json::Map<String, Value> = serde_json::Map::new();
+        for x in l {
+            let s = x["statut"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("(sans statut)");
+            let n = par.get(s).and_then(Value::as_u64).unwrap_or(0) + 1;
+            par.insert(s.to_string(), json!(n));
+        }
+        json!({ "total": l.len(), "par_colonne": par })
+    }
+
+    /// Une lecture du planning, ou `None` : un outil que ce module n'a pas.
+    pub fn lecture(outil: &str, a: &Value) -> Option<String> {
+        let limite = a["limite"].as_u64().unwrap_or(50) as usize;
+        Some(match outil {
+            "lister_bons_travail" => {
+                let bt =
+                    |id: u64, numero: &str, nom: &str, statut: &str, projet: Option<u64>, dates: (i64, i64, i64)| {
+                        json!({ "id": id, "numero_document": numero, "nom": nom, "statut": statut, "priorite": "NORMAL",
+                            "project_id": projet, "montant_total": 4200.0 + id as f64 * 100.0,
+                            "date_echeance": jour(dates.2), "date_debut": jour(dates.0), "date_fin": jour(dates.1),
+                            "date_creation": format!("{}T08:00:00", jour(dates.0 - 7)), "notes": null,
+                            "client_company_id": projet.map(|_| 7), "client_contact_id": null,
+                            "client_nom": projet.map_or("Municipalité Exemple", |_| "Construction Exemple inc.") })
+                    };
+                let l: Vec<Value> = [
+                    bt(45, "BT-2026-045", "Entretien du garage municipal", "BROUILLON", None, (15, 18, 20)),
+                    bt(42, "BT-2026-042", "Réfection de la couverture", "EN_COURS", Some(12), (-10, 8, 8)),
+                    bt(41, "BT-2026-041", "Charpente et toiture", "EN_COURS", Some(14), (-5, 10, 12)),
+                    bt(38, "BT-2026-038", "Fondations et coffrage", "TERMINE", Some(9), (-75, -50, -50)),
+                    bt(30, "BT-2026-030", "Démolition", "ANNULE", Some(14), (-21, -18, -18)),
+                ]
+                .into_iter()
+                .take(limite)
+                .collect();
+                rendu(&format!("{} bon(s) de travail trouve(s):", l.len()), l)
+            }
+            "lister_opportunites" => {
+                let o =
+                    |id: u64, nom: &str, statut: &str, montant: f64, probabilite: u64, cloture: i64, source: &str| {
+                        json!({ "id": id, "nom": nom, "company_id": 7, "contact_id": null, "montant_estime": montant,
+                            "devise": "CAD", "statut": statut, "probabilite": probabilite,
+                            "date_cloture_prevue": jour(cloture), "date_cloture_reelle": null, "source": source,
+                            "campagne": null, "notes": null, "assigned_to": null, "created_by": 1,
+                            "created_at": format!("{}T10:00:00", jour(-30)),
+                            "updated_at": format!("{}T10:00:00", jour(-2)) })
+                    };
+                let l: Vec<Value> = [
+                    o(15, "Agrandissement d'un chalet, lac de l'Essai", "Proposition", 180000.0, 60, 20, "Référence"),
+                    o(14, "Rénovation de cuisine, rue des Exemples", "Qualification", 45000.0, 40, 35, "Site Web"),
+                    o(13, "Toiture commerciale, boulevard de l'Essai", "GAGNE", 385000.0, 100, -5, "Appel d'offres"),
+                    o(12, "Garage double, rang du Modèle", "Proposition", 60000.0, 50, 28, "Salon de l'habitation"),
+                    o(11, "Terrasse, rue de l'Essai", "PERDU", 12000.0, 0, -12, "Site Web"),
+                    o(10, "Sous-sol fini, avenue du Modèle", "Proposition", 180000.0, 55, 45, "Référence"),
+                    o(9, "Véranda, rang de l'Essai", "Qualification", 147500.0, 30, 60, "Site Web"),
+                ]
+                .into_iter()
+                .take(limite)
+                .collect();
+                rendu(&format!("{} opportunite(s) trouvee(s):", l.len()), l)
+            }
+            // Les colonnes et les gardes du serveur, mot pour mot (`_SUIVI_STATUSES`, `_SUIVI_GARDES`) : il ne les lit
+            // dans aucune base.
+            "suivi_colonnes" => serde_json::to_string_pretty(&json!({
+                "projets": { "statuts": ["En attente", "En cours", "Termine", "Annule", "Suspendu"] },
+                "devis": {
+                    "statuts": ["Brouillon", "Valide", "Envoye", "En attente", "Accepte", "Refuse", "Termine", "Annule",
+                                "Expire"],
+                    "garde": "Statut Accepte reserve au module Soumissions (cree le projet + notification).",
+                },
+                "bons_travail": {
+                    "statuts": ["BROUILLON", "EN_COURS", "TERMINE", "EN_PAUSE", "ANNULE"],
+                    "garde": concat!(
+                        "ANNULE interdit via le Kanban ; TERMINE refuse si operations pendantes ; ",
+                        "transitions validees."
+                    ),
+                },
+                "achats": {
+                    "statuts": ["Brouillon", "Envoye", "Confirme", "En cours", "Recu", "Facture", "Annule"],
+                    "garde": "Statuts Recu/Facture reserves au module Magasin (reception de stock).",
+                },
+                "factures": {
+                    "statuts": ["BROUILLON", "ENVOYEE", "PAYEE", "PARTIELLEMENT_PAYEE", "EN_RETARD", "ANNULEE"],
+                    "garde": "Deplacement inter-colonnes desactive (statut pilote par la Comptabilite).",
+                },
+                "operations": {
+                    "statuts": ["En attente", "En cours", "Termine", "Annule"],
+                    "garde": "Statut gere via le Bon de travail / Gantt.",
+                },
+                "operations_sdp": {
+                    "statuts": ["A_DEGAGER", "PRETE", "ENGAGEE", "EN_COURS", "TERMINEE", "ANNULEE"],
+                    "garde": "Machine a etats SDP : A_DEGAGER->PRETE exige 0 contrainte OUVERTE.",
+                },
+                "ventes": {
+                    "statuts": "voir le module CRM (lister_opportunites / creer_opportunite)",
+                    "garde": "Statut d'opportunite gere via le CRM.",
+                },
+            }))
+            .unwrap_or_default(),
+            // Les comptes de chaque tableau, d'accord avec les KPI du faux serveur (14 projets, 38 devis, 44 bons de
+            // travail, 112 factures) et avec ses listes ; les variantes d'un statut comptées à part, comme en base.
+            "suivi_etat_kanban" => {
+                let tableau = |par: Value| {
+                    let total: u64 = par.as_object().map_or(0, |o| o.values().filter_map(Value::as_u64).sum());
+                    json!({ "total": total, "par_colonne": par })
+                };
+                serde_json::to_string_pretty(&json!({
+                    "projets": tableau(json!({ "Termine": 9, "En cours": 2, "EN_COURS": 1, "En attente": 1,
+                                               "Annule": 1 })),
+                    "devis": tableau(json!({ "Accepte": 15, "Refuse": 12, "Expire": 7, "Envoye": 2, "Brouillon": 1,
+                                             "En attente": 1 })),
+                    "bons_travail": tableau(json!({ "TERMINE": 38, "EN_COURS": 3, "ANNULE": 2, "BROUILLON": 1 })),
+                    "achats": tableau(json!({ "commande": 1, "recu": 1 })),
+                    "factures": tableau(json!({ "PAYEE": 110, "ENVOYEE": 2 })),
+                    "operations": comptes(&operations()),
+                    "operations_sdp": tableau(json!({ "A_DEGAGER": 7, "EN_COURS": 3, "TERMINEE": 3 })),
+                    "ventes": tableau(json!({ "GAGNE": 4, "Proposition": 3, "Qualification": 2, "PERDU": 2 })),
+                }))
+                .unwrap_or_default()
+            }
+            "suivi_lister_operations" => {
+                let l: Vec<Value> = operations().into_iter().take(limite.min(500)).collect();
+                serde_json::to_string_pretty(&json!({ "operations": l, "count": l.len() })).unwrap_or_default()
+            }
+            "suivi_lister_dependances_gantt" => {
+                let d = |id: u64, de: (&str, &str), vers: (&str, &str), sorte: &str, decalage: i64| {
+                    json!({ "id": id, "source_type": de.0, "source_id": de.1, "target_type": vers.0,
+                            "target_id": vers.1, "dependency_type": sorte, "lag_days": decalage,
+                            "created_at": format!("{}T09:00:00", jour(-20)) })
+                };
+                let l = vec![
+                    d(1, ("op", "501"), ("op", "502"), "finish_to_start", 0),
+                    d(2, ("op", "502"), ("op", "503"), "finish_to_start", 1),
+                    d(3, ("op", "520"), ("op", "521"), "finish_to_start", 0),
+                    // Deux que le Gantt d'Eve n'a pas : un bon de travail que ses opérations remplacent, et un devis.
+                    d(4, ("bt", "42"), ("bt", "45"), "start_to_start", 7),
+                    d(5, ("devis", "33"), ("project", "16"), "finish_to_start", 0),
+                ];
+                rendu(&format!("{} dependance(s):", l.len()), l)
+            }
+            "suivi_lister_baselines" => {
+                let r = |id: u64, sorte: &str, item: &str, debut: i64, fin: i64| {
+                    json!({ "id": id, "item_type": sorte, "item_id": item, "baseline_start": jour(debut),
+                            "baseline_end": jour(fin), "created_at": format!("{}T09:00:00", jour(-41)) })
+                };
+                let l = vec![r(1, "project", "14", -40, 40), r(2, "op", "503", 2, 6), r(3, "op", "521", -7, 2)];
+                rendu(&format!("{} ligne(s) de base:", l.len()), l)
+            }
+            // Les employés actifs : leur courriel et leur téléphone viennent avec, qu'Eve ne garde pas.
+            "lister_employes" => {
+                let e = |id: u64, prenom: &str, nom: &str, poste: &str| {
+                    json!({ "id": id, "prenom": prenom, "nom": nom,
+                            "email": format!("{}@exemple.ca", prenom.to_lowercase()),
+                            "telephone": format!("555-01{id:02}"), "poste": poste, "departement": "Chantier" })
+                };
+                let l = vec![
+                    e(1, "Alex", "Modèle", "Charpentier"),
+                    e(3, "Kim", "Essai", "Contremaître"),
+                    e(2, "Sam", "Exemple", "Couvreur"),
+                ];
+                rendu(&format!("{} employe(s) trouve(s):", l.len()), l)
+            }
+            _ => return None,
+        })
+    }
+}
+
+// ---- Le planning de la vitrine : le calendrier, le Gantt et le Kanban du tableau de bord -------------------------
+
+/// Les chantiers que le Gantt de la vitrine montre dépliés : l'entrepôt, l'école, les condos.
+static DEPLIES_DE_LA_VITRINE: [&str; 3] = ["projet-135", "projet-133", "projet-137"];
+
+/// Les chantiers du faux Constructo AI, dépliés au Gantt des scènes du planning lu.
+static DEPLIES_DU_FAUX_SERVEUR: [&str; 4] = ["projet-9", "projet-14", "projet-12", "projet-16"];
+
+/// Ce que chaque scène de l'essai du thème montre du planning : l'onglet, le calendrier au mois ou à la semaine, le
+/// Gantt aux semaines ou aux mois et ses chantiers dépliés, le tableau du Kanban ; les autres scènes, le tableau de
+/// bord.
+fn planning_de_la_scene(nom: &str) -> crate::natif::planning::Montre<'static> {
+    use crate::natif::planning::{Montre, Onglet};
+    let deplies = &DEPLIES_DE_LA_VITRINE;
+    let montre = |onglet| Montre { onglet, semaine: false, mois: false, deplies: &[], donnees: false, tableau: "" };
+    match nom {
+        "vitrine-calendrier" | "vitrine-calendrier-etroit" => montre(Onglet::Calendrier),
+        "vitrine-semaine" => Montre { semaine: true, ..montre(Onglet::Calendrier) },
+        "vitrine-gantt" => Montre { deplies, ..montre(Onglet::Gantt) },
+        "vitrine-gantt-mois" => Montre { mois: true, deplies, ..montre(Onglet::Gantt) },
+        "vitrine-gantt-donnees" => Montre { donnees: true, deplies, ..montre(Onglet::Gantt) },
+        "lue-calendrier" => montre(Onglet::Calendrier),
+        "lue-gantt" => Montre { deplies: &DEPLIES_DU_FAUX_SERVEUR, ..montre(Onglet::Gantt) },
+        "lue-kanban" => Montre { tableau: "projets", ..montre(Onglet::Kanban) },
+        "lue-operations" => Montre { tableau: "operations", ..montre(Onglet::Kanban) },
+        "vitrine-kanban" | "vitrine-kanban-etroit" => Montre { tableau: "soumissions", ..montre(Onglet::Kanban) },
+        "vitrine-operations" => Montre { tableau: "operations", ..montre(Onglet::Kanban) },
+        "vitrine-gantt-etroit" => Montre { deplies: &deplies[..1], ..montre(Onglet::Gantt) },
+        "planning-non-relie" | "planning-famille" => montre(Onglet::Gantt),
+        "planning-lecture" | "planning-vide" => montre(Onglet::Kanban),
+        _ => montre(Onglet::Tableau),
+    }
+}
+
+/// Où défile la page d'une scène de la vitrine qui montre une vue du planning : sous la bannière, qui sort de la vue
+/// (le mois, le Gantt et le Kanban y tiennent avec leur légende) ; `None` ailleurs.
+fn defilement_du_planning(nom: &str) -> Option<f32> {
+    let planning = planning_de_la_scene(nom).onglet != crate::natif::planning::Onglet::Tableau;
+    let defile = nom.starts_with("vitrine-") || nom.starts_with("lue-");
+    (defile && planning).then(|| if nom.ends_with("etroit") { 214.0 } else { 232.0 })
+}
+
+impl EtatDuTheme {
+    /// Le planning d'une scène, imposé aux vues du tableau de bord : celui de la vitrine (sa journée), celui des états
+    /// du planning hors de la vitrine (le jour de l'essai) ; aucun ailleurs (le centre reprend la main). Une scène des
+    /// états du planning se prépare ici toute entière — la liaison, l'entreprise, la vue — et rend vrai.
+    fn scene_du_planning(&mut self, nom: &str) -> bool {
+        use crate::natif::planning::imposer;
+        if nom.starts_with("vitrine-") {
+            imposer(self.vitrine.as_ref().map(|v| planning_invente(v.jour, true)));
+            return false;
+        }
+        if !nom.starts_with("planning-") {
+            imposer(None);
+            return false;
+        }
+        crate::journal::regler_l_horloge(None);
+        en_ligne_inventes(EnLigne::Ordinaire);
+        self.ecrire_les_rappels(None);
+        let jour = crate::centre::numero_du_jour(&crate::journal::date()).unwrap_or(0);
+        let mut p = planning_invente(jour, true);
+        let (vue, liaison, entreprise) = match nom {
+            "planning-non-relie" => ("tout", "deconnectee", entreprise_inventee("non_connecte", 0, None, false)),
+            "planning-lecture" => ("entreprise", "connectee", entreprise_inventee("en_cours", 0, None, false)),
+            "planning-famille" => ("famille", "connectee", entreprise_inventee("a_jour", 4 * 60, None, true)),
+            _ => ("entreprise", "connectee", entreprise_inventee("a_jour", 4 * 60, None, true)),
+        };
+        match nom {
+            // Pas reliée, pas encore lue : la maison seule.
+            "planning-non-relie" | "planning-lecture" => p = planning_invente(jour, false),
+            // Lue, mais aucun tableau de suivi : de quoi le dire.
+            "planning-vide" => p.tableaux.clear(),
+            _ => {}
+        }
+        imposer(Some(p));
+        self.vue = vue.into();
+        self.relier(liaison);
+        self.ecrire_l_entreprise(Some(entreprise));
+        self.lecture_finie_a = None;
+        self.emotion = None;
+        self.accord = Value::Null;
+        self.prete();
+        true
+    }
+}
+
+/// Le planning inventé de la vitrine, autour du jour `jour` (un vendredi dans la vitrine), qui se tient avec le reste
+/// de ses captures : ses neuf chantiers à Lévis (les mêmes que la carte des chantiers, leurs fins aussi), leurs
+/// opérations, ce qui glisse et ce qui attend ; l'agenda de l'entreprise, ses livraisons et ses factures (les six en
+/// retard de la carte, puis celles qui viennent) ; la maison — le hockey de Félix, la danse de Rosalie, la journée
+/// pédagogique, le vaccin, la rencontre de parents, le rappel du hockey ; et les tableaux du suivi : les chantiers, les
+/// soumissions (celles de la carte, chacune dans sa colonne), les bons de travail, les opérations, les ventes (les
+/// étapes du pipeline). Comme l'ERP les donne : ses statuts et ses règles sans accents (« Termine », « Statut gere via
+/// le Bon de travail »), des ids communs au Gantt et au Kanban (« projet-137 », « op-1373 », « devis-214 »), chaque
+/// chose sa source et son numéro. Personne de vrai. `entreprise` faux : la maison seule (pas reliée, pas encore lue).
+fn planning_invente(jour: i64, entreprise: bool) -> crate::planning::Planning {
+    use crate::planning::{Carte, Colonne, Cote, Dependance, Planning, Sorte, Tableau, Tache};
+    let d = |k: i64| crate::centre::date_du_numero(jour + k);
+    // Le constructeur du planning (son `id` compris), sans source : les vues la font dire au besoin.
+    let evenement = |k: i64, fin: Option<i64>, heure: Option<&str>, titre: &str, detail: &str, sorte, cote| {
+        let quand = (d(k), fin.map(d));
+        let quand = (quand.0.as_str(), quand.1.as_deref(), heure);
+        crate::planning::evenement(quand, titre.into(), detail.into(), (sorte, cote), String::new())
+            .expect("un événement de la vitrine se place")
+    };
+    let mut evenements = Vec::new();
+    // La maison : le hockey (le mardi, et la partie de ce vendredi), la danse du samedi, l'école, le CLSC, le rappel.
+    let famille = |k, heure: Option<&str>, titre: &str, detail: &str, sorte| {
+        evenement(k, None, heure, titre, detail, sorte, Cote::Famille)
+    };
+    for semaine in -5..=3 {
+        let mardi = semaine * 7 - 3;
+        let pratique = "Pratique de hockey de Félix";
+        evenements.push(famille(mardi, Some("18:00"), pratique, "Aréna de Lévis", Sorte::RendezVous));
+        let samedi = semaine * 7 + 1;
+        evenements.push(famille(
+            samedi,
+            Some("09:00"),
+            "Cours de danse de Rosalie",
+            "Studio de danse",
+            Sorte::RendezVous,
+        ));
+    }
+    evenements.push(famille(0, Some("17:00"), "Le hockey de Félix", "Rappel d'Eve", Sorte::Rappel));
+    evenements.push(famille(0, Some("17:30"), "Partie de hockey de Félix", "Aréna de Lévis", Sorte::RendezVous));
+    evenements.push(famille(1, Some("17:00"), "Tournée d'Halloween avec les enfants", "", Sorte::RendezVous));
+    evenements.push(famille(-22, None, "Sortie au verger, 1re année", "Apporter un lunch", Sorte::Ecole));
+    evenements.push(famille(3, None, "Journée pédagogique · pas d'école", "Service de garde ouvert", Sorte::Ecole));
+    evenements.push(famille(12, Some("10:15"), "Vaccin des 4 ans de Rosalie", "CLSC", Sorte::Echeance));
+    evenements.push(famille(20, Some("18:30"), "Rencontre de parents, 1re année", "École des Sentiers", Sorte::Ecole));
+    evenements.push(famille(35, None, "Anniversaire d'Émilie", "", Sorte::Anniversaire));
+    evenements.push(famille(46, None, "Acompte provisionnel", "Revenu Québec et l'ARC", Sorte::Echeance));
+    if entreprise {
+        let affaires = |k, fin, heure: Option<&str>, titre: &str, detail: &str, sorte| {
+            evenement(k, fin, heure, titre, detail, sorte, Cote::Entreprise)
+        };
+        // L'agenda de l'entreprise : la réunion de sécurité du lundi, la réunion de chantier du vendredi, la semaine.
+        for semaine in -4..=1 {
+            let lundi = semaine * 7 - 4;
+            let securite = "Réunion de sécurité";
+            evenements.push(affaires(lundi, None, Some("06:45"), securite, "Tous les chantiers", Sorte::RendezVous));
+            let detail = "Condos Le Riveneuve, 24 unités";
+            evenements.push(affaires(
+                semaine * 7,
+                None,
+                Some("07:00"),
+                "Réunion de chantier",
+                detail,
+                Sorte::RendezVous,
+            ));
+        }
+        let inspecteur = "Visite de l'inspecteur";
+        let detail = "École des Sentiers-Fleuris · le coupe-feu du local technique à corriger";
+        evenements.push(affaires(-3, None, Some("10:00"), inspecteur, detail, Sorte::Note));
+        let presentation = "Présentation de la soumission";
+        evenements.push(affaires(-1, None, Some("14:00"), presentation, "CPE Les Mésangeais", Sorte::RendezVous));
+        let banque = "Appel avec la banque : la marge de crédit";
+        evenements.push(affaires(0, None, Some("09:30"), banque, "Caisse Exemple", Sorte::RendezVous));
+        let architecte = "Rencontre avec l'architecte";
+        evenements.push(affaires(0, None, Some("15:30"), architecte, "Résidence Belleau", Sorte::RendezVous));
+        let coordination = "Réunion de coordination";
+        evenements.push(affaires(0, None, Some("16:00"), coordination, "Entrepôt Giguère-Dumont", Sorte::RendezVous));
+        let inspection = "Inspection municipale";
+        evenements.push(affaires(4, None, Some("10:00"), inspection, "Clinique médicale des Méandres", Sorte::Note));
+        evenements.push(affaires(-9, None, None, "Visite du client", "Entrepôt Giguère-Dumont", Sorte::Note));
+        // Les chantiers qui commencent ou finissent, des opérations de quelques jours.
+        let debut = "Début du chantier : rénovation d'un triplex";
+        evenements.push(affaires(-17, None, None, debut, "Immeubles Carrier-Dion", Sorte::Chantier));
+        let fin = "Fin du chantier : Atelier Sorbier";
+        evenements.push(affaires(9, None, None, fin, "Aménagement commercial", Sorte::Chantier));
+        let fin = "Fin du chantier : toiture Usinage Vermeil";
+        evenements.push(affaires(21, None, None, fin, "Toiture industrielle", Sorte::Chantier));
+        let operation = |de, a, titre: &str, detail: &str| affaires(de, Some(a), None, titre, detail, Sorte::Operation);
+        evenements.push(operation(3, 7, "Coupe-feu du local technique", "École des Sentiers-Fleuris"));
+        evenements.push(operation(3, 9, "Peinture et finitions", "Atelier Sorbier"));
+        evenements.push(operation(-4, 14, "Plomberie", "Rénovation d'un triplex"));
+        evenements.push(operation(-17, -7, "Démolition", "Rénovation d'un triplex"));
+        evenements.push(operation(-25, -7, "Fenestration", "Clinique médicale des Méandres"));
+        evenements.push(operation(17, 21, "Solins et inspection", "Usinage Vermeil"));
+        let coulee = "Coulée de la dalle du gymnase";
+        evenements.push(affaires(6, None, Some("06:30"), coulee, "École des Sentiers-Fleuris", Sorte::Operation));
+        // Les livraisons : celles de la carte des commandes, et trois de ce mois-ci.
+        let livraison = |k, heure, titre: &str, detail: &str, numero: &str| {
+            let mut e = affaires(k, None, Some(heure), titre, detail, Sorte::Livraison);
+            e.source = format!("la livraison {numero} dans Constructo AI : {titre} ({detail})");
+            e
+        };
+        evenements.push(livraison(3, "08:00", "Fermes de toit", "Entrepôt Giguère-Dumont", "LIV-2026-0439"));
+        evenements.push(livraison(6, "06:30", "Béton 32 MPa, 48 m³", "École des Sentiers-Fleuris", "LIV-2026-0442"));
+        evenements.push(livraison(7, "07:30", "Portes et fenêtres, 3e étage", "Condos Le Riveneuve", "LIV-2026-0445"));
+        evenements.push(livraison(-2, "07:30", "Gypse, 3e étage", "Condos Le Riveneuve", "LIV-2026-0436"));
+        evenements.push(livraison(-9, "07:00", "Acier de structure", "Entrepôt Giguère-Dumont", "LIV-2026-0421"));
+        evenements.push(livraison(-16, "08:00", "Membrane de toiture", "Usinage Vermeil", "LIV-2026-0417"));
+        // Les factures : les six en retard de la carte (leur échéance), puis celles qui viennent.
+        let facture = |k: i64, numero: &str, client: &str, solde: f64| {
+            let montant = format!("{}\u{a0}$", crate::centre::milliers(solde));
+            let titre = format!("Facture · {}", client.trim_end_matches(" inc."));
+            let mut e = affaires(k, None, None, &titre, &format!("{numero} · {montant}"), Sorte::Facture);
+            e.source = format!("la facture {numero} de {client}, {montant}, échéance le {}", d(k));
+            e
+        };
+        for (numero, client, solde, jours) in RETARDS_DE_LA_VITRINE {
+            evenements.push(facture(-jours, numero, client, solde));
+        }
+        evenements.push(facture(3, "F-2026-0446", "Développements Riveneuve inc.", 186_200.0));
+        evenements.push(facture(14, "F-2026-0449", "Centre de services scolaire des Deux-Lacs", 312_400.0));
+        evenements.push(facture(20, "F-2026-0452", "Famille Belleau", 48_300.0));
+    }
+    for e in &mut evenements {
+        if e.source.is_empty() {
+            let detail = if e.detail.is_empty() { String::new() } else { format!(" ({})", e.detail) };
+            e.source = format!("{}{detail}, le {}", e.titre, e.debut);
+        }
+    }
+    if !entreprise {
+        return Planning { evenements, ..Planning::default() };
+    }
+    // Le Gantt : chaque chantier de la carte (ses jours, son avancement), puis ses opérations — leurs jours, leur
+    // statut, leur avancement, leur référence quand elles glissent, leurs responsables.
+    struct Op {
+        titre: &'static str,
+        de: i64,
+        a: i64,
+        statut: &'static str,
+        fait: Option<f32>,
+        prevu: Option<(i64, i64)>,
+        qui: &'static [&'static str],
+    }
+    let op = |titre, de, a, statut, fait: Option<f32>, qui| Op { titre, de, a, statut, fait, prevu: None, qui };
+    let fini = |titre, de, a, qui| op(titre, de, a, "Termine", Some(1.0), qui);
+    let prevue = |titre, de, a, qui| op(titre, de, a, "Planifie", None, qui);
+    let chantiers: [(&str, i64, f32, Vec<Op>); 9] = [
+        (
+            "PROJ-2026-00137",
+            -179,
+            0.34,
+            vec![
+                fini("Excavation et fondations", -179, -126, &["Alexis Tremblay"]),
+                fini("Structure de béton", -123, -42, &["Alexis Tremblay"]),
+                op("Charpente et toiture", -39, 28, "En cours", Some(0.55), &["Alexis Tremblay", "Guillaume Côté"]),
+                prevue("Portes et fenêtres", 7, 42, &["Guillaume Côté"]),
+                prevue("Mécanique et électricité", 17, 119, &["Kevin Simard"]),
+                prevue("Finition intérieure", 73, 210, &[]),
+            ],
+        ),
+        (
+            "PROJ-2026-00135",
+            -74,
+            0.48,
+            vec![
+                fini("Fondations", -74, -35, &["Maxime Ouellet"]),
+                Op {
+                    prevu: Some((-32, -7)),
+                    ..op("Structure d'acier", -32, 0, "En cours", Some(0.85), &["Maxime Ouellet"])
+                },
+                Op { prevu: Some((-4, 21)), ..prevue("Fermes de toit et couverture", 3, 28, &["Maxime Ouellet"]) },
+                prevue("Enveloppe du bâtiment", 31, 54, &["David Thibodeau"]),
+                prevue("Dalle et finitions", 66, 97, &[]),
+            ],
+        ),
+        (
+            "PROJ-2026-00133",
+            -116,
+            0.6,
+            vec![
+                fini("Démolition et excavation", -116, -84, &["Benoît Lachance"]),
+                fini("Fondations", -81, -49, &["Benoît Lachance"]),
+                op("Structure et murs", -46, 0, "En cours", Some(0.9), &["Benoît Lachance", "Émile Gauthier"]),
+                op("Coupe-feu du local technique", 3, 7, "En attente", None, &["Émile Gauthier"]),
+                prevue("Coulée de la dalle du gymnase", 6, 6, &["Benoît Lachance"]),
+                prevue("Toiture", 10, 35, &[]),
+                prevue("Finitions", 38, 84, &[]),
+            ],
+        ),
+        (
+            "PROJ-2026-00130",
+            -110,
+            0.7,
+            vec![
+                fini("Fenestration", -25, -7, &["Olivier Martel"]),
+                op("Mécanique du bâtiment", -11, 21, "En cours", Some(0.4), &["Kevin Simard"]),
+                prevue("Inspection municipale", 4, 4, &["Olivier Martel"]),
+                prevue("Finitions intérieures", 24, 62, &[]),
+            ],
+        ),
+        (
+            "PROJ-2026-00127",
+            -46,
+            0.15,
+            vec![
+                op("Plans et permis", -46, 0, "En cours", Some(0.75), &["Sam"]),
+                prevue("Fondations", 17, 42, &[]),
+                prevue("Charpente", 45, 100, &[]),
+            ],
+        ),
+        (
+            "PROJ-2026-00126",
+            -25,
+            0.6,
+            vec![
+                fini("Démontage de l'ancienne membrane", -25, -14, &["Jonathan Pelletier"]),
+                op("Pose de la membrane", -11, 14, "En cours", Some(0.6), &["Jonathan Pelletier"]),
+                prevue("Solins et inspection", 17, 21, &[]),
+            ],
+        ),
+        (
+            "PROJ-2026-00121",
+            -32,
+            0.82,
+            vec![
+                fini("Cloisons et plafonds", -32, -14, &["Steve Boucher"]),
+                op("Électricité", -18, 0, "En cours", Some(0.95), &["Kevin Simard"]),
+                prevue("Peinture et finitions", 3, 9, &["Steve Boucher"]),
+            ],
+        ),
+        (
+            "PROJ-2026-00118",
+            -17,
+            0.28,
+            vec![
+                fini("Démolition", -17, -7, &["Tommy Bélanger"]),
+                Op { prevu: Some((-11, 7)), ..op("Plomberie", -4, 14, "En cours", Some(0.2), &["Tommy Bélanger"]) },
+                prevue("Gypse et joints", 17, 35, &[]),
+                prevue("Finitions", 38, 46, &[]),
+            ],
+        ),
+        (
+            "PROJ-2026-00109",
+            -17,
+            0.3,
+            vec![
+                fini("Dalle de béton", -17, -7, &["William Morin"]),
+                op("Structure", -4, 28, "En cours", Some(0.25), &["William Morin"]),
+                prevue("Portes de garage", 31, 49, &[]),
+                prevue("Mise en service", 63, 68, &[]),
+            ],
+        ),
+    ];
+    let mut taches = Vec::new();
+    // Les opérations au travail ou qui viennent : le tableau des opérations du Kanban.
+    let mut operations: Vec<(String, String, String, &'static str, i64, Vec<String>)> = Vec::new();
+    for (numero, debut, fait, ops) in chantiers {
+        let Some((_, nom, client, _, fin)) = CHANTIERS_DE_LA_VITRINE.iter().find(|c| c.0 == numero) else { continue };
+        let court = numero_court(numero);
+        taches.push(Tache {
+            id: format!("projet-{court}"),
+            parent: None,
+            titre: (*nom).into(),
+            debut: d(debut),
+            fin: d(*fin),
+            avancement: Some(fait),
+            statut: "En cours".into(),
+            prevu: None,
+            responsables: Vec::new(),
+            source: format!("le projet {numero} ({nom}, {client}) dans Constructo AI"),
+        });
+        for (k, o) in ops.into_iter().enumerate() {
+            let id = format!("op-{court}{}", k + 1);
+            let qui: Vec<String> = o.qui.iter().map(|q| q.to_string()).collect();
+            if o.a >= -7 && o.de <= 14 {
+                operations.push((id.clone(), o.titre.into(), (*nom).into(), o.statut, o.a, qui.clone()));
+            }
+            taches.push(Tache {
+                id,
+                parent: Some(format!("projet-{court}")),
+                titre: o.titre.into(),
+                debut: d(o.de),
+                fin: d(o.a),
+                avancement: o.fait,
+                statut: o.statut.into(),
+                prevu: o.prevu.map(|(de, a)| (d(de), d(a))),
+                responsables: qui,
+                source: format!("l'opération « {} » du projet {numero} ({nom})", o.titre),
+            });
+        }
+    }
+    let fs = |de: &str, vers: &str| Dependance { de: de.into(), vers: vers.into(), sorte: "FS".into(), decalage: 0 };
+    let dependances = vec![
+        fs("op-1352", "op-1353"),
+        fs("op-1353", "op-1354"),
+        fs("op-1333", "op-1335"),
+        fs("op-1335", "op-1336"),
+        Dependance { sorte: "SS".into(), ..fs("op-1373", "op-1374") },
+        fs("op-1262", "op-1263"),
+        fs("op-1212", "op-1213"),
+        fs("op-1182", "op-1183"),
+        fs("op-1091", "op-1092"),
+    ];
+    // Les tableaux du suivi : chaque colonne, son statut, son titre (ceux de l'ERP, sans accents), ce que l'ERP y
+    // compte, ses cartes lues.
+    let carte =
+        |id: &str, titre: &str, detail: &str, montant: Option<f64>, echeance: Option<i64>, qui: &[&str]| Carte {
+            id: id.into(),
+            titre: titre.into(),
+            detail: detail.into(),
+            montant,
+            echeance: echeance.map(d),
+            responsables: qui.iter().map(|q| q.to_string()).collect(),
+            source: format!("{id} dans Constructo AI : {titre} ({detail})"),
+        };
+    let colonne = |statut: &str, titre: &str, total: usize, cartes: Vec<Carte>| Colonne {
+        statut: statut.into(),
+        titre: titre.into(),
+        total: total.max(cartes.len()),
+        cartes,
+    };
+    let soumission = |numero: &str, echeance: i64| {
+        let s = SOUMISSIONS_DE_LA_VITRINE.iter().find(|s| s.0 == numero).copied();
+        let (_, nom, client, _, valeur, _, _) = s.unwrap_or(("", "", "", "", 0.0, 0, 0));
+        let mut c =
+            carte(&format!("devis-{}", numero_court(numero)), nom, client, Some(valeur), Some(echeance), &["Sam"]);
+        c.source = format!("la soumission {numero} dans Constructo AI : {nom} ({client})");
+        c
+    };
+    let chantier = |numero: &str, nom: &str, client: &str, valeur: f64, fin: Option<i64>, qui: &[&str]| {
+        let mut c = carte(&format!("projet-{}", numero_court(numero)), nom, client, Some(valeur), fin, qui);
+        c.source = format!("le projet {numero} dans Constructo AI : {nom} ({client})");
+        c
+    };
+    let projets = Tableau {
+        cle: "chantiers".into(),
+        titre: "Chantiers".into(),
+        colonnes: vec![
+            colonne(
+                "PLANIFIE",
+                "Planifie",
+                1,
+                vec![chantier(
+                    "PROJ-2026-00141",
+                    "Centre de la petite enfance, 80 places",
+                    "CPE Les Mésangeais",
+                    1_450_000.0,
+                    Some(73),
+                    &["Sam"],
+                )],
+            ),
+            colonne(
+                "EN_COURS",
+                "En cours",
+                CHANTIERS_DE_LA_VITRINE.len(),
+                CHANTIERS_DE_LA_VITRINE
+                    .iter()
+                    .map(|(numero, nom, client, valeur, fin)| {
+                        chantier(numero, nom, client, *valeur, Some(*fin), &["Alexis Tremblay"])
+                    })
+                    .collect(),
+            ),
+            colonne("SUSPENDU", "Suspendu", 0, Vec::new()),
+            colonne(
+                "TERMINE",
+                "Termine",
+                37,
+                vec![
+                    chantier(
+                        "PROJ-2026-00104",
+                        "Rénovation de bureaux, 2e étage",
+                        "Gestion Valcourt-Bédard inc.",
+                        395_000.0,
+                        None,
+                        &[],
+                    ),
+                    chantier("PROJ-2026-00098", "Garage municipal", "Ville de Lévis", 1_120_000.0, None, &[]),
+                ],
+            ),
+        ],
+        garde: None,
+    };
+    // Une soumission décidée, acceptée ou refusée.
+    let decidee = |numero: &str, nom: &str, client: &str, valeur: f64| {
+        let mut c = carte(&format!("devis-{}", numero_court(numero)), nom, client, Some(valeur), None, &["Sam"]);
+        c.source = format!("la soumission {numero} dans Constructo AI : {nom} ({client})");
+        c
+    };
+    let soumissions = Tableau {
+        cle: "soumissions".into(),
+        titre: "Soumissions".into(),
+        colonnes: vec![
+            colonne("BROUILLON", "Brouillon", 1, vec![soumission("DEV-2026-0219", 12)]),
+            colonne("VALIDE", "Valide", 1, vec![soumission("DEV-2026-0216", 9)]),
+            colonne(
+                "ENVOYE",
+                "Envoye",
+                6,
+                vec![
+                    soumission("DEV-2026-0214", 6),
+                    soumission("DEV-2026-0211", 15),
+                    soumission("DEV-2026-0205", 20),
+                    soumission("DEV-2026-0198", 4),
+                    soumission("DEV-2026-0192", 11),
+                    soumission("DEV-2026-0185", 25),
+                ],
+            ),
+            colonne(
+                "EN_ATTENTE",
+                "En attente",
+                5,
+                vec![
+                    soumission("DEV-2026-0208", 2),
+                    soumission("DEV-2026-0201", 8),
+                    soumission("DEV-2026-0196", 13),
+                    soumission("DEV-2026-0189", 1),
+                    soumission("DEV-2026-0181", -3),
+                ],
+            ),
+            colonne(
+                "ACCEPTE",
+                "Accepte",
+                14,
+                vec![
+                    decidee(
+                        "DEV-2026-0177",
+                        "Agrandissement de l'école des Sentiers-Fleuris",
+                        "Centre de services scolaire des Deux-Lacs",
+                        2_650_000.0,
+                    ),
+                    decidee(
+                        "DEV-2026-0170",
+                        "Clinique médicale des Méandres",
+                        "Groupe médical des Méandres",
+                        1_480_000.0,
+                    ),
+                    decidee("DEV-2026-0166", "Résidence Belleau", "Famille Belleau", 865_000.0),
+                ],
+            ),
+            colonne(
+                "REFUSE",
+                "Refuse",
+                9,
+                vec![
+                    decidee("DEV-2026-0173", "Centre sportif, phase 1", "Ville de Lévis", 3_900_000.0),
+                    decidee("DEV-2026-0161", "Rénovation d'une église", "Fabrique Saint-Exemple", 740_000.0),
+                ],
+            ),
+        ],
+        garde: None,
+    };
+    let bon = |numero: u32, titre: &str, chantier: &str, echeance: Option<i64>, qui: &[&str]| {
+        let mut c = carte(&format!("bt-{numero}"), titre, chantier, None, echeance, qui);
+        c.source = format!("le bon de travail BT-2026-0{numero} dans Constructo AI : {titre} ({chantier})");
+        c
+    };
+    let bons = Tableau {
+        cle: "bons-de-travail".into(),
+        titre: "Bons de travail".into(),
+        colonnes: vec![
+            colonne(
+                "A_PLANIFIER",
+                "A planifier",
+                3,
+                vec![
+                    bon(631, "Solins et inspection", "Toiture industrielle, Usinage Vermeil", Some(17), &[]),
+                    bon(629, "Gypse et joints", "Rénovation d'un triplex", Some(17), &[]),
+                    bon(627, "Portes de garage", "Garage d'entretien, Excavation Poulin-Roy", Some(31), &[]),
+                ],
+            ),
+            colonne(
+                "PLANIFIE",
+                "Planifie",
+                4,
+                vec![
+                    bon(
+                        624,
+                        "Coulée de la dalle du gymnase",
+                        "Agrandissement de l'école des Sentiers-Fleuris",
+                        Some(6),
+                        &["Benoît Lachance"],
+                    ),
+                    bon(
+                        622,
+                        "Fermes de toit et couverture",
+                        "Entrepôt Giguère-Dumont, 3 400 m²",
+                        Some(3),
+                        &["Maxime Ouellet"],
+                    ),
+                    bon(
+                        620,
+                        "Peinture et finitions",
+                        "Aménagement commercial, Atelier Sorbier",
+                        Some(3),
+                        &["Steve Boucher"],
+                    ),
+                    bon(618, "Inspection municipale", "Clinique médicale des Méandres", Some(4), &["Olivier Martel"]),
+                ],
+            ),
+            colonne(
+                "EN_COURS",
+                "En cours",
+                6,
+                vec![
+                    bon(
+                        612,
+                        "Coupe-feu du local technique",
+                        "École des Sentiers-Fleuris · à corriger avant de fermer les murs",
+                        Some(3),
+                        &["Émile Gauthier"],
+                    ),
+                    bon(
+                        609,
+                        "Structure d'acier",
+                        "Entrepôt Giguère-Dumont, 3 400 m²",
+                        Some(0),
+                        &["Maxime Ouellet", "David Thibodeau"],
+                    ),
+                    bon(
+                        606,
+                        "Charpente et toiture",
+                        "Condos Le Riveneuve, 24 unités",
+                        Some(28),
+                        &["Alexis Tremblay", "Guillaume Côté"],
+                    ),
+                    bon(603, "Plomberie", "Rénovation d'un triplex", Some(14), &["Tommy Bélanger"]),
+                ],
+            ),
+            colonne(
+                "TERMINE",
+                "Termine",
+                28,
+                vec![
+                    bon(598, "Électricité", "Aménagement commercial, Atelier Sorbier", None, &["Kevin Simard"]),
+                    bon(594, "Fenestration", "Clinique médicale des Méandres", None, &["Olivier Martel"]),
+                ],
+            ),
+        ],
+        garde: None,
+    };
+    // Les opérations du suivi, colonne par colonne selon leur statut (comme le dit leur bon de travail).
+    let du_statut = |statut: &str| -> Vec<Carte> {
+        operations
+            .iter()
+            .filter(|o| o.3 == statut)
+            .map(|(id, titre, chantier, _, fin, qui)| {
+                let qui: Vec<&str> = qui.iter().map(String::as_str).collect();
+                let mut c = carte(id, titre, chantier, None, Some(*fin), &qui);
+                c.source = format!("l'opération « {titre} » ({id}) du chantier {chantier}");
+                c
+            })
+            .collect()
+    };
+    let suivi = Tableau {
+        cle: "operations".into(),
+        titre: "Opérations".into(),
+        colonnes: vec![
+            colonne("PLANIFIE", "Planifie", 12, du_statut("Planifie")),
+            colonne("EN_COURS", "En cours", 8, du_statut("En cours")),
+            colonne("EN_ATTENTE", "En attente", 1, du_statut("En attente")),
+            colonne("TERMINE", "Termine", 41, du_statut("Termine")),
+        ],
+        garde: Some("Statut gere via le Bon de travail".into()),
+    };
+    let vente = |numero: u32, titre: &str, client: &str, valeur: f64| {
+        let mut c = carte(&format!("opportunite-{numero}"), titre, client, Some(valeur), None, &["Sam"]);
+        c.source = format!("l'opportunité OPP-2026-{numero} dans Constructo AI : {titre} ({client})");
+        c
+    };
+    let ventes = Tableau {
+        cle: "ventes".into(),
+        titre: "Ventes".into(),
+        colonnes: PIPELINE_DE_LA_VITRINE
+            .iter()
+            .map(|(etape, nombre, _)| {
+                let cartes = match *etape {
+                    "Proposition" => vec![
+                        vente(118, "Immeuble de 12 logements", "Habitations Lagacé-Roy inc.", 2_180_000.0),
+                        vente(115, "Entrepôt frigorifique", "Distribution Côté-Morin inc.", 1_960_000.0),
+                    ],
+                    "Qualification" => {
+                        vec![vente(121, "Usine de transformation", "Aliments Exemple inc.", 1_800_000.0)]
+                    }
+                    "Prospection" => vec![vente(124, "Centre communautaire", "Ville de Lévis", 1_100_000.0)],
+                    _ => vec![vente(109, "Agrandissement d'usine, 2 200 m²", "Usinage Vermeil inc.", 2_450_000.0)],
+                };
+                colonne(&eve::parole::normaliser(etape).to_uppercase(), etape, *nombre as usize, cartes)
+            })
+            .collect(),
+        garde: None,
+    };
+    Planning {
+        evenements,
+        taches,
+        dependances,
+        tableaux: vec![projets, soumissions, bons, suivi, ventes],
+        lu: format!("{} 16:40", d(0)),
+    }
+}
+
+/// Le numéro court d'une chose de l'ERP, celui de ses ids : « PROJ-2026-00137 » → « 137 », « DEV-2026-0214 » → « 214 ».
+fn numero_court(numero: &str) -> String {
+    let fin = numero.rsplit('-').next().unwrap_or(numero).trim_start_matches('0');
+    if fin.is_empty() { "0".into() } else { fin.into() }
+}
+
+#[cfg(test)]
+mod essais_du_planning_de_la_vitrine {
+    use super::*;
+
+    /// Le planning de la vitrine se tient avec le reste de ses captures : ses chantiers sont ceux de la carte (leurs
+    /// fins aussi), chaque opération a son chantier, chaque dépendance ses deux tâches, chaque soumission de la carte
+    /// sa colonne ; ses factures en retard sont celles de la carte, et la coulée de la dalle est jeudi prochain.
+    #[test]
+    fn il_se_tient_avec_la_vitrine() {
+        let jour = crate::centre::numero_du_jour(JOUR_DE_LA_VITRINE).unwrap();
+        let p = planning_invente(jour, true);
+        let chantiers: Vec<&crate::planning::Tache> = p.taches.iter().filter(|t| t.parent.is_none()).collect();
+        assert_eq!(chantiers.len(), CHANTIERS_DE_LA_VITRINE.len());
+        for (numero, _, _, _, fin) in CHANTIERS_DE_LA_VITRINE {
+            let id = format!("projet-{}", numero_court(numero));
+            let t = chantiers.iter().find(|t| t.id == id).expect("chaque chantier de la carte");
+            assert_eq!(t.fin, crate::centre::date_du_numero(jour + fin), "{numero} finit comme sur la carte");
+            assert!(t.source.contains(numero), "la source dit son numéro dans l'ERP");
+        }
+        for t in p.taches.iter().filter(|t| t.parent.is_some()) {
+            assert!(chantiers.iter().any(|c| Some(&c.id) == t.parent.as_ref()), "{} a son chantier", t.id);
+            assert!(t.debut <= t.fin, "{}", t.id);
+        }
+        // Dans l'ordre d'affichage : chaque chantier, puis les siennes.
+        let mut parent = None;
+        for t in &p.taches {
+            match &t.parent {
+                None => parent = Some(&t.id),
+                Some(x) => assert_eq!(Some(x), parent, "{} suit son chantier", t.id),
+            }
+        }
+        for dep in &p.dependances {
+            assert!(p.taches.iter().any(|t| t.id == dep.de) && p.taches.iter().any(|t| t.id == dep.vers), "{dep:?}");
+        }
+        let soumissions = p.tableaux.iter().find(|t| t.cle == "soumissions").unwrap();
+        for (numero, _, _, statut, _, _, _) in SOUMISSIONS_DE_LA_VITRINE {
+            let id = format!("devis-{}", numero_court(numero));
+            let colonne = soumissions.colonnes.iter().find(|c| c.cartes.iter().any(|x| x.id == id));
+            let colonne = colonne.unwrap_or_else(|| panic!("{numero} dans une colonne"));
+            assert_eq!(eve::parole::normaliser(&colonne.statut), eve::parole::normaliser(statut));
+        }
+        let operations = p.tableaux.iter().find(|t| t.cle == "operations").unwrap();
+        for c in operations.colonnes.iter().flat_map(|c| &c.cartes) {
+            assert!(p.taches.iter().any(|t| t.id == c.id), "{} : la même id au Gantt et au Kanban", c.id);
+        }
+        for (numero, ..) in RETARDS_DE_LA_VITRINE {
+            assert!(p.evenements.iter().any(|e| e.detail.starts_with(numero)), "{numero} au calendrier");
+        }
+        let coulee = p.evenements.iter().find(|e| e.titre.starts_with("Coulée")).unwrap();
+        assert_eq!(crate::ambiance::date_longue(&coulee.debut).get(..5), Some("JEUDI"));
+        assert!(!p.lu.is_empty());
+        let maison = planning_invente(jour, false);
+        assert!(maison.taches.is_empty() && maison.tableaux.is_empty() && maison.lu.is_empty());
+        assert!(maison.evenements.iter().all(|e| e.cote == crate::planning::Cote::Famille));
+        assert_eq!(numero_court("PROJ-2026-00137"), "137");
+        assert_eq!(numero_court("DEV-2026-0214"), "214");
+    }
 }

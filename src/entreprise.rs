@@ -5,9 +5,15 @@
 //! elle n'appelle que les outils nommés un à un dans [`OUTILS_LUS`], que la garde tient aussi pour des lectures
 //! (`garde::est_lecture_constructo`) — jamais un outil d'écriture, même par erreur.
 //!
-//! Deux cartes du tableau d'Entrepreneur Général n'ont pas d'outil de lecture ici : les demandes de prix (le module
-//! des appels d'offres de l'ERP n'a pas d'outil MCP), et les tâches du calendrier de production
-//! (`suivi_lister_operations` pose treize `ALTER TABLE` à chaque appel : trop lourd pour une lecture aux dix minutes).
+//! Le planning du tableau de bord — le calendrier, le Gantt et le Kanban (`planning.rs`) — en prend aussi ce qu'il
+//! montre de l'entreprise : les chantiers en cours et à venir, les bons de travail, les ventes ouvertes, les factures
+//! qui attendent leur solde, les notes du calendrier sur quatre mois, les tableaux du Kanban de l'ERP (leurs colonnes,
+//! combien de cartes chacune compte). Le suivi de production — les opérations des bons de travail, les dépendances et
+//! les références du Gantt — ne se lit qu'à la demande, quand le Gantt s'ouvre, et pas plus d'une fois par
+//! demi-heure ([`SUIVI_INTERVALLE`]) : `suivi_lister_operations` pose treize `ALTER TABLE` sur la table des opérations
+//! à chaque appel (vérifié dans `mcp_server.py`, `_ensure_operations_columns_mcp`), trop lourd pour une lecture aux dix
+//! minutes. Les demandes de prix n'ont pas d'outil de lecture : le module des appels d'offres de l'ERP n'a pas d'outil
+//! MCP.
 //!
 //! Le transport, celui du serveur (`mcp_server.py`, son bloc `__main__`) : le « Streamable HTTP » de MCP, avec ses
 //! sessions et ses réponses en flux SSE. Un POST JSON-RPC à `<serveur>/mcp` — `initialize`, la notification
@@ -68,9 +74,17 @@ const FACTURES_RECUES_MAX: usize = 15;
 const COMMANDES_PAR_SORTE: usize = 7;
 const EMPLOYES_MAX: usize = 20;
 const PAR_PROJET_MAX: usize = 10;
-const AGENDA_MAX: usize = 30;
-/// L'agenda : aujourd'hui et les jours qui suivent.
-const AGENDA_JOURS: i64 = 14;
+/// Les notes du calendrier de l'ERP, sur la fenêtre du planning (`planning::fenetre`) : autant que l'outil en rend
+/// d'office. La carte de l'agenda du tableau de bord n'en montre que celles qui viennent.
+const NOTES_MAX: usize = 200;
+/// Les bons de travail (les plus récents, de tout statut), les ventes ouvertes, les factures ouvertes.
+const BONS_TRAVAIL_MAX: usize = 50;
+const OPPORTUNITES_MAX: usize = 30;
+const FACTURES_OUVERTES_MAX: usize = 40;
+/// Le suivi de production : autant d'opérations que l'outil en rend au plus.
+const OPERATIONS_MAX: usize = 500;
+/// Le suivi de production se relit au plus une fois par demi-heure, à la demande (le Gantt qui s'ouvre).
+pub const SUIVI_INTERVALLE: Duration = Duration::from_secs(30 * 60);
 /// La conformité à renouveler (licences RBQ, cartes CCQ, attestations) : dans ces jours-là ; sous ce seuil, l'alerte
 /// est haute.
 const CONFORMITE_JOURS: i64 = 60;
@@ -86,8 +100,8 @@ pub const ERREUR: &str = "erreur";
 
 /// Les seuls outils de Constructo AI qu'Eve appelle elle-même : des lectures, nommées une à une (leurs formes :
 /// `mcp_server.py`). Un outil s'ajoute ici, jamais ailleurs ; [`permis`] demande en plus que la garde le tienne pour
-/// une lecture.
-pub const OUTILS_LUS: [&str; 14] = [
+/// une lecture. Les derniers, ceux du suivi de production ([`OUTILS_DU_SUIVI`]), seulement à la demande.
+pub const OUTILS_LUS: [&str; 22] = [
     "tableau_kpis",
     "tableau_alertes",
     "tableau_factures_agees",
@@ -102,7 +116,22 @@ pub const OUTILS_LUS: [&str; 14] = [
     "lister_livraisons",
     "banque_lister_comptes",
     "conformite_expirations",
+    // Le planning : les bons de travail, les ventes, les tableaux du Kanban (leurs colonnes, leurs comptes).
+    "lister_bons_travail",
+    "lister_opportunites",
+    "suivi_colonnes",
+    "suivi_etat_kanban",
+    // Le suivi de production, à la demande.
+    "suivi_lister_operations",
+    "suivi_lister_dependances_gantt",
+    "suivi_lister_baselines",
+    "lister_employes",
 ];
+
+/// Le suivi de production : les opérations des bons de travail (leur responsable nommé d'après la liste des employés),
+/// les dépendances et les références du Gantt. Ils ne se lisent qu'à la demande ([`SUIVI_INTERVALLE`]).
+pub const OUTILS_DU_SUIVI: [&str; 4] =
+    ["suivi_lister_operations", "suivi_lister_dependances_gantt", "suivi_lister_baselines", "lister_employes"];
 
 /// Un outil qu'Eve peut appeler elle-même : nommé dans [`OUTILS_LUS`] et tenu pour une lecture par la garde — les
 /// deux, pour qu'une erreur d'un côté ne laisse jamais passer une écriture.
@@ -111,12 +140,14 @@ pub fn permis(outil: &str) -> bool {
 }
 
 /// Les appels d'une lecture, de l'essentiel au reste : un serveur qui flanche en route a déjà rendu les chiffres.
-/// Les pointages, en deux appels (cette semaine, la précédente) : l'outil en rend 200 au plus.
-fn appels(aujourdhui: &str) -> Vec<(&'static str, Value)> {
+/// Les pointages, en deux appels (cette semaine, la précédente) : l'outil en rend 200 au plus ; les projets aussi (en
+/// cours, puis à venir). `suivi` : le suivi de production en plus, à la fin ([`OUTILS_DU_SUIVI`]).
+fn appels(aujourdhui: &str, suivi: bool) -> Vec<(&'static str, Value)> {
     let jour = |decalage: i64| numero_du_jour(aujourdhui).map(|n| date_du_numero(n + decalage)).unwrap_or_default();
     // Le lundi de cette semaine, en jours depuis aujourd'hui (le 1er janvier 1970, jour zéro, était un jeudi).
     let lundi = numero_du_jour(aujourdhui).map_or(0, |n| -(n + 3).rem_euclid(7));
-    vec![
+    let (debut, fin) = crate::planning::fenetre(aujourdhui);
+    let mut a = vec![
         ("tableau_kpis", json!({ "periode_jours": 30 })),
         ("tableau_alertes", json!({})),
         ("tableau_factures_agees", json!({ "inclure_detail": true, "limite": FACTURES_MAX })),
@@ -126,10 +157,8 @@ fn appels(aujourdhui: &str) -> Vec<(&'static str, Value)> {
         ("lister_devis", json!({ "limite": 50 })),
         ("lister_pointages", json!({ "date_debut": jour(lundi), "date_fin": jour(lundi + 6), "limite": 200 })),
         ("lister_pointages", json!({ "date_debut": jour(lundi - 7), "date_fin": jour(lundi - 1), "limite": 200 })),
-        (
-            "suivi_lister_notes_calendrier",
-            json!({ "date_debut": aujourdhui, "date_fin": jour(AGENDA_JOURS), "limite": 50 }),
-        ),
+        // Les notes du calendrier sur la fenêtre du planning : de quoi tourner ses pages d'un mois à l'autre.
+        ("suivi_lister_notes_calendrier", json!({ "date_debut": debut, "date_fin": fin, "limite": NOTES_MAX })),
         // Les factures de l'ERP mêlent clients et fournisseurs : celles des fournisseurs se trient ici.
         ("lister_factures", json!({ "limite": 100 })),
         ("lister_bons_commande", json!({ "limite": 30 })),
@@ -137,7 +166,36 @@ fn appels(aujourdhui: &str) -> Vec<(&'static str, Value)> {
         ("lister_livraisons", json!({ "statut": "planifiee", "limite": 30 })),
         ("banque_lister_comptes", json!({})),
         ("conformite_expirations", json!({ "jours": CONFORMITE_JOURS })),
-    ]
+        // Le planning : les chantiers à venir, les bons de travail, les ventes, le Kanban de l'ERP.
+        ("lister_projets", json!({ "statut": "En attente", "limite": 50 })),
+        ("lister_bons_travail", json!({ "limite": BONS_TRAVAIL_MAX })),
+        ("lister_opportunites", json!({ "limite": 50 })),
+        ("suivi_colonnes", json!({})),
+        ("suivi_etat_kanban", json!({})),
+    ];
+    if suivi {
+        // Autant que chaque outil en rend : 500 opérations, 1000 dépendances et références, 200 employés.
+        a.extend(OUTILS_DU_SUIVI.iter().map(|&o| {
+            let limite = match o {
+                "suivi_lister_operations" => OPERATIONS_MAX,
+                "lister_employes" => 200,
+                _ => 1000,
+            };
+            (o, json!({ "limite": limite }))
+        }));
+    }
+    a
+}
+
+/// Les outils d'une lecture, chacun une fois.
+fn outils_de(appels: &[(&'static str, Value)]) -> Vec<&'static str> {
+    let mut outils: Vec<&'static str> = Vec::new();
+    for (o, _) in appels {
+        if !outils.contains(o) {
+            outils.push(o);
+        }
+    }
+    outils
 }
 
 // ---- Le fichier : entreprise.json --------------------------------------------------------------------------------
@@ -191,6 +249,32 @@ pub struct Entreprise {
     pub commandes: Option<Vec<Commande>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub heures: Option<Heures>,
+    // ---- Le planning (le calendrier, le Gantt, le Kanban) ----
+    /// Les chantiers à venir (« En attente » dans l'ERP).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub projets_en_attente: Option<Vec<Projet>>,
+    /// Les bons de travail les plus récents, de tout statut.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bons_travail: Option<Vec<BonDeTravail>>,
+    /// Les ventes ouvertes du CRM (ni gagnées ni perdues).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opportunites: Option<Vec<Opportunite>>,
+    /// Les factures qui attendent leur solde, des clients et des fournisseurs, la plus proche échéance d'abord.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub factures_ouvertes: Option<Vec<FactureOuverte>>,
+    /// Les tableaux du Kanban de l'ERP : leurs colonnes, leur règle, leurs comptes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kanban: Option<Vec<TableauDuKanban>>,
+    /// Le suivi de production, lu à la demande : l'heure de sa dernière lecture (ISO 8601), ses opérations, les
+    /// dépendances et les références du Gantt. Une lecture sans lui garde ceux d'avant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suivi_lu_a: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operations: Option<Vec<Operation>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dependances: Option<Vec<DependanceDuGantt>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub references: Option<Vec<Reference>>,
 }
 
 /// Les chiffres d'un coup d'œil.
@@ -257,11 +341,14 @@ pub struct Alerte {
     pub sorte: String,
 }
 
-/// Un projet en cours ; ses dates (AAAA-MM-JJ) sont celles de son début et de sa fin dans l'ERP. Aucun outil ne rend
-/// l'avancement d'une liste de projets : l'ERP le calcule de leurs phases.
+/// Un projet en cours (ou à venir) ; ses dates (AAAA-MM-JJ) sont celles de son début et de sa fin dans l'ERP. Aucun
+/// outil ne rend l'avancement d'une liste de projets : l'ERP le calcule de leurs phases. `id` : son numéro dans l'ERP,
+/// celui que donnent ses bons de travail et les références du Gantt.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Projet {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<u64>,
     pub nom: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub numero: Option<String>,
@@ -330,10 +417,13 @@ pub struct Note {
 }
 
 /// Un devis (une soumission au client) : `depuis`, le jour où il a été soumis (sinon créé) ; `modifie`, le jour de sa
-/// dernière modification. L'ERP ne lui garde pas d'adresse : elle est d'ordinaire dans son nom.
+/// dernière modification. L'ERP ne lui garde pas d'adresse : elle est d'ordinaire dans son nom. `id` : son numéro dans
+/// l'ERP.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Devis {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub numero: Option<String>,
     pub nom: String,
@@ -369,13 +459,16 @@ pub struct FactureRecue {
     pub statut: Option<String>,
 }
 
-/// Un achat en route : `sorte` — `a_commander` (un bon d'achat pas encore commandé ; `date` : son échéance),
-/// `commande` (un bon de commande pas encore reçu ; `date` : la livraison prévue), `livraison` (une livraison de
-/// chantier prévue ; `date` et `heure`). `texte` : ses notes, courtes (d'une livraison : sa sorte et sa zone).
+/// Un achat en route : `sorte` — `a_commander` (un bon d'achat pas encore commandé ; `date` : son échéance), `commande`
+/// (un bon de commande pas encore reçu ; `date` : la livraison prévue), `livraison` (une livraison de chantier prévue ;
+/// `date` et `heure`). `texte` : ses notes, courtes (d'une livraison : sa sorte et sa zone). `id` : son numéro dans
+/// l'ERP.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Commande {
     pub sorte: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub numero: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -464,6 +557,151 @@ pub struct Compte {
     pub a_classer: u64,
 }
 
+/// Un bon de travail (`lister_bons_travail`) : son numéro dans l'ERP (`id`) et son numéro de document, son nom, son
+/// statut, sa priorité, son chantier (son numéro dans l'ERP, et son nom s'il est en cours ou à venir), son client, son
+/// montant, ses dates de début et de fin, son échéance.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BonDeTravail {
+    pub id: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub numero: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nom: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statut: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priorite: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub projet_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub projet: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub montant: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debut: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub echeance: Option<String>,
+}
+
+/// Une vente ouverte du CRM (`lister_opportunites`) : son numéro dans l'ERP, son nom, son étape (`statut`), son montant
+/// estimé, sa probabilité (en pour cent), sa clôture prévue, d'où elle vient (`origine`, la « source » du CRM).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Opportunite {
+    pub id: u64,
+    pub nom: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statut: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub montant: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probabilite: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cloture: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origine: Option<String>,
+}
+
+/// Une facture qui attend son solde (`lister_factures`, ni brouillon ni annulée) : `sorte` — `client` (à recevoir) ou
+/// `fournisseur` (à payer) —, son numéro dans l'ERP et le sien, le client ou le fournisseur (`tiers`), le projet (s'il
+/// est en cours ou à venir), son statut, son échéance, son solde.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FactureOuverte {
+    pub sorte: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub numero: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tiers: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub projet: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statut: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub echeance: Option<String>,
+    pub solde: f64,
+}
+
+/// Un tableau du Kanban de l'ERP (`projets`, `devis`, `bons_travail`, `achats`, `factures`, `operations`,
+/// `operations_sdp`, `ventes`) : ses colonnes dans l'ordre de l'ERP (`suivi_colonnes` ; vide quand l'ERP n'en donne
+/// pas, comme pour les ventes), sa règle (`garde`), combien de cartes il compte en tout et par colonne
+/// (`suivi_etat_kanban`, le statut tel que la base l'écrit).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TableauDuKanban {
+    pub cle: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub statuts: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub garde: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub par_colonne: BTreeMap<String, u64>,
+}
+
+/// Une opération du suivi de production (`suivi_lister_operations`) : son numéro dans l'ERP, son bon de travail (son
+/// numéro dans l'ERP et son numéro de document), son nom, son statut, ses dates, ses heures prévues et faites (son
+/// avancement, comme l'ERP le calcule), qui la fait (`responsable`, nommé d'après la liste des employés ; jamais
+/// autre chose de lui), son fournisseur (« Interne », ou le sous-traitant).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Operation {
+    pub id: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bt_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bt_numero: Option<String>,
+    pub nom: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statut: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debut: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heures_prevues: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heures_reelles: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub responsable: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fournisseur: Option<String>,
+}
+
+/// Une dépendance du Gantt de l'ERP (`suivi_lister_dependances_gantt`) : la tâche `vers` attend la tâche `de` — chacune
+/// une sorte (`project`, `bt`, `op`, `devis`, `bc`, `opp`) et son numéro dans l'ERP —, de la façon que dit `sorte`
+/// (`finish_to_start`…), de tant de jours (`decalage`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DependanceDuGantt {
+    pub de_sorte: String,
+    pub de_id: String,
+    pub vers_sorte: String,
+    pub vers_id: String,
+    pub sorte: String,
+    pub decalage: i64,
+}
+
+/// La référence d'une tâche du Gantt (sa ligne de base, `suivi_lister_baselines`) : sa sorte et son numéro dans l'ERP,
+/// et les dates qui avaient été prévues.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Reference {
+    pub sorte: String,
+    pub id: String,
+    pub debut: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fin: Option<String>,
+}
+
 impl Entreprise {
     /// Eve n'est pas reliée à Constructo AI (ou il ne lui est pas permis) : rien de l'entreprise — une déconnexion
     /// efface ce qui restait —, seulement pourquoi.
@@ -503,6 +741,32 @@ impl Entreprise {
             ..self.clone()
         }
     }
+
+    /// La lecture qui suit celle-ci, réussie à `a` : la nouvelle ([`Entreprise::lue`]), avec le suivi de production de
+    /// celle-ci quand la nouvelle ne l'a pas relu (il ne se lit qu'à la demande) — ou, de lui, ce qu'un outil qui a
+    /// flanché n'a pas rendu. L'heure du suivi est celle de sa dernière lecture, réussie ou non : la demi-heure qu'il
+    /// attend avant la suivante part de là.
+    pub fn suite(&self, lecture: &Lecture, a: &str) -> Entreprise {
+        let mut e = Entreprise::lue(lecture, a);
+        e.suivi_lu_a = if lecture.suivi { Some(a.into()) } else { self.suivi_lu_a.clone() };
+        if e.operations.is_none() {
+            e.operations = self.operations.clone();
+        }
+        if e.dependances.is_none() {
+            e.dependances = self.dependances.clone();
+        }
+        if e.references.is_none() {
+            e.references = self.references.clone();
+        }
+        e
+    }
+}
+
+/// Le suivi de production est-il à relire ? Jamais lu, ou lu il y a plus d'une demi-heure ([`SUIVI_INTERVALLE`]) — une
+/// heure illisible, ou dans l'avenir (l'horloge du poste a reculé), aussi.
+pub fn suivi_a_relire(e: &Entreprise) -> bool {
+    let intervalle = SUIVI_INTERVALLE.as_secs() as i64;
+    e.suivi_lu_a.as_deref().and_then(secondes_depuis).is_none_or(|s| !(0..intervalle).contains(&s))
 }
 
 /// La dernière lecture gardée dans le dossier local ; rien (ou illisible) : une lecture vide.
@@ -548,7 +812,8 @@ impl Panne {
 }
 
 /// Une lecture réussie : ce qu'elle a tiré de l'ERP (les données seulement : le chef y met l'état et l'heure), les
-/// outils qui n'ont rien rendu de lisible, et ses temps.
+/// outils qui n'ont rien rendu de lisible, ses temps, combien d'outils elle a appelés, et si elle a lu le suivi de
+/// production.
 #[derive(Clone, Debug)]
 pub struct Lecture {
     pub entreprise: Entreprise,
@@ -556,6 +821,8 @@ pub struct Lecture {
     /// L'ouverture de la session (le réveil du serveur, s'il dormait), et toute la lecture.
     pub ouverture: Duration,
     pub duree: Duration,
+    pub outils: usize,
+    pub suivi: bool,
 }
 
 impl Lecture {
@@ -567,23 +834,39 @@ impl Lecture {
         }
         let sans = if self.manques.is_empty() { String::new() } else { format!(" ; sans {}", self.manques.join(", ")) };
         let employes = e.heures.as_ref().map_or(0, |h| h.employes.len());
+        let suivi = if self.suivi {
+            format!(
+                " ; le suivi de production : {} opérations, {} dépendances, {} références",
+                n(&e.operations),
+                n(&e.dependances),
+                n(&e.references)
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "{} outils lus sur {} en {} (la session ouverte en {}) : {} projets en cours, {} factures en retard, {} \
-             alertes, {} notes d'agenda, {} soumissions, {} devis en attente, {} factures reçues, {} achats en route, \
-             {employes} employés pointés, {} comptes bancaires{sans}",
-            OUTILS_LUS.len() - self.manques.len(),
-            OUTILS_LUS.len(),
+            "{} outils lus sur {} en {} (la session ouverte en {}) : {} projets en cours, {} à venir, {} factures en \
+             retard, {} alertes, {} notes d'agenda, {} soumissions, {} devis en attente, {} factures reçues, {} \
+             factures ouvertes, {} achats en route, {employes} employés pointés, {} comptes bancaires, {} bons de \
+             travail, {} ventes ouvertes, {} tableaux du Kanban{suivi}{sans}",
+            self.outils.saturating_sub(self.manques.len()),
+            self.outils,
             secondes(self.duree),
             secondes(self.ouverture),
             n(&e.projets),
+            n(&e.projets_en_attente),
             n(&e.factures_en_retard),
             n(&e.alertes),
             n(&e.agenda),
             n(&e.soumissions),
             n(&e.devis),
             n(&e.factures_recues),
+            n(&e.factures_ouvertes),
             n(&e.commandes),
             n(&e.banque),
+            n(&e.bons_travail),
+            n(&e.opportunites),
+            n(&e.kanban),
         )
     }
 }
@@ -594,16 +877,18 @@ pub fn secondes(d: Duration) -> String {
 }
 
 /// Une lecture dans un fil (elle parle au serveur, qui dort parfois) : `rapporter` reçoit son temps et ce qu'elle a
-/// donné ; une panique y devient une panne.
+/// donné ; une panique y devient une panne. `suivi` : le suivi de production en plus ([`OUTILS_DU_SUIVI`]).
 pub fn lire_dans_un_fil(
     ressource: String,
     jeton: String,
     aujourdhui: String,
+    suivi: bool,
     rapporter: impl FnOnce(Duration, Result<Lecture, Panne>) + Send + 'static,
 ) {
     std::thread::spawn(move || {
         let debut = Instant::now();
-        let issue = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lire(&ressource, &jeton, &aujourdhui)))
+        let lecture = || lire(&ressource, &jeton, &aujourdhui, suivi);
+        let issue = std::panic::catch_unwind(std::panic::AssertUnwindSafe(lecture))
             .unwrap_or_else(|_| Err(Panne::Serveur("la lecture de Constructo AI a planté (voir eve.log)".into())));
         rapporter(debut.elapsed(), issue);
     });
@@ -611,13 +896,15 @@ pub fn lire_dans_un_fil(
 
 /// Une lecture de l'ERP : une session MCP au connecteur (`ressource` : `<serveur>/mcp`), un appel par outil, puis la
 /// session fermée. Un outil qui flanche manque à la lecture ; un serveur qui flanche l'arrête ; aucun outil lisible :
-/// une panne.
-pub fn lire(ressource: &str, jeton: &str, aujourdhui: &str) -> Result<Lecture, Panne> {
+/// une panne. `suivi` : le suivi de production aussi, après tout le reste.
+pub fn lire(ressource: &str, jeton: &str, aujourdhui: &str, suivi: bool) -> Result<Lecture, Panne> {
     let debut = Instant::now();
     let mut client = Client::ouvrir(ressource, jeton)?;
     let ouverture = debut.elapsed();
+    let appels = appels(aujourdhui, suivi);
+    let outils = outils_de(&appels).len();
     let mut reponses: Vec<(&str, Result<String, String>)> = Vec::new();
-    for (outil, arguments) in appels(aujourdhui) {
+    for (outil, arguments) in appels {
         match client.appeler(outil, arguments) {
             Ok(texte) => reponses.push((outil, Ok(texte))),
             Err(p @ (Panne::Outil(_) | Panne::Refuse(_))) => reponses.push((outil, Err(p.texte()))),
@@ -629,11 +916,11 @@ pub fn lire(ressource: &str, jeton: &str, aujourdhui: &str) -> Result<Lecture, P
     }
     client.fermer();
     let (entreprise, manques) = analyser(&reponses, aujourdhui);
-    if manques.len() == OUTILS_LUS.len() {
+    if manques.len() == outils {
         let raison = reponses.iter().find_map(|(_, r)| r.as_ref().err()).cloned().unwrap_or_default();
         return Err(Panne::Serveur(format!("Constructo AI n'a rien rendu de lisible ({})", ecourter(&raison, 160))));
     }
-    Ok(Lecture { entreprise, manques, ouverture, duree: debut.elapsed() })
+    Ok(Lecture { entreprise, manques, ouverture, duree: debut.elapsed(), outils, suivi })
 }
 
 // ---- Le client MCP -------------------------------------------------------------------------------------------------
@@ -1057,6 +1344,28 @@ fn heures(pointages: &[Value], aujourdhui: &str, projets: &HashMap<u64, (String,
     h
 }
 
+/// Les projets d'une liste de `lister_projets` (la ligne entière de la table des projets, ses champs sensibles ôtés par
+/// le serveur) : ceux qui ont un nom.
+fn projets_de(l: &[Value]) -> Vec<Projet> {
+    l.iter()
+        .filter_map(|p| {
+            Some(Projet {
+                id: entier(&p["id"]),
+                nom: texte(&p["nom_projet"])?,
+                numero: texte(&p["numero_projet"]),
+                client: texte(&p["client_nom_cache"]).or_else(|| texte(&p["client_nom_direct"])),
+                statut: texte(&p["statut"]),
+                // `budget_total` : la colonne canonique de l'ERP ; `prix_estime`, l'ancienne.
+                valeur: positif(&p["budget_total"]).or_else(|| positif(&p["prix_estime"])),
+                ville: texte(&p["ville_chantier"]),
+                debut: date(&p["date_debut_reel"]),
+                fin: date(&p["date_fin_reel"]),
+                adresse: texte(&p["adresse_chantier"]),
+            })
+        })
+        .collect()
+}
+
 fn noter(manques: &mut Vec<String>, outil: &str) {
     if !manques.iter().any(|m| m == outil) {
         manques.push(outil.to_string());
@@ -1139,41 +1448,32 @@ fn analyser(reponses: &[(&str, Result<String, String>)], aujourdhui: &str) -> (E
         None => noter(&mut manques, "tableau_factures_agees"),
     }
 
-    // Les projets en cours, et leur nom par leur numéro dans l'ERP : les pointages, les factures et les livraisons ne
-    // donnent que celui-ci.
+    // Les projets en cours (le premier appel), puis à venir (le second, pour le planning), et leur nom par leur numéro
+    // dans l'ERP : les pointages, les factures, les livraisons et les bons de travail ne donnent que celui-ci.
     let mut noms_des_projets: HashMap<u64, (String, Option<String>)> = HashMap::new();
-    match un("lister_projets").and_then(liste) {
-        Some(l) => {
-            let mut projets = Vec::new();
-            for p in &l {
-                let Some(nom) = texte(&p["nom_projet"]) else { continue };
-                let numero = texte(&p["numero_projet"]);
-                if let Some(id) = entier(&p["id"]) {
-                    noms_des_projets.insert(id, (nom.clone(), numero.clone()));
-                }
-                projets.push(Projet {
-                    nom,
-                    numero,
-                    client: texte(&p["client_nom_cache"]).or_else(|| texte(&p["client_nom_direct"])),
-                    statut: texte(&p["statut"]),
-                    // `budget_total` : la colonne canonique de l'ERP ; `prix_estime`, l'ancienne.
-                    valeur: positif(&p["budget_total"]).or_else(|| positif(&p["prix_estime"])),
-                    ville: texte(&p["ville_chantier"]),
-                    debut: date(&p["date_debut_reel"]),
-                    fin: date(&p["date_fin_reel"]),
-                    adresse: texte(&p["adresse_chantier"]),
-                });
-            }
+    let projets_lus: Vec<Option<Vec<Projet>>> =
+        rendus(reponses, "lister_projets").into_iter().map(|t| t.and_then(liste).map(|l| projets_de(&l))).collect();
+    for p in projets_lus.iter().flatten().flatten() {
+        if let Some(id) = p.id {
+            noms_des_projets.insert(id, (p.nom.clone(), p.numero.clone()));
+        }
+    }
+    match projets_lus.first().cloned().flatten() {
+        Some(projets) => {
             e.kpis.valeur_projets_en_cours = Some(projets.iter().filter_map(|p| p.valeur).sum());
             e.projets = Some(projets.into_iter().take(PROJETS_MAX).collect());
         }
         None => noter(&mut manques, "lister_projets"),
     }
+    match projets_lus.get(1) {
+        Some(Some(projets)) => e.projets_en_attente = Some(projets.iter().take(PROJETS_MAX).cloned().collect()),
+        Some(None) => noter(&mut manques, "lister_projets"),
+        None => {}
+    }
     let nom_du_projet = |v: &Value| entier(v).and_then(|id| noms_des_projets.get(&id)).map(|(nom, _)| nom.clone());
 
     match un("tableau_pipeline_ventes").and_then(objet).filter(|v| v["par_statut"].is_array()) {
         Some(v) => {
-            let ferme = |s: &str| matches!(normaliser(s).as_str(), "gagne" | "gagnee" | "perdu" | "perdue");
             e.pipeline = Some(
                 v["par_statut"]
                     .as_array()
@@ -1182,7 +1482,7 @@ fn analyser(reponses: &[(&str, Result<String, String>)], aujourdhui: &str) -> (E
                     .filter_map(|p| {
                         let etape = texte(&p["statut"])?;
                         let valeur = montant(&p["valeur"]).unwrap_or(0.0);
-                        (!ferme(&etape)).then(|| Etape { etape, nombre: entier(&p["nb"]).unwrap_or(0), valeur })
+                        (!vente_fermee(&etape)).then(|| Etape { etape, nombre: entier(&p["nb"]).unwrap_or(0), valeur })
                     })
                     .collect(),
             );
@@ -1198,6 +1498,7 @@ fn analyser(reponses: &[(&str, Result<String, String>)], aujourdhui: &str) -> (E
                 .iter()
                 .filter_map(|d| {
                     Some(Devis {
+                        id: entier(&d["id"]),
                         numero: texte(&d["numero_devis"]),
                         nom: texte(&d["nom_projet"])?,
                         client: texte(&d["client_nom_cache"]).or_else(|| texte(&d["client_nom_direct"])),
@@ -1233,21 +1534,40 @@ fn analyser(reponses: &[(&str, Result<String, String>)], aujourdhui: &str) -> (E
     }
 
     // Les factures reçues : celles des fournisseurs (`type_destinataire`), dont l'ERP garde le nom dans `client_nom`.
+    // Les factures ouvertes, pour le planning : celles qui attendent leur solde, des clients et des fournisseurs (un
+    // brouillon n'est pas encore envoyé, une facture annulée ne se paie plus).
+    let fournisseur =
+        |f: &Value| f["type_destinataire"].as_str().is_some_and(|t| t.eq_ignore_ascii_case("fournisseur"));
     match un("lister_factures").and_then(liste) {
         Some(l) => {
-            let recues = l
-                .iter()
-                .filter(|f| f["type_destinataire"].as_str().is_some_and(|t| t.eq_ignore_ascii_case("fournisseur")))
-                .map(|f| FactureRecue {
-                    numero: texte(&f["numero_facture"]),
-                    fournisseur: texte(&f["client_nom"]),
-                    projet: nom_du_projet(&f["project_id"]),
-                    date: date(&f["date_facture"]),
-                    montant: montant(&f["montant_ttc"]).or_else(|| montant(&f["montant_total"])),
-                    solde: montant(&f["solde_du"]),
-                    statut: texte(&f["statut"]),
-                });
+            let recues = l.iter().filter(|f| fournisseur(f)).map(|f| FactureRecue {
+                numero: texte(&f["numero_facture"]),
+                fournisseur: texte(&f["client_nom"]),
+                projet: nom_du_projet(&f["project_id"]),
+                date: date(&f["date_facture"]),
+                montant: montant(&f["montant_ttc"]).or_else(|| montant(&f["montant_total"])),
+                solde: montant(&f["solde_du"]),
+                statut: texte(&f["statut"]),
+            });
             e.factures_recues = Some(recues.take(FACTURES_RECUES_MAX).collect());
+            let mut ouvertes: Vec<FactureOuverte> = l
+                .iter()
+                .filter(|f| !matches!(normaliser(f["statut"].as_str().unwrap_or("")).as_str(), "brouillon" | "annulee"))
+                .filter_map(|f| {
+                    Some(FactureOuverte {
+                        sorte: if fournisseur(f) { "fournisseur" } else { "client" }.into(),
+                        id: entier(&f["id"]),
+                        numero: texte(&f["numero_facture"]),
+                        tiers: texte(&f["client_nom"]),
+                        projet: nom_du_projet(&f["project_id"]),
+                        statut: texte(&f["statut"]),
+                        echeance: date(&f["date_echeance"]),
+                        solde: montant(&f["solde_du"]).filter(|s| *s > 0.005)?,
+                    })
+                })
+                .collect();
+            ouvertes.sort_by(|a, b| ordre_des_dates(&a.echeance, &b.echeance));
+            e.factures_ouvertes = Some(ouvertes.into_iter().take(FACTURES_OUVERTES_MAX).collect());
         }
         None => noter(&mut manques, "lister_factures"),
     }
@@ -1265,6 +1585,7 @@ fn analyser(reponses: &[(&str, Result<String, String>)], aujourdhui: &str) -> (E
                 .filter(|b| !fini(&b["statut"], &["recu", "annule", "commande"]))
                 .map(|b| Commande {
                     sorte: "a_commander".into(),
+                    id: entier(&b["id"]),
                     numero: texte(&b["numero_document"]),
                     fournisseur: texte(&b["fournisseur_nom"]),
                     projet: texte(&b["projet_nom"]),
@@ -1289,6 +1610,7 @@ fn analyser(reponses: &[(&str, Result<String, String>)], aujourdhui: &str) -> (E
                 .filter(|b| !fini(&b["statut"], &["recu", "annule"]))
                 .map(|b| Commande {
                     sorte: "commande".into(),
+                    id: entier(&b["id"]),
                     numero: texte(&b["numero_bon"]).or_else(|| texte(&b["numero"])),
                     fournisseur: texte(&b["fournisseur_nom"]),
                     projet: texte(&b["projet_nom"]),
@@ -1316,6 +1638,7 @@ fn analyser(reponses: &[(&str, Result<String, String>)], aujourdhui: &str) -> (E
                         [texte(&d["type_livraison"]), texte(&d["zone_stockage"])].into_iter().flatten().collect();
                     Commande {
                         sorte: "livraison".into(),
+                        id: entier(&d["id"]),
                         numero: texte(&d["reference"]),
                         projet: nom_du_projet(&d["project_id"]),
                         statut: texte(&d["statut"]),
@@ -1338,16 +1661,18 @@ fn analyser(reponses: &[(&str, Result<String, String>)], aujourdhui: &str) -> (E
         e.commandes = Some(commandes);
     }
 
+    // Les notes du calendrier, sur la fenêtre du planning (le serveur la filtre déjà : Eve la tient quand même), dans
+    // l'ordre des jours ; ni le nom de qui l'a écrite.
     match un("suivi_lister_notes_calendrier").and_then(liste) {
         Some(l) => {
-            let fin = numero_du_jour(aujourdhui).map(|n| date_du_numero(n + AGENDA_JOURS)).unwrap_or_default();
+            let (debut, fin) = crate::planning::fenetre(aujourdhui);
             let mut notes: Vec<Note> = l
                 .iter()
                 .filter_map(|n| Some(Note { quand: date(&n["note_date"])?, texte: texte(&n["contenu"])? }))
-                .filter(|n| n.quand.as_str() >= aujourdhui && (fin.is_empty() || n.quand <= fin))
+                .filter(|n| n.quand >= debut && n.quand <= fin)
                 .collect();
             notes.sort_by(|a, b| a.quand.cmp(&b.quand));
-            notes.truncate(AGENDA_MAX);
+            notes.truncate(NOTES_MAX);
             e.agenda = Some(notes);
         }
         None => noter(&mut manques, "suivi_lister_notes_calendrier"),
@@ -1367,7 +1692,212 @@ fn analyser(reponses: &[(&str, Result<String, String>)], aujourdhui: &str) -> (E
         noter(&mut manques, "conformite_expirations");
     }
     e.alertes = Some(faire_les_alertes(&e, conformite.as_ref(), aujourdhui));
+    analyser_le_planning(reponses, aujourdhui, &noms_des_projets, &mut e, &mut manques);
     (e, manques)
+}
+
+/// Une vente fermée : gagnée ou perdue (avec ou sans accent, au masculin ou au féminin, comme l'ERP les écrit).
+fn vente_fermee(statut: &str) -> bool {
+    matches!(normaliser(statut).as_str(), "gagne" | "gagnee" | "perdu" | "perdue")
+}
+
+/// Un numéro de l'ERP, écrit en texte (les ids du Gantt sont des `VARCHAR`) ou en nombre.
+fn identifiant(v: &Value) -> Option<String> {
+    v.as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| v.as_u64().map(|n| n.to_string()))
+}
+
+/// Le nom d'un employé : son prénom et son nom, rien d'autre de lui.
+fn nom_d_employe(prenom: &Value, nom: &Value) -> Option<String> {
+    let n = [texte(prenom), texte(nom)].into_iter().flatten().collect::<Vec<_>>().join(" ");
+    (!n.is_empty()).then_some(n)
+}
+
+/// Ce que le planning prend de la lecture : les bons de travail, les ventes ouvertes, les tableaux du Kanban, et le
+/// suivi de production s'il a été lu. Un outil qu'on n'a pas appelé (le suivi, hors de la demande) ne manque pas.
+fn analyser_le_planning(
+    reponses: &[(&str, Result<String, String>)],
+    aujourdhui: &str,
+    noms_des_projets: &HashMap<u64, (String, Option<String>)>,
+    e: &mut Entreprise,
+    manques: &mut Vec<String>,
+) {
+    let un = |outil: &str| rendus(reponses, outil).into_iter().next().flatten();
+    let appele = |outil: &str| reponses.iter().any(|(o, _)| *o == outil);
+    let nom_du_projet = |v: &Value| entier(v).and_then(|id| noms_des_projets.get(&id)).map(|(nom, _)| nom.clone());
+
+    // Les bons de travail les plus récents, de tout statut : le Kanban de l'ERP garde une colonne aux annulés ; le
+    // calendrier et le Gantt les écartent.
+    if appele("lister_bons_travail") {
+        match un("lister_bons_travail").and_then(liste) {
+            Some(l) => {
+                let bons = l.iter().filter_map(|b| {
+                    Some(BonDeTravail {
+                        id: entier(&b["id"])?,
+                        numero: texte(&b["numero_document"]),
+                        nom: texte(&b["nom"]),
+                        statut: texte(&b["statut"]),
+                        priorite: texte(&b["priorite"]),
+                        projet_id: entier(&b["project_id"]),
+                        projet: nom_du_projet(&b["project_id"]),
+                        client: texte(&b["client_nom"]),
+                        montant: positif(&b["montant_total"]),
+                        debut: date(&b["date_debut"]),
+                        fin: date(&b["date_fin"]),
+                        echeance: date(&b["date_echeance"]),
+                    })
+                });
+                e.bons_travail = Some(bons.take(BONS_TRAVAIL_MAX).collect());
+            }
+            None => noter(manques, "lister_bons_travail"),
+        }
+    }
+
+    // Les ventes ouvertes : ni gagnées ni perdues (leurs colonnes du Kanban ne gardent que leur compte).
+    if appele("lister_opportunites") {
+        match un("lister_opportunites").and_then(liste) {
+            Some(l) => {
+                let ouvertes = l.iter().filter(|o| !vente_fermee(o["statut"].as_str().unwrap_or(""))).filter_map(|o| {
+                    Some(Opportunite {
+                        id: entier(&o["id"])?,
+                        nom: texte(&o["nom"])?,
+                        statut: texte(&o["statut"]),
+                        montant: positif(&o["montant_estime"]),
+                        probabilite: entier(&o["probabilite"]).filter(|p| *p <= 100),
+                        cloture: date(&o["date_cloture_prevue"]),
+                        origine: texte(&o["source"]),
+                    })
+                });
+                e.opportunites = Some(ouvertes.take(OPPORTUNITES_MAX).collect());
+            }
+            None => noter(manques, "lister_opportunites"),
+        }
+    }
+
+    // Les tableaux du Kanban : les colonnes de chacun dans l'ordre de l'ERP et sa règle (`suivi_colonnes`, qui ne lit
+    // aucune base), combien de cartes il compte (`suivi_etat_kanban`). L'un sans l'autre se garde.
+    let colonnes = un("suivi_colonnes").and_then(objet);
+    let comptes = un("suivi_etat_kanban").and_then(objet);
+    for (outil, lu) in [("suivi_colonnes", &colonnes), ("suivi_etat_kanban", &comptes)] {
+        if appele(outil) && lu.is_none() {
+            noter(manques, outil);
+        }
+    }
+    if colonnes.is_some() || comptes.is_some() {
+        let mut cles: Vec<String> = Vec::new();
+        for v in [&colonnes, &comptes].into_iter().flatten() {
+            for cle in v.as_object().into_iter().flat_map(|o| o.keys()) {
+                if !cles.contains(cle) {
+                    cles.push(cle.clone());
+                }
+            }
+        }
+        let tableaux = cles.into_iter().map(|cle| {
+            let c = colonnes.as_ref().map(|v| &v[cle.as_str()]);
+            let n = comptes.as_ref().map(|v| &v[cle.as_str()]);
+            let statuts = c.and_then(|c| c["statuts"].as_array()).map(|l| l.iter().filter_map(texte).collect());
+            let par_colonne = n.and_then(|n| n["par_colonne"].as_object()).map(|o| {
+                o.iter().filter_map(|(statut, nb)| Some((ecourter(statut, TEXTE_MAX), entier(nb)?))).collect()
+            });
+            TableauDuKanban {
+                statuts: statuts.unwrap_or_default(),
+                garde: c.and_then(|c| texte(&c["garde"])),
+                total: n.and_then(|n| entier(&n["total"])),
+                par_colonne: par_colonne.unwrap_or_default(),
+                cle,
+            }
+        });
+        e.kanban = Some(tableaux.collect());
+    }
+
+    // Le suivi de production, s'il a été lu. Qui fait une opération : son nom d'après les pointages de ces deux
+    // semaines, puis d'après la liste des employés — rien d'autre d'eux ne se garde.
+    let mut employes: HashMap<u64, String> = HashMap::new();
+    for p in rendus(reponses, "lister_pointages").into_iter().flatten().filter_map(liste).flatten() {
+        if let (Some(id), Some(nom)) = (entier(&p["employee_id"]), nom_d_employe(&p["prenom"], &p["nom_employe"])) {
+            employes.insert(id, nom);
+        }
+    }
+    if appele("lister_employes") {
+        match un("lister_employes").and_then(liste) {
+            Some(l) => {
+                for x in &l {
+                    if let (Some(id), Some(nom)) = (entier(&x["id"]), nom_d_employe(&x["prenom"], &x["nom"])) {
+                        employes.insert(id, nom);
+                    }
+                }
+            }
+            None => noter(manques, "lister_employes"),
+        }
+    }
+    if appele("suivi_lister_operations") {
+        match un("suivi_lister_operations").and_then(objet).filter(|v| v["operations"].is_array()) {
+            Some(v) => {
+                let (debut, _) = crate::planning::fenetre(aujourdhui);
+                let operations = v["operations"].as_array().into_iter().flatten().filter_map(|o| {
+                    let id = entier(&o["id"])?;
+                    let (d, f) = (date(&o["date_debut"]), date(&o["date_fin"]));
+                    // Sans date, elle ne se place nulle part ; finie avant la fenêtre du planning, elle n'y paraît
+                    // plus.
+                    if f.as_ref().or(d.as_ref())? < &debut {
+                        return None;
+                    }
+                    Some(Operation {
+                        id,
+                        bt_id: entier(&o["formulaire_bt_id"]),
+                        bt_numero: texte(&o["bt_numero"]),
+                        nom: texte(&o["nom"]).unwrap_or_else(|| format!("Opération {id}")),
+                        statut: texte(&o["statut"]),
+                        debut: d,
+                        fin: f,
+                        heures_prevues: montant(&o["heures_prevues"]).filter(|h| *h >= 0.0),
+                        heures_reelles: montant(&o["heures_reelles"]).filter(|h| *h >= 0.0),
+                        responsable: entier(&o["employee_id"]).and_then(|i| employes.get(&i).cloned()),
+                        fournisseur: texte(&o["fournisseur"]),
+                    })
+                });
+                e.operations = Some(operations.take(OPERATIONS_MAX).collect());
+            }
+            None => noter(manques, "suivi_lister_operations"),
+        }
+    }
+    if appele("suivi_lister_dependances_gantt") {
+        match un("suivi_lister_dependances_gantt").and_then(liste) {
+            Some(l) => {
+                let dependances = l.iter().filter_map(|d| {
+                    Some(DependanceDuGantt {
+                        de_sorte: texte(&d["source_type"])?,
+                        de_id: identifiant(&d["source_id"])?,
+                        vers_sorte: texte(&d["target_type"])?,
+                        vers_id: identifiant(&d["target_id"])?,
+                        sorte: texte(&d["dependency_type"]).unwrap_or_else(|| "finish_to_start".into()),
+                        decalage: d["lag_days"].as_i64().unwrap_or(0),
+                    })
+                });
+                e.dependances = Some(dependances.collect());
+            }
+            None => noter(manques, "suivi_lister_dependances_gantt"),
+        }
+    }
+    if appele("suivi_lister_baselines") {
+        match un("suivi_lister_baselines").and_then(liste) {
+            Some(l) => {
+                let references = l.iter().filter_map(|r| {
+                    Some(Reference {
+                        sorte: texte(&r["item_type"])?,
+                        id: identifiant(&r["item_id"])?,
+                        debut: date(&r["baseline_start"])?,
+                        fin: date(&r["baseline_end"]),
+                    })
+                });
+                e.references = Some(references.collect());
+            }
+            None => noter(manques, "suivi_lister_baselines"),
+        }
+    }
 }
 
 /// Les comptes bancaires du texte de `banque_lister_comptes`, le seul outil lu qui rend du texte plutôt que du JSON :
@@ -1866,9 +2396,22 @@ mod essais {
         format!("{} pointage(s) trouve(s):\n{}", l.len(), serde_json::to_string_pretty(&l).unwrap())
     }
 
-    /// Les factures, clients et fournisseurs mêlées (`type_destinataire`, absent d'une facture d'avant sa colonne).
-    const FACTURES: &str = r#"4 facture(s) trouvée(s):
+    /// Les factures, clients et fournisseurs mêlées (`type_destinataire`, absent d'une facture d'avant sa colonne) ; un
+    /// brouillon, pas encore envoyé.
+    const FACTURES: &str = r#"5 facture(s) trouvée(s):
 [
+  {
+    "id": 211,
+    "numero_facture": "FACT-2026-00211",
+    "client_nom": "Habitations Modèle inc.",
+    "project_id": 14,
+    "type_destinataire": "client",
+    "date_facture": "2026-10-26",
+    "date_echeance": "2026-11-25",
+    "statut": "BROUILLON",
+    "montant_ttc": 900.0,
+    "solde_du": 900.0
+  },
   {
     "id": 210,
     "numero_facture": "FACT-2026-00210",
@@ -2079,7 +2622,250 @@ mod essais {
   "total": 2
 }"#;
 
-    /// Toutes les réponses d'une lecture, telles que le vrai serveur les rendrait, dans l'ordre des appels.
+    /// Le chantier à venir (le second appel de `lister_projets`, « En attente »).
+    const PROJETS_EN_ATTENTE: &str = r#"1 projet(s) trouve(s):
+[
+  {
+    "id": 16,
+    "nom_projet": "Garage détaché, 4 rang de l'Essai",
+    "numero_projet": "PROJ-2026-00016",
+    "client_nom_cache": "Habitations Modèle inc.",
+    "statut": "En attente",
+    "budget_total": 96000.0,
+    "date_debut_reel": "2026-11-09",
+    "date_fin_reel": "2026-12-11",
+    "ville_chantier": "Démoville"
+  }
+]"#;
+
+    /// Les bons de travail (`lister_bons_travail` : sa projection dynamique, et le nom du client joint) ; l'un sans nom
+    /// ni chantier, un annulé.
+    const BONS_TRAVAIL: &str = r#"3 bon(s) de travail trouve(s):
+[
+  {
+    "id": 41,
+    "numero_document": "BT-2026-041",
+    "nom": "Charpente et toiture",
+    "statut": "EN_COURS",
+    "priorite": "HAUTE",
+    "project_id": 14,
+    "montant_total": 18500.0,
+    "date_echeance": "2026-11-06",
+    "date_debut": "2026-10-21",
+    "date_fin": "2026-11-05",
+    "date_creation": "2026-10-14T08:00:00",
+    "notes": null,
+    "client_company_id": 7,
+    "client_contact_id": null,
+    "client_nom": "Construction Exemple inc."
+  },
+  {
+    "id": 45,
+    "numero_document": "BT-2026-045",
+    "nom": null,
+    "statut": "BROUILLON",
+    "project_id": null,
+    "montant_total": 0.0,
+    "date_echeance": "2026-11-15",
+    "client_nom": null
+  },
+  {
+    "id": 30,
+    "numero_document": "BT-2026-030",
+    "nom": "Démolition",
+    "statut": "ANNULE",
+    "project_id": 14,
+    "date_debut": "2026-09-12",
+    "date_fin": "2026-09-15"
+  }
+]"#;
+
+    /// Les opportunités du CRM (`SELECT *`) : une ouverte, une gagnée, une perdue.
+    const OPPORTUNITES: &str = r#"3 opportunite(s) trouvee(s):
+[
+  {
+    "id": 12,
+    "nom": "Agrandissement d'un chalet",
+    "company_id": 7,
+    "contact_id": null,
+    "montant_estime": 180000.0,
+    "devise": "CAD",
+    "statut": "Proposition",
+    "probabilite": 60,
+    "date_cloture_prevue": "2026-11-15",
+    "source": "Référence",
+    "notes": "Le client veut commencer au printemps",
+    "assigned_to": 2
+  },
+  { "id": 11, "nom": "Toiture commerciale", "statut": "Gagné", "montant_estime": 385000.0, "probabilite": 100 },
+  { "id": 10, "nom": "Terrasse", "statut": "PERDU", "montant_estime": 12000.0, "probabilite": 0 }
+]"#;
+
+    /// Les colonnes du Kanban, de la forme de `suivi_colonnes` (le serveur les tient dans son code) : les ventes n'en
+    /// ont pas, seulement un renvoi au CRM.
+    const COLONNES: &str = r#"{
+  "projets": {
+    "statuts": ["En attente", "En cours", "Termine", "Annule", "Suspendu"]
+  },
+  "devis": {
+    "statuts": ["Brouillon", "Valide", "Envoye", "En attente", "Accepte", "Refuse", "Termine", "Annule", "Expire"],
+    "garde": "Statut Accepte reserve au module Soumissions (cree le projet + notification)."
+  },
+  "operations": {
+    "statuts": ["En attente", "En cours", "Termine", "Annule"],
+    "garde": "Statut gere via le Bon de travail / Gantt."
+  },
+  "ventes": {
+    "statuts": "voir le module CRM (lister_opportunites / creer_opportunite)",
+    "garde": "Statut d'opportunite gere via le CRM."
+  }
+}"#;
+
+    /// Les comptes du Kanban (`suivi_etat_kanban`) : les variantes d'un statut à part, comme en base ; un tableau que
+    /// l'entreprise n'a pas.
+    const KANBAN: &str = r#"{
+  "projets": {
+    "total": 14,
+    "par_colonne": { "Termine": 9, "En cours": 2, "EN_COURS": 1, "Annule": 1, "En attente": 1 }
+  },
+  "devis": {
+    "total": 38,
+    "par_colonne": { "Accepte": 15, "Refuse": 12, "Expire": 7, "Envoye": 2, "En attente": 1, "Brouillon": 1 }
+  },
+  "factures": { "erreur": "lecture impossible (table/colonne absente pour ce tenant)" },
+  "ventes": {
+    "total": 11,
+    "par_colonne": { "GAGNE": 4, "Proposition": 3, "Qualification": 2, "PERDU": 2 }
+  }
+}"#;
+
+    /// Le suivi de production (`suivi_lister_operations`) : une opération finie avant la fenêtre du planning, une sans
+    /// date, une donnée en sous-traitance.
+    const OPERATIONS: &str = r#"{
+  "operations": [
+    {
+      "id": 380,
+      "formulaire_bt_id": 38,
+      "nom": "Coffrage des fondations",
+      "description": null,
+      "statut": "TERMINE",
+      "date_debut": "2026-08-12",
+      "date_fin": "2026-08-14",
+      "heures_prevues": 40.0,
+      "heures_reelles": 42.0,
+      "quantite": 1.0,
+      "employee_id": 1,
+      "fournisseur": "Interne",
+      "poste_travail": null,
+      "sequence_number": 1,
+      "bt_numero": "BT-2026-038"
+    },
+    {
+      "id": 501,
+      "formulaire_bt_id": 41,
+      "nom": "Pose des fermes de toit",
+      "statut": "EN_COURS",
+      "date_debut": "2026-10-21",
+      "date_fin": "2026-10-24",
+      "heures_prevues": 24.0,
+      "heures_reelles": 20.0,
+      "employee_id": 1,
+      "fournisseur": "Interne",
+      "sequence_number": 1,
+      "bt_numero": "BT-2026-041"
+    },
+    {
+      "id": 502,
+      "formulaire_bt_id": 41,
+      "nom": "Bardeaux",
+      "statut": "A_FAIRE",
+      "date_debut": "2026-10-27",
+      "date_fin": null,
+      "heures_prevues": 20.0,
+      "heures_reelles": null,
+      "employee_id": 3,
+      "fournisseur": "Toitures Exemple",
+      "sequence_number": 2,
+      "bt_numero": "BT-2026-041"
+    },
+    {
+      "id": 503,
+      "formulaire_bt_id": 41,
+      "nom": "Solins",
+      "statut": "",
+      "date_debut": null,
+      "date_fin": null,
+      "heures_prevues": 8.0,
+      "employee_id": 2,
+      "sequence_number": 3,
+      "bt_numero": "BT-2026-041"
+    }
+  ],
+  "count": 4
+}"#;
+
+    /// Les employés actifs : leur courriel et leur téléphone, qu'Eve ne garde pas.
+    const EMPLOYES: &str = r#"2 employe(s) trouve(s):
+[
+  {
+    "id": 1,
+    "prenom": "Alex",
+    "nom": "Modèle",
+    "email": "alex@exemple.ca",
+    "telephone": "555-0101",
+    "poste": "Charpentier",
+    "departement": "Chantier"
+  },
+  {
+    "id": 4,
+    "prenom": "Lou",
+    "nom": "Démo",
+    "email": "lou@exemple.ca",
+    "telephone": "555-0104",
+    "poste": "Apprenti",
+    "departement": "Chantier"
+  }
+]"#;
+
+    /// Les dépendances du Gantt : un numéro en texte (la colonne est un `VARCHAR`), un en nombre.
+    const DEPENDANCES: &str = r#"2 dependance(s):
+[
+  {
+    "id": 1,
+    "source_type": "op",
+    "source_id": "501",
+    "target_type": "op",
+    "target_id": "502",
+    "dependency_type": "finish_to_start",
+    "lag_days": 1,
+    "created_at": "2026-10-01T09:00:00"
+  },
+  {
+    "id": 2,
+    "source_type": "devis",
+    "source_id": "33",
+    "target_type": "project",
+    "target_id": 16,
+    "dependency_type": "start_to_start",
+    "lag_days": 0,
+    "created_at": "2026-10-02T09:00:00"
+  }
+]"#;
+
+    const REFERENCES: &str = r#"1 ligne(s) de base:
+[
+  {
+    "id": 1,
+    "item_type": "project",
+    "item_id": "14",
+    "baseline_start": "2026-09-16",
+    "baseline_end": "2026-12-01",
+    "created_at": "2026-09-01T09:00:00"
+  }
+]"#;
+
+    /// Toutes les réponses d'une lecture aux dix minutes, telles que le vrai serveur les rendrait, dans l'ordre des
+    /// appels.
     fn reponses() -> Vec<(&'static str, Result<String, String>)> {
         vec![
             ("tableau_kpis", Ok(KPIS.into())),
@@ -2097,6 +2883,21 @@ mod essais {
             ("lister_livraisons", Ok(LIVRAISONS.into())),
             ("banque_lister_comptes", Ok(BANQUE.into())),
             ("conformite_expirations", Ok(CONFORMITE.into())),
+            ("lister_projets", Ok(PROJETS_EN_ATTENTE.into())),
+            ("lister_bons_travail", Ok(BONS_TRAVAIL.into())),
+            ("lister_opportunites", Ok(OPPORTUNITES.into())),
+            ("suivi_colonnes", Ok(COLONNES.into())),
+            ("suivi_etat_kanban", Ok(KANBAN.into())),
+        ]
+    }
+
+    /// Les réponses du suivi de production, qui suivent les autres quand on le demande.
+    fn suivi() -> Vec<(&'static str, Result<String, String>)> {
+        vec![
+            ("suivi_lister_operations", Ok(OPERATIONS.into())),
+            ("suivi_lister_dependances_gantt", Ok(DEPENDANCES.into())),
+            ("suivi_lister_baselines", Ok(REFERENCES.into())),
+            ("lister_employes", Ok(EMPLOYES.into())),
         ]
     }
 
@@ -2215,10 +3016,11 @@ mod essais {
             (h.par_projet[0].nom.as_str(), h.par_projet[0].numero.as_deref(), h.par_projet[0].heures),
             ("Agrandissement, 12 rue des Exemples", Some("PROJ-2026-00014"), 3.5)
         );
-        // L'agenda : d'aujourd'hui aux 14 jours suivants, dans l'ordre ; ni le nom de qui l'a écrite.
+        // L'agenda : les notes de la fenêtre du planning (du 1er septembre au 31 décembre), dans l'ordre ; ni le nom de
+        // qui l'a écrite. La carte du tableau de bord n'en montre que ce qui vient.
         let a = e.agenda.as_ref().unwrap();
-        assert_eq!(a.iter().map(|n| n.quand.as_str()).collect::<Vec<_>>(), ["2026-10-27", "2026-11-02"]);
-        assert_eq!(a[0].texte, "Visite de chantier, 12 rue des Exemples");
+        assert_eq!(a.iter().map(|n| n.quand.as_str()).collect::<Vec<_>>(), ["2026-10-20", "2026-10-27", "2026-11-02"]);
+        assert_eq!(a[1].texte, "Visite de chantier, 12 rue des Exemples");
         // La banque : le nom jusqu'à la parenthèse du grand livre ; un solde de banque inconnu manque.
         let c = e.banque.as_ref().unwrap();
         assert_eq!(
@@ -2261,6 +3063,169 @@ mod essais {
         recentes.kpis.factures_en_retard = Some(1);
         let a = faire_les_alertes(&recentes, None, "2026-10-26");
         assert_eq!((a[0].texte.as_str(), a[0].gravite.as_str()), ("1 facture en retard", "moyenne"));
+    }
+
+    /// Une lecture réussie, sans temps.
+    fn lecture_de(entreprise: Entreprise, manques: Vec<String>, suivi: bool) -> Lecture {
+        let outils = outils_de(&appels("2026-10-26", suivi)).len();
+        Lecture { entreprise, manques, ouverture: Duration::ZERO, duree: Duration::ZERO, outils, suivi }
+    }
+
+    #[test]
+    fn le_planning_se_lit_dans_les_formes_du_serveur() {
+        let (e, manques) = analyser(&reponses(), "2026-10-26");
+        assert!(manques.is_empty(), "{manques:?}");
+        // Les chantiers à venir : le second appel des projets ; leur numéro dans l'ERP, comme ceux en cours.
+        let a = e.projets_en_attente.as_ref().unwrap();
+        assert_eq!((a.len(), a[0].id, a[0].debut.as_deref()), (1, Some(16), Some("2026-11-09")));
+        assert_eq!(e.projets.as_ref().unwrap()[0].id, Some(14));
+        assert_eq!(e.kpis.valeur_projets_en_cours, Some(463000.0), "les chantiers à venir n'y comptent pas");
+        assert_eq!(e.devis.as_ref().unwrap()[0].id, Some(33));
+        // Les bons de travail, de tout statut ; leur chantier nommé s'il est en cours ou à venir ; un montant à 0
+        // manque.
+        let b = e.bons_travail.as_ref().unwrap();
+        assert_eq!(b.iter().map(|x| x.id).collect::<Vec<_>>(), [41, 45, 30]);
+        assert_eq!(
+            (b[0].projet.as_deref(), b[0].projet_id, b[0].debut.as_deref(), b[0].echeance.as_deref()),
+            (Some("Agrandissement, 12 rue des Exemples"), Some(14), Some("2026-10-21"), Some("2026-11-06"))
+        );
+        assert_eq!(
+            (b[1].nom.as_deref(), b[1].montant, b[1].projet_id, b[1].client.as_deref()),
+            (None, None, None, None)
+        );
+        assert_eq!(b[2].statut.as_deref(), Some("ANNULE"));
+        // Les ventes ouvertes seulement (« Gagné » et « PERDU » sont fermées) ; ni leurs notes.
+        let o = e.opportunites.as_ref().unwrap();
+        assert_eq!(o.len(), 1);
+        assert_eq!(
+            (o[0].id, o[0].montant, o[0].probabilite, o[0].cloture.as_deref(), o[0].origine.as_deref()),
+            (12, Some(180000.0), Some(60), Some("2026-11-15"), Some("Référence"))
+        );
+        // Les factures ouvertes : celles qui attendent leur solde, des deux côtés (ni brouillon ni payée), la plus
+        // proche échéance d'abord, sans échéance ensuite.
+        let f = e.factures_ouvertes.as_ref().unwrap();
+        let vu: Vec<(Option<u64>, &str, Option<&str>, f64)> =
+            f.iter().map(|x| (x.id, x.sorte.as_str(), x.echeance.as_deref(), x.solde)).collect();
+        assert_eq!(vu, [(Some(210), "fournisseur", Some("2026-11-22"), 3449.25), (Some(209), "client", None, 25000.0)]);
+        assert_eq!(f[0].projet.as_deref(), Some("Agrandissement, 12 rue des Exemples"));
+        // Les commandes gardent leur numéro dans l'ERP.
+        assert_eq!(
+            e.commandes.as_ref().unwrap().iter().map(|c| c.id).collect::<Vec<_>>(),
+            [Some(40), Some(5), Some(3), Some(8)]
+        );
+        // Le Kanban : les tableaux des deux outils réunis ; les colonnes de l'ERP dans son ordre, ses comptes tels que
+        // la base les écrit ; un tableau illisible n'a ni compte ni colonne ; les ventes, une règle sans colonnes.
+        let k = e.kanban.as_ref().unwrap();
+        let cles: Vec<&str> = k.iter().map(|t| t.cle.as_str()).collect();
+        assert_eq!(cles, ["devis", "operations", "projets", "ventes", "factures"]);
+        let tableau = |cle: &str| k.iter().find(|t| t.cle == cle).unwrap();
+        let p = tableau("projets");
+        assert_eq!(p.statuts, ["En attente", "En cours", "Termine", "Annule", "Suspendu"]);
+        assert_eq!(
+            (p.total, p.par_colonne.get("EN_COURS"), p.par_colonne.len(), p.garde.as_deref()),
+            (Some(14), Some(&1), 5, None)
+        );
+        let v = tableau("ventes");
+        assert!(v.statuts.is_empty(), "l'ERP ne donne pas de colonnes aux ventes");
+        assert_eq!((v.garde.as_deref(), v.total), (Some("Statut d'opportunite gere via le CRM."), Some(11)));
+        let fa = tableau("factures");
+        assert_eq!((fa.total, fa.par_colonne.len(), fa.statuts.len()), (None, 0, 0));
+        assert_eq!((tableau("operations").total, tableau("operations").statuts.len()), (None, 4));
+        // Le suivi de production ne s'est pas lu : rien de lui, et rien ne manque.
+        assert!(e.operations.is_none() && e.dependances.is_none() && e.references.is_none());
+    }
+
+    #[test]
+    fn le_suivi_de_production_se_lit_a_la_demande() {
+        let mut r = reponses();
+        r.extend(suivi());
+        let (e, manques) = analyser(&r, "2026-10-26");
+        assert!(manques.is_empty(), "{manques:?}");
+        // Les opérations : celle finie avant la fenêtre du planning et celle sans date n'y sont pas ; qui les fait,
+        // nommé d'après la liste des employés, sinon d'après les pointages (Kim n'est que dans ceux-ci).
+        let o = e.operations.as_ref().unwrap();
+        assert_eq!(o.iter().map(|x| x.id).collect::<Vec<_>>(), [501, 502]);
+        assert_eq!(
+            (
+                o[0].bt_id,
+                o[0].bt_numero.as_deref(),
+                o[0].heures_prevues,
+                o[0].heures_reelles,
+                o[0].responsable.as_deref()
+            ),
+            (Some(41), Some("BT-2026-041"), Some(24.0), Some(20.0), Some("Alex Modèle"))
+        );
+        assert_eq!(
+            (o[1].responsable.as_deref(), o[1].fournisseur.as_deref(), o[1].fin.as_deref(), o[1].heures_reelles),
+            (Some("Kim Essai"), Some("Toitures Exemple"), None, None)
+        );
+        // Les dépendances, telles que l'ERP les dit (un numéro en nombre se lit) ; les références.
+        let d = e.dependances.as_ref().unwrap();
+        assert_eq!(
+            (d[0].de_sorte.as_str(), d[0].de_id.as_str(), d[0].sorte.as_str(), d[0].decalage),
+            ("op", "501", "finish_to_start", 1)
+        );
+        assert_eq!((d[1].vers_sorte.as_str(), d[1].vers_id.as_str()), ("project", "16"));
+        let x = &e.references.as_ref().unwrap()[0];
+        assert_eq!(
+            (x.sorte.as_str(), x.id.as_str(), x.debut.as_str(), x.fin.as_deref()),
+            ("project", "14", "2026-09-16", Some("2026-12-01"))
+        );
+        // D'un employé, son nom seulement : ni son courriel ni son téléphone n'arrivent au fichier.
+        let texte = serde_json::to_string(&e).unwrap();
+        assert!(!texte.contains("@exemple.ca") && !texte.contains("555-01"), "{texte}");
+        // Un outil du suivi qui flanche manque, seul ; la liste des employés aussi (les pointages nomment encore).
+        let r = avec(r, "suivi_lister_operations", 0, Ok("Erreur lors de la lecture des operations."));
+        let (e, manques) = analyser(&r, "2026-10-26");
+        assert_eq!(manques, ["suivi_lister_operations"]);
+        assert!(e.operations.is_none() && e.dependances.is_some() && e.references.is_some());
+        let mut r = reponses();
+        r.extend(suivi());
+        let r = avec(r, "lister_employes", 0, Err("lister_employes : Unknown tool: lister_employes"));
+        let (e, manques) = analyser(&r, "2026-10-26");
+        assert_eq!(manques, ["lister_employes"]);
+        assert_eq!(e.operations.as_ref().unwrap()[0].responsable.as_deref(), Some("Alex Modèle"));
+    }
+
+    #[test]
+    fn une_lecture_sans_le_suivi_garde_celui_d_avant() {
+        let mut r = reponses();
+        r.extend(suivi());
+        let (lu, manques) = analyser(&r, "2026-10-26");
+        let avec_le_suivi = lecture_de(lu, manques, true);
+        let e = Entreprise::default().suite(&avec_le_suivi, "2026-10-26T13:45:00-04:00");
+        assert_eq!(e.suivi_lu_a.as_deref(), Some("2026-10-26T13:45:00-04:00"));
+        assert_eq!(e.operations.as_ref().map(Vec::len), Some(2));
+        // Dix minutes plus tard, une lecture sans lui : le suivi d'avant reste, avec son heure.
+        let (lu, manques) = analyser(&reponses(), "2026-10-26");
+        let suite = e.suite(&lecture_de(lu, manques, false), "2026-10-26T13:55:00-04:00");
+        assert_eq!(
+            (suite.lu_a.as_deref(), suite.suivi_lu_a.as_deref()),
+            (Some("2026-10-26T13:55:00-04:00"), Some("2026-10-26T13:45:00-04:00"))
+        );
+        assert_eq!(
+            (&suite.operations, &suite.dependances, &suite.references),
+            (&e.operations, &e.dependances, &e.references)
+        );
+        // Le journal : combien d'outils cette lecture a appelés ; le suivi en nombres, quand il en est.
+        assert!(avec_le_suivi.resume().starts_with("22 outils lus sur 22 en "), "{}", avec_le_suivi.resume());
+        assert!(
+            avec_le_suivi.resume().contains("le suivi de production : 2 opérations, 2 dépendances, 1 références"),
+            "{}",
+            avec_le_suivi.resume()
+        );
+        assert!(!lecture_de(Entreprise::default(), Vec::new(), false).resume().contains("suivi"));
+        // La demi-heure : jamais lu, il est à relire ; lu à l'instant, non ; il y a trente et une minutes, oui ; à une
+        // heure de l'avenir (l'horloge du poste a reculé), oui.
+        assert!(suivi_a_relire(&Entreprise::default()));
+        let lu_a = |decalage: i64| {
+            let t = unix_maintenant() + decalage;
+            let (jour, s) = (t.div_euclid(86_400), t.rem_euclid(86_400));
+            Some(iso(&format!("{} {:02}:{:02}:{:02}", date_du_numero(jour), s / 3600, s / 60 % 60, s % 60), 0))
+        };
+        assert!(!suivi_a_relire(&Entreprise { suivi_lu_a: lu_a(-60), ..Entreprise::default() }));
+        assert!(suivi_a_relire(&Entreprise { suivi_lu_a: lu_a(-31 * 60), ..Entreprise::default() }));
+        assert!(suivi_a_relire(&Entreprise { suivi_lu_a: lu_a(3600), ..Entreprise::default() }));
     }
 
     #[test]
@@ -2359,9 +3324,18 @@ mod essais {
         for o in OUTILS_LUS {
             assert!(permis(o), "{o}");
         }
-        for (o, _) in appels("2026-10-26") {
+        for (o, _) in appels("2026-10-26", true) {
             assert!(OUTILS_LUS.contains(&o), "{o}");
         }
+        // Le suivi de production ne part qu'à la demande ; chaque outil de la liste sert à l'une ou l'autre lecture.
+        let sans_suivi = outils_de(&appels("2026-10-26", false));
+        let avec_suivi = outils_de(&appels("2026-10-26", true));
+        assert_eq!((sans_suivi.len(), avec_suivi.len()), (18, OUTILS_LUS.len()));
+        for o in OUTILS_DU_SUIVI {
+            assert!(!sans_suivi.contains(&o) && avec_suivi.contains(&o), "{o}");
+        }
+        // Les colonnes du Kanban : une lecture que la garde tient pour telle, en plus du serveur.
+        assert!(permis("suivi_colonnes"));
         for o in [
             "creer_facture", "supprimer_projet", "enregistrer_paiement", "modifier_projet",
             "suivi_creer_note_calendrier", "banque_creer_compte", "banque_publier_operation", "sql_admin",
@@ -2416,7 +3390,7 @@ mod essais {
     #[test]
     fn le_point_dit_l_essentiel_en_deux_phrases() {
         let (lu, _) = analyser(&reponses(), "2026-10-26");
-        let lecture = Lecture { entreprise: lu, manques: Vec::new(), ouverture: Duration::ZERO, duree: Duration::ZERO };
+        let lecture = lecture_de(lu, Vec::new(), false);
         let e = Entreprise::lue(&lecture, &maintenant_iso());
         assert_eq!(
             point_du_jour(&e),
@@ -2449,10 +3423,7 @@ mod essais {
         let dossier = std::env::temp_dir().join(format!("eve-entreprise-{}", std::process::id()));
         fs::create_dir_all(&dossier).unwrap();
         let (lu, manques) = analyser(&reponses(), "2026-10-26");
-        let e = Entreprise::lue(
-            &Lecture { entreprise: lu, manques, ouverture: Duration::ZERO, duree: Duration::ZERO },
-            "2026-10-26T13:45:00-04:00",
-        );
+        let e = Entreprise::lue(&lecture_de(lu, manques, false), "2026-10-26T13:45:00-04:00");
         ecrire(&dossier, &e).unwrap();
         assert_eq!(charger(&dossier), e);
         let texte = fs::read_to_string(dossier.join(FICHIER)).unwrap();
@@ -2509,7 +3480,7 @@ mod essais {
         let faux = crate::essais::FauxConstructo::demarrer(0, 3600, 0).unwrap();
         let (jeton, lien) = jeton_du_faux(&faux, "lecture");
         let (ressource, aujourdhui) = (lien.ressource(), crate::journal::date());
-        let l = lire(&ressource, &jeton, &aujourdhui).unwrap();
+        let l = lire(&ressource, &jeton, &aujourdhui, false).unwrap();
         assert!(l.manques.is_empty(), "{:?}", l.manques);
         let e = &l.entreprise;
         let k = &e.kpis;
@@ -2530,12 +3501,18 @@ mod essais {
         let agenda: Vec<&str> = e.agenda.iter().flatten().map(|n| n.texte.as_str()).collect();
         assert_eq!(
             agenda,
-            ["Réunion de chantier, 8 h", "Visite de chantier, 12 rue des Exemples", "Livraison des fermes de toit"]
+            [
+                "Une note de la semaine passée",
+                "Réunion de chantier, 8 h",
+                "Visite de chantier, 12 rue des Exemples",
+                "Livraison des fermes de toit",
+                "Une note dans trois semaines"
+            ]
         );
         assert_eq!((e.banque.as_ref().map(Vec::len), k.solde_banque), (Some(2), Some(52010.43)));
         assert_eq!(e.alertes.as_ref().map(Vec::len), Some(5));
         assert_eq!(faux.sessions(), 0, "la session est fermée");
-        assert!(l.resume().starts_with("14 outils lus sur 14 en "), "{}", l.resume());
+        assert!(l.resume().starts_with("18 outils lus sur 18 en "), "{}", l.resume());
         let journal = faux.journal().join("\n");
         for etape in [
             "mcp initialize (jeton courant)",
@@ -2550,18 +3527,149 @@ mod essais {
         // Un outil en panne manque sans emporter les autres ; la redirection de Starlette se prend une fois.
         faux.faire_echouer("lister_projets");
         faux.rediriger();
-        let l = lire(&ressource, &jeton, &aujourdhui).unwrap();
+        let l = lire(&ressource, &jeton, &aujourdhui, false).unwrap();
         assert_eq!(l.manques, ["lister_projets"]);
         assert!(l.entreprise.projets.is_none() && l.entreprise.kpis.projets_en_cours == Some(3));
         assert_eq!(faux.journal().iter().filter(|x| x.ends_with("/mcp renvoyé vers /mcp/")).count(), 1);
         assert_eq!(faux.sessions(), 0);
         // Un jeton que le serveur ne connaît pas : refusé, rien de lu.
-        assert_eq!(lire(&ressource, "eyJ.inconnu.sig", &aujourdhui).unwrap_err(), Panne::Jeton);
+        assert_eq!(lire(&ressource, "eyJ.inconnu.sig", &aujourdhui, false).unwrap_err(), Panne::Jeton);
         // Un serveur absent : une panne, qui le dit.
-        match lire("http://127.0.0.1:9/mcp", &jeton, &aujourdhui) {
+        match lire("http://127.0.0.1:9/mcp", &jeton, &aujourdhui, false) {
             Err(Panne::Serveur(m)) => assert!(m.starts_with("Constructo AI ne répond pas"), "{m}"),
             autre => panic!("{autre:?}"),
         }
+        let _ = fs::remove_file(&lien.fichier);
+    }
+
+    /// Le planning de bout en bout sur le faux Constructo AI (jamais le vrai) : une lecture avec le suivi de production
+    /// (les vingt-deux outils), `entreprise.json` écrit comme le chef l'écrit, puis ce qu'en tire le centre
+    /// (`Centre::planning`) — le Gantt, le Kanban et le calendrier de l'entreprise inventée.
+    #[test]
+    fn le_planning_de_bout_en_bout_sur_le_faux_serveur() {
+        use crate::planning::{Cote, Sorte};
+        let faux = crate::essais::FauxConstructo::demarrer(0, 3600, 0).unwrap();
+        let (jeton, lien) = jeton_du_faux(&faux, "planning");
+        let (ressource, aujourdhui) = (lien.ressource(), crate::journal::date());
+        let jour = |d: i64| date_du_numero(numero_du_jour(&aujourdhui).unwrap() + d);
+        let l = lire(&ressource, &jeton, &aujourdhui, true).unwrap();
+        assert!(l.manques.is_empty(), "{:?}", l.manques);
+        assert!(l.resume().starts_with("22 outils lus sur 22 en "), "{}", l.resume());
+        let journal = faux.journal().join("\n");
+        for outil in OUTILS_DU_SUIVI.iter().chain(&["suivi_colonnes", "suivi_etat_kanban", "lister_bons_travail"]) {
+            assert!(journal.contains(&format!("mcp tools/call {outil} (jeton courant)")), "{outil} :\n{journal}");
+        }
+        let dossier = std::env::temp_dir().join(format!("eve-planning-{}", std::process::id()));
+        fs::create_dir_all(&dossier).unwrap();
+        ecrire(&dossier, &Entreprise::default().suite(&l, &maintenant_iso())).unwrap();
+        let p = crate::centre::Centre::lu_maintenant(None, &dossier, "").planning(&aujourdhui);
+        assert_eq!(p.lu.len(), 16, "{}", p.lu);
+
+        // Le Gantt : chaque chantier (par son début), puis les siens ; un bon de travail sans chantier connu à sa
+        // place ; un bon de travail dont aucune opération n'est lue (celles du bon 38 sont finies avant la fenêtre),
+        // sous son chantier ; ni le bon annulé ni ses opérations ; ni l'opération sans date.
+        let ids: Vec<&str> = p.taches.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "projet-9", "bt-38", "projet-14", "op-501", "op-502", "op-503", "op-504", "projet-12", "op-520",
+                "op-521", "op-522", "bt-12", "op-120", "projet-16", "bt-45", "op-550",
+            ]
+        );
+        let t = |id: &str| p.taches.iter().find(|t| t.id == id).unwrap();
+        assert_eq!(
+            (t("projet-9").debut.clone(), t("projet-9").fin.clone()),
+            (jour(-75), aujourdhui.clone()),
+            "en cours"
+        );
+        assert_eq!((t("op-503").parent.as_deref(), t("bt-12").parent.as_deref()), (Some("projet-14"), None));
+        assert_eq!((t("op-503").statut.as_str(), t("op-504").statut.as_str()), ("En attente", "En attente"));
+        assert_eq!((t("op-501").avancement, t("op-520").avancement), (Some((20.0f64 / 24.0) as f32), Some(1.0)));
+        assert_eq!(t("projet-14").prevu, Some((jour(-40), jour(40))), "la référence de l'ERP");
+        assert_eq!(t("op-503").prevu, Some((jour(2), jour(6))));
+        assert_eq!(
+            (t("op-503").responsables.clone(), t("op-550").responsables.clone()),
+            (vec!["Toitures Exemple".to_string()], vec!["Kim Essai".to_string()])
+        );
+        assert_eq!((t("bt-12").titre.as_str(), t("bt-12").statut.as_str()), ("Bon de travail BT-2026-012", "En cours"));
+        let deps: Vec<(&str, &str, &str, i32)> =
+            p.dependances.iter().map(|d| (d.de.as_str(), d.vers.as_str(), d.sorte.as_str(), d.decalage)).collect();
+        assert_eq!(deps, [("op-501", "op-502", "FS", 0), ("op-502", "op-503", "FS", 1), ("op-520", "op-521", "FS", 0)]);
+
+        // Le Kanban : ses tableaux dans l'ordre du planning ; dans chacun, les colonnes de l'ERP, ce qu'il y compte
+        // (les variantes d'un statut réunies) et les cartes lues ; un statut hors de ses colonnes, après elles ; les
+        // ventes, dans l'ordre des étapes du CRM.
+        let cles: Vec<&str> = p.tableaux.iter().map(|t| t.cle.as_str()).collect();
+        assert_eq!(cles, ["projets", "devis", "bons_travail", "operations", "ventes", "achats", "factures"]);
+        let colonnes = |cle: &str| -> Vec<(String, usize, usize)> {
+            let t = p.tableaux.iter().find(|t| t.cle == cle).unwrap();
+            t.colonnes.iter().map(|c| (c.titre.clone(), c.total, c.cartes.len())).collect()
+        };
+        let attendu = |l: &[(&str, usize, usize)]| -> Vec<(String, usize, usize)> {
+            l.iter().map(|(t, n, c)| (t.to_string(), *n, *c)).collect()
+        };
+        assert_eq!(
+            colonnes("projets"),
+            attendu(&[
+                ("En attente", 1, 1),
+                ("En cours", 3, 3),
+                ("Terminé", 9, 0),
+                ("Annulé", 1, 0),
+                ("Suspendu", 0, 0)
+            ])
+        );
+        assert_eq!(
+            colonnes("bons_travail"),
+            attendu(&[
+                ("Brouillon", 1, 1),
+                ("En cours", 3, 2),
+                ("Terminé", 38, 1),
+                ("En pause", 0, 0),
+                ("Annulé", 2, 1)
+            ])
+        );
+        assert_eq!(
+            colonnes("operations"),
+            attendu(&[("En attente", 6, 5), ("En cours", 3, 3), ("Terminé", 3, 1), ("Annulé", 1, 1)])
+        );
+        assert_eq!(
+            colonnes("ventes"),
+            attendu(&[("Qualification", 2, 2), ("Proposition", 3, 3), ("Gagné", 4, 0), ("Perdu", 2, 0)])
+        );
+        assert_eq!(colonnes("achats").last(), Some(&("Commandé".to_string(), 1, 1)));
+        assert_eq!(colonnes("factures")[1..3].to_vec(), attendu(&[("Envoyée", 2, 2), ("Payée", 110, 0)]));
+        assert_eq!(
+            colonnes("devis").iter().map(|c| c.2).sum::<usize>(),
+            4,
+            "les soumissions en cours, une fois chacune"
+        );
+        let bons = p.tableaux.iter().find(|t| t.cle == "bons_travail").unwrap();
+        assert!(bons.garde.as_deref().is_some_and(|g| g.starts_with("ANNULE interdit via le Kanban")));
+        let vente = &p.tableaux.iter().find(|t| t.cle == "ventes").unwrap().colonnes[1].cartes[0];
+        assert_eq!(
+            (vente.id.as_str(), vente.montant, vente.echeance.clone()),
+            ("opportunite-15", Some(180000.0), Some(jour(20)))
+        );
+
+        // Le calendrier de l'entreprise : chaque sorte de ses événements ; ni le bon annulé ni ses opérations ; une
+        // livraison à son heure ; chaque chose dit à Claude ce qu'elle est et son numéro dans l'ERP.
+        for s in [Sorte::Note, Sorte::Chantier, Sorte::Operation, Sorte::Facture, Sorte::Livraison, Sorte::Echeance] {
+            assert!(p.evenements.iter().any(|e| e.sorte == s && e.cote == Cote::Entreprise), "{s:?}");
+        }
+        assert!(!p.evenements.iter().any(|e| e.titre.starts_with("Démolition")));
+        let livraison =
+            p.evenements.iter().find(|e| e.titre == "Livraison · Agrandissement, 12 rue des Exemples").unwrap();
+        assert_eq!((livraison.debut.clone(), livraison.heure.as_deref()), (jour(3), Some("08:30")));
+        let bardeaux = p.evenements.iter().find(|e| e.titre == "Bardeaux").unwrap();
+        assert_eq!((bardeaux.debut.clone(), bardeaux.fin.clone()), (jour(4), Some(jour(8))));
+        for quoi in ["l'opération « Bardeaux » (opération n° 503 de l'ERP)", "BT-2026-041", "Toitures Exemple"] {
+            assert!(bardeaux.source.contains(quoi), "{quoi} : {}", bardeaux.source);
+        }
+        let mut jours: Vec<&str> = p.evenements.iter().map(|e| e.debut.as_str()).collect();
+        let dans_l_ordre = jours.clone();
+        jours.sort_unstable();
+        assert_eq!(jours, dans_l_ordre, "dans l'ordre du calendrier");
+        let _ = fs::remove_dir_all(&dossier);
         let _ = fs::remove_file(&lien.fichier);
     }
 }
