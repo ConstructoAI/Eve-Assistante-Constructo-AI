@@ -470,11 +470,14 @@ pub fn ouvrir_dans_le_navigateur(url: &str) -> Result<(), String> {
     imp::ouvrir(url)
 }
 
-fn sha256(o: &[u8]) -> Result<[u8; 32], String> {
+/// Le SHA-256, par Windows (BCrypt) : celui de PKCE, et celui du téléphone ([`crate::telephone`] : l'empreinte de son
+/// certificat, celle de la clé d'un téléphone).
+pub(crate) fn sha256(o: &[u8]) -> Result<[u8; 32], String> {
     imp::sha256(o)
 }
 
-fn aleatoire(o: &mut [u8]) -> Result<(), String> {
+/// Des octets du générateur du système (BCrypt) : ceux de PKCE, et les codes et les numéros du téléphone.
+pub(crate) fn aleatoire(o: &mut [u8]) -> Result<(), String> {
     imp::aleatoire(o)
 }
 

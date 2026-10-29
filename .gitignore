@@ -1,6 +1,8 @@
 # La construction (Compiler.bat), le kit emballé (emballer.ps1) : ils se refont, rien de cela n'entre dans le dépôt.
 /target/
 /dist/
+# Le dossier de construction commun d'une équipe d'agents (chacun dans sa copie de travail) : il se refait.
+/target-equipe/
 # Ce qui se pose sur le poste du développeur, hors du dépôt : la libclang de whisper-rs (voir .cargo/config.toml) et
 # le Python embarquable du kit (outils/preparer_python.ps1).
 /outils/libclang/

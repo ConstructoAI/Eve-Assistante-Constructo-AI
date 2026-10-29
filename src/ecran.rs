@@ -244,9 +244,11 @@ pub fn ouvrir_fenetre(url: &str) {
     }
 }
 
-struct Requete {
-    methode: String,
-    chemin: String,
+/// Une requête HTTP lue par [`lire_tete`] : celles de la vitrine, et celles du téléphone ([`crate::telephone`], en
+/// TLS).
+pub(crate) struct Requete {
+    pub(crate) methode: String,
+    pub(crate) chemin: String,
     requete: String,
     entetes: Vec<(String, String)>,
     /// Les octets du corps déjà lus avec l'en-tête.
@@ -254,20 +256,22 @@ struct Requete {
 }
 
 impl Requete {
-    fn entete(&self, nom: &str) -> Option<&str> {
+    /// Un en-tête, par son nom en minuscules.
+    pub(crate) fn entete(&self, nom: &str) -> Option<&str> {
         self.entetes.iter().find(|(n, _)| n == nom).map(|(_, v)| v.as_str())
     }
 
-    fn parametre(&self, nom: &str) -> Option<String> {
+    pub(crate) fn parametre(&self, nom: &str) -> Option<String> {
         self.requete.split('&').filter_map(|p| p.split_once('=')).find(|(n, _)| *n == nom).map(|(_, v)| decoder(v))
     }
 
-    fn longueur(&self) -> u64 {
+    pub(crate) fn longueur(&self) -> u64 {
         self.entete("content-length").and_then(|v| v.parse().ok()).unwrap_or(0)
     }
 }
 
-fn lire_tete(flux: &mut TcpStream) -> io::Result<Option<Requete>> {
+/// La tête d'une requête (sa ligne, ses en-têtes), lue sur n'importe quel flux : la vitrine, ou le TLS du téléphone.
+pub(crate) fn lire_tete(flux: &mut impl Read) -> io::Result<Option<Requete>> {
     let mut tampon = Vec::with_capacity(2048);
     let mut morceau = [0u8; 2048];
     let fin = loop {
@@ -340,7 +344,10 @@ fn servir(mut flux: TcpStream, ecran: &Ecran, rapport: &Sender<Evt>) -> io::Resu
             }
             repondre(&mut flux, 204, "text/plain", b"")
         }
-        ("POST", "/piece") if par_entete => recevoir_piece(flux, &req, rapport),
+        ("POST", "/piece") if par_entete => {
+            flux.set_read_timeout(Some(Duration::from_secs(30)))?;
+            recevoir_piece(&mut flux, &req, rapport)
+        }
         ("POST", "/scan") if par_entete => recevoir_scan(flux, &req, rapport),
         ("GET", "/historique") if par_entete => {
             let qui = req.parametre("qui").unwrap_or_default();
@@ -471,9 +478,12 @@ fn entete_http(code: u16, sorte: &str, longueur: usize, politique: Option<&str>)
         200 => "OK",
         204 => "No Content",
         400 => "Bad Request",
+        401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
         413 => "Payload Too Large",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
         _ => "Error",
     };
     let politique = politique.map(|p| format!("Content-Security-Policy: {p}\r\n")).unwrap_or_default();
@@ -483,13 +493,15 @@ fn entete_http(code: u16, sorte: &str, longueur: usize, politique: Option<&str>)
     )
 }
 
-fn repondre(flux: &mut TcpStream, code: u16, sorte: &str, corps: &[u8]) -> io::Result<()> {
+/// Une réponse entière (la connexion se ferme après elle).
+pub(crate) fn repondre(flux: &mut impl Write, code: u16, sorte: &str, corps: &[u8]) -> io::Result<()> {
     flux.write_all(entete_http(code, sorte, corps.len(), None).as_bytes())?;
     flux.write_all(corps)?;
     flux.flush()
 }
 
-fn lire_corps(flux: &mut TcpStream, req: &Requete, max: u64) -> io::Result<Vec<u8>> {
+/// Le corps d'une requête, `max` octets au plus (au-delà : une erreur, rien n'est lu).
+pub(crate) fn lire_corps(flux: &mut impl Read, req: &Requete, max: u64) -> io::Result<Vec<u8>> {
     let n = req.longueur();
     if n > max {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "corps trop gros"));
@@ -553,18 +565,17 @@ fn evenement(flux: &mut TcpStream, donnees: &str) -> io::Result<()> {
     flux.flush()
 }
 
-/// Une pièce jointe de la page : le corps de la requête est le fichier, joint comme ceux de la fenêtre native
-/// ([`joindre`]) ; un refus répond son texte.
-fn recevoir_piece(mut flux: TcpStream, req: &Requete, rapport: &Sender<Evt>) -> io::Result<()> {
+/// Une pièce jointe de la page, ou du téléphone : le corps de la requête est le fichier, joint comme ceux de la fenêtre
+/// native ([`joindre`]) ; un refus répond son texte.
+pub(crate) fn recevoir_piece(flux: &mut (impl Read + Write), req: &Requete, rapport: &Sender<Evt>) -> io::Result<()> {
     let n = req.longueur();
-    flux.set_read_timeout(Some(Duration::from_secs(30)))?;
     let deja = &req.reste[..req.reste.len().min(n as usize)];
-    let corps = deja.chain((&mut flux).take(n - deja.len() as u64));
+    let corps = deja.chain((&mut *flux).take(n - deja.len() as u64));
     match joindre(&req.parametre("nom").unwrap_or_default(), n, corps, rapport) {
-        Ok(()) => repondre(&mut flux, 200, "application/json", br#"{"ok":true}"#),
+        Ok(()) => repondre(flux, 200, "application/json", br#"{"ok":true}"#),
         Err(refus) => {
             let code = if matches!(refus, PieceRefusee::Echec(_)) { 400 } else { 413 };
-            repondre(&mut flux, code, "text/plain; charset=utf-8", refus.to_string().as_bytes())
+            repondre(flux, code, "text/plain; charset=utf-8", refus.to_string().as_bytes())
         }
     }
 }

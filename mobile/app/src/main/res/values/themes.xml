@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- La fenêtre avant que Compose ne dessine : le bleu très pâle du fond de l'ERP, et l'icône sur le marine de sa
+         barre pendant l'ouverture. Ensuite, Compose dessine tout, bord à bord. -->
+    <color name="fond">#FFEFF5FF</color>
+    <color name="marine">#FF002B6B</color>
+
+    <style name="Theme.Eve" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/fond</item>
+    </style>
+</resources>

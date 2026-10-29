@@ -30,6 +30,10 @@ Installer la nouvelle version : eve.exe --mettre-a-jour target\release\eve.exe, 
 la fin de sa réponse, la conversation reprise ; si la nouvelle ne démarre pas en 90 secondes, l'ancienne revient
 d'elle-même. eve.exe --revenir revient à la version précédente.
 
+L'appli Android est dans mobile\ (Kotlin, Jetpack Compose) : il faut Android Studio (son Java et le SDK
+d'Android), puis mobile\Construire.bat --essais (l'APK : mobile\app\build\outputs\apk\debug\app-debug.apk). Elle
+se jumelle à une Eve par le code carré de ses réglages (src\telephone.rs).
+
 Refaire le kit : outils\preparer_python.ps1 (une fois), le portrait dans kit\portrait (le dossier programme\portrait
-d'un zip du kit), puis emballer.ps1 -Construire (dist\Eve-Assistante-Constructo-AI-vN.zip : N, la révision, est la
-version de Cargo.toml, sa seule source).
+d'un zip du kit), l'appli Android (mobile\Construire.bat), puis emballer.ps1 -Construire
+(dist\Eve-Assistante-Constructo-AI-vN.zip : N, la révision, est la version de Cargo.toml, sa seule source).

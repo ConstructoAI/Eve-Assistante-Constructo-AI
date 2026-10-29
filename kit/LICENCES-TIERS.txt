@@ -94,7 +94,21 @@ aux copies ainsi obtenues.
   sa licence et ses avis de tiers (ThirdPartyNotices.txt), tirés de sa publication officielle.
 
 
-4. Ailleurs
+4. Dans l'appli Android (Eve-pour-Android.apk)
+-----------------------------------------------
+
+· Kotlin et sa bibliothèque — le langage de l'appli. Licence Apache 2.0. © JetBrains s.r.o. https://kotlinlang.org
+· AndroidX : Jetpack Compose, Material 3, Activity, Lifecycle, Core — son écran. Licence Apache 2.0.
+  © The Android Open Source Project. https://developer.android.com/jetpack/androidx
+· OkHttp et Okio — la liaison avec l'ordinateur. Licence Apache 2.0. © Square, Inc. https://square.github.io/okhttp
+· ZXing et zxing-android-embedded — la lecture du code carré. Licence Apache 2.0.
+  © les auteurs de ZXing ; © JourneyApps. https://github.com/zxing/zxing,
+  https://github.com/journeyapps/zxing-android-embedded
+· Material Icons — ses icônes (envoyer, micro, joindre, arrêter, fermer, le menu). Licence Apache 2.0. © Google.
+  https://github.com/google/material-design-icons
+
+
+5. Ailleurs
 -----------
 
 · Claude Code et les modèles Claude (le cerveau d'Eve) appartiennent à Anthropic et s'emploient sous ses conditions,

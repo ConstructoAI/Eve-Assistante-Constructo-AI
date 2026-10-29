@@ -1,0 +1,10 @@
+# Ce que Gradle et Android Studio refont : rien de cela n'entre dans le dépôt.
+/.gradle/
+/.kotlin/
+/build/
+/app/build/
+/.idea/
+*.iml
+/captures/
+# Le chemin du SDK de ce poste, qu'Android Studio écrit : Construire.bat pose ANDROID_HOME à la place.
+/local.properties

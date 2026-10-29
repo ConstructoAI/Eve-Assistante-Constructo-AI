@@ -498,7 +498,12 @@ pub fn rms(x: &[f32]) -> f32 {
 
 /// Un fichier WAV (PCM 16 bits, toutes cadences, mono ou stéréo), à 16 kHz mono : pour les essais.
 pub fn lire_wav(chemin: &Path) -> Result<Vec<f32>, String> {
-    let o = std::fs::read(chemin).map_err(|e| format!("{} : {e}", chemin.display()))?;
+    pcm_du_wav(&std::fs::read(chemin).map_err(|e| format!("{} : {e}", chemin.display()))?)
+}
+
+/// Un WAV en mémoire (PCM 16 bits, toutes cadences, mono ou stéréo), à 16 kHz mono : celui d'un fichier d'essai, ou la
+/// voix que le téléphone envoie ([`crate::telephone`]).
+pub fn pcm_du_wav(o: &[u8]) -> Result<Vec<f32>, String> {
     if o.len() < 12 || &o[0..4] != b"RIFF" || &o[8..12] != b"WAVE" {
         return Err("ce n'est pas un fichier WAV".into());
     }
@@ -662,7 +667,14 @@ mod essais {
         m.debut();
         std::fs::write(dossier.join("a.tmp"), &wav).unwrap();
         std::fs::rename(dossier.join("a.tmp"), dossier.join("a.wav")).unwrap();
-        std::thread::sleep(Duration::from_millis(1_200));
+        // Le son se joue en temps réel (0,6 s) dès que le fil du micro d'essai le prend — il le renomme alors : on attend
+        // qu'il le prenne (cinq secondes au plus), puis la durée du son et une marge. Sous la charge, le fil le prend
+        // plus tard : le 28 octobre, une attente fixe de 1,2 s depuis le dépôt n'a pas suffi deux fois.
+        let debut = std::time::Instant::now();
+        while !dossier.join("a.entendu").is_file() && debut.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::thread::sleep(Duration::from_millis(1_000));
         let entendu = m.fin();
         assert!(dossier.join("a.entendu").is_file(), "le son joué se renomme");
         assert!(entendu.len() > 15_000 && rms(&entendu) > 0.05, "{} échantillons, {}", entendu.len(), rms(&entendu));

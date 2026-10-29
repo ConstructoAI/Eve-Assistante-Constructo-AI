@@ -20,7 +20,10 @@
 //! - **le tableau de bord de l'entreprise** ([`entreprise`]) : une lecture de l'ERP au démarrage, toutes les dix
 //!   minutes et à la demande, dans un fil, avec le jeton d'accès du moment ; `entreprise.json`, que lui seul écrit ;
 //! - **la mise à jour** ([`mise_a_jour`]) : une relance demandée attend la fin du tour, puis le gardien prend le relais
-//!   et Eve se ferme ; la marque de santé, cinq secondes après le démarrage, la fenêtre ouverte.
+//!   et Eve se ferme ; la marque de santé, cinq secondes après le démarrage, la fenêtre ouverte ;
+//! - **le téléphone** ([`crate::telephone`]) : l'appli Android, une fenêtre de plus — ses gestes et la voix de la
+//!   personne arrivent ici, et la réponse à une demande faite du téléphone s'y dit (`au_telephone`), même en sourdine
+//!   (celle des haut-parleurs du poste).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -52,6 +55,7 @@ use crate::profils::{self, Laisse, Laisses};
 use crate::rappels::{self, Rappels};
 use crate::reglages::{Profil, Reglages, dossier_local, nom_affiche};
 use crate::sons::{self, Son};
+use crate::telephone::{self, Telephones};
 use crate::touche;
 use crate::veilles::{self, DuNeuf, Vues};
 use crate::veilleur::{Jour, Nouvelle, RendezVous, Sorte};
@@ -159,6 +163,9 @@ pub enum Evt {
         fin_de_parole: Option<Instant>,
         erreur: Option<String>,
     },
+    /// Le téléphone ([`crate::telephone`]) : un jumelage, un téléphone branché ou parti, un geste, la voix de la
+    /// personne.
+    Telephone(telephone::Evenement),
 }
 
 /// Une étape de la connexion à Constructo AI, rapportée par le fil qui parle au serveur.
@@ -570,6 +577,10 @@ pub struct Chef {
     veilles_a_dire: VecDeque<DuNeuf>,
     veille_du_tour: Option<DuNeuf>,
     tour_sans_voix: bool,
+    /// Les téléphones jumelés et leur serveur ([`crate::telephone`]) ; celui d'où vient la dernière demande, s'il y en a
+    /// un : la voix d'Eve y va, jusqu'à la prochaine demande faite au poste.
+    telephones: Telephones,
+    au_telephone: Option<String>,
     /// La panne de Claude vue dans le tour (sa sorte : « rate_limit », « overloaded », « reseau »…), dite à sa fin ; un
     /// nouvel essai de l'API déjà dit dans le tour.
     panne: String,
@@ -792,6 +803,13 @@ impl Chef {
         // Ce que le gardien d'une relance a laissé pour cette Eve : la conversation à reprendre, ce qu'elle dira.
         let depart = mise_a_jour::au_demarrage();
         let maintenant = Instant::now();
+        let telephones = Telephones::demarrer(
+            dossier_local(),
+            nom_affiche().to_string(),
+            reglages.port_du_telephone(),
+            reglages.ecoute_du_telephone(),
+            rapport.clone(),
+        );
         let mut chef = Chef {
             micro_nom: micro.as_ref().map(|m| m.nom.clone()).unwrap_or_default(),
             reglages,
@@ -846,6 +864,8 @@ impl Chef {
             veilles_a_dire: VecDeque::new(),
             veille_du_tour: None,
             tour_sans_voix: false,
+            telephones,
+            au_telephone: None,
             panne: String::new(),
             reessai_dit: false,
             limite: None,
@@ -1040,9 +1060,18 @@ impl Chef {
 
     fn traiter(&mut self, evt: Evt) {
         match evt {
-            Evt::Touche(true) => self.parler_debut(),
+            Evt::Touche(true) => {
+                self.au_poste();
+                self.parler_debut()
+            }
             Evt::Touche(false) => self.parler_fin(),
-            Evt::Ui { action, valeur } => self.geste(&action, &valeur),
+            Evt::Ui { action, valeur } => {
+                // Une demande écrite dans la fenêtre : la personne est au poste.
+                if action == "texte" {
+                    self.au_poste();
+                }
+                self.geste(&action, &valeur)
+            }
             Evt::Piece { nom, chemin, taille } => {
                 journal::ecrire(&format!("pièce jointe : {}", chemin.display()));
                 self.joindre(nom, chemin, taille);
@@ -1089,6 +1118,7 @@ impl Chef {
                 }
             }
             Evt::EveilEntendu => {
+                self.au_poste();
                 self.transcriptions += 1;
                 self.eveil_en_cours = true;
                 journal::ecrire("« Eve » entendu");
@@ -1179,6 +1209,7 @@ impl Chef {
             Evt::Connexion { tour, etape } => self.etape_de_connexion(tour, etape),
             Evt::Entreprise { tour, emis, duree, issue } => self.entreprise_lue(tour, emis, duree, issue),
             Evt::EcranPris { texte, fin_de_parole, erreur } => self.ecran_pris(texte, fin_de_parole, erreur),
+            Evt::Telephone(e) => self.du_telephone(e),
         }
     }
 
@@ -1202,6 +1233,25 @@ impl Chef {
                 }
             }
             ("arreter", _) => self.arreter(),
+            // Le téléphone : on lui reparle pendant qu'Eve parle — elle se tait, et son travail continue.
+            ("taire", _) => self.couper(),
+            // Les téléphones, dans les réglages de la fenêtre : « Jumeler un téléphone », fermer l'offre, en retirer un.
+            ("telephone_jumeler", _) => {
+                if let Err(e) = self.telephones.jumeler(&self.reglages.qui) {
+                    self.systeme(&format!("Le jumelage ne s'ouvre pas : {e}."));
+                }
+            }
+            ("telephone_fermer", _) => self.telephones.fermer_l_offre(),
+            ("telephone_retirer", Some(id)) => match self.telephones.retirer(id) {
+                Ok(Some(nom)) => {
+                    if self.au_telephone.as_deref() == Some(id) {
+                        self.au_poste();
+                    }
+                    self.systeme(&format!("Le téléphone « {nom} » est retiré : il ne me joint plus."));
+                }
+                Ok(None) => {}
+                Err(e) => self.systeme(&format!("Le téléphone ne se retire pas : {e}.")),
+            },
             ("nouvelle", _) => {
                 self.nouvelle_conversation("— Nouvelle conversation : la mémoire repart de zéro —", true)
             }
@@ -2318,6 +2368,77 @@ impl Chef {
         }
     }
 
+    // ---- Le téléphone -----------------------------------------------------------------------------------------------
+
+    /// Ce que dit le serveur des téléphones ([`crate::telephone`]).
+    fn du_telephone(&mut self, e: telephone::Evenement) {
+        match e {
+            telephone::Evenement::Jumele { nom, qui } => {
+                let pour = if qui.is_empty() { String::new() } else { format!(", pour {qui}") };
+                self.systeme(&format!("Le téléphone « {nom} » est jumelé{pour} : il peut me parler."));
+            }
+            // Au journal ; la fenêtre le montre, son état se publiant au battement suivant.
+            telephone::Evenement::Branche { telephone } => {
+                let nom = self.telephones.nom(&telephone).unwrap_or(telephone);
+                journal::ecrire(&format!("téléphone : « {nom} » branché"));
+            }
+            telephone::Evenement::Parti { telephone } => {
+                let nom = self.telephones.nom(&telephone).unwrap_or(telephone);
+                journal::ecrire(&format!("téléphone : « {nom} » parti"));
+            }
+            telephone::Evenement::Geste { telephone, action, valeur } => {
+                // Une demande écrite au téléphone : la réponse s'y dira.
+                if action == "texte" {
+                    self.vers_le_telephone(&telephone);
+                }
+                self.geste(&action, &valeur);
+            }
+            telephone::Evenement::Son { telephone, audio, fin } => self.son_du_telephone(&telephone, audio, fin),
+            telephone::Evenement::Ferme => self.systeme(
+                "Trop d'essais refusés : le serveur des téléphones se ferme dix minutes. Un téléphone qui n'est pas \
+                 jumelé essaie peut-être de me joindre.",
+            ),
+        }
+    }
+
+    /// La demande vient de ce téléphone : la voix d'Eve y va, jusqu'à la prochaine demande faite au poste.
+    fn vers_le_telephone(&mut self, id: &str) {
+        if self.au_telephone.as_deref() != Some(id) {
+            self.au_telephone = Some(id.to_string());
+            self.voix.sortie(Some(self.telephones.renvoi(id)));
+        }
+    }
+
+    /// La demande vient du poste (sa touche, « Eve », sa fenêtre) : la voix d'Eve revient à ses haut-parleurs.
+    fn au_poste(&mut self) {
+        if self.au_telephone.take().is_some() {
+            self.voix.sortie(None);
+        }
+    }
+
+    /// La voix de la personne, tenue sur son téléphone : comme celle de la touche ([`Self::parler_fin`]), l'oreille de
+    /// l'ordinateur la transcrit, puis la demande part ; la réponse se dit au téléphone.
+    fn son_du_telephone(&mut self, id: &str, audio: Vec<f32>, fin: Instant) {
+        if (audio.len() as f32) < 0.35 * micro::CADENCE as f32 {
+            return;
+        }
+        self.vers_le_telephone(id);
+        if micro::rms(&audio) < 0.0025 {
+            self.dire("Je n'ai rien entendu.");
+            return;
+        }
+        if self.oreille_etat.0 != "prete" {
+            self.systeme("L'oreille n'est pas encore prête : écris ta demande, ou réessaie dans un instant.");
+            return;
+        }
+        if self.oreille.send(Demande::Commande { audio, continue_: false, depuis: fin, suite_possible: false }).is_ok()
+        {
+            self.transcriptions += 1;
+        } else {
+            self.oreille_perdue();
+        }
+    }
+
     /// « Eve, … » entendu (la phrase finie à `depuis`) : la demande qui suit le nom. « Eve » seul : « Oui ? », puis
     /// l'écoute de la suite — sauf si une phrase en suspens attend déjà la sienne.
     fn apres_eve(&mut self, demande: String, depuis: Instant) {
@@ -2453,7 +2574,8 @@ impl Chef {
             return;
         }
         // « Regarde mon écran » : la capture d'abord, jointe comme un fichier ; la demande part avec elle (`ecran_pris`).
-        if parole::demande_l_ecran(&t) && !self.ecran_en_cours {
+        // Dite au téléphone, elle ne parle pas de l'écran du poste : elle part telle quelle.
+        if parole::demande_l_ecran(&t) && !self.ecran_en_cours && self.au_telephone.is_none() {
             self.ecran_en_cours = true;
             crate::capture::prendre_et_joindre(t, fin_de_parole, self.rapport.clone());
             return;
@@ -2495,9 +2617,14 @@ impl Chef {
             self.dire(&format!("Je ne peux pas : {} n'est pas démarré{}. Le détail est à l'écran.", n.le, n.e));
             return;
         }
-        // L'heure de la demande, que Claude Code ne sait pas (il n'a que la date) : pour un rappel, « dans une heure ».
+        // L'heure de la demande, que Claude Code ne sait pas (il n'a que la date) : pour un rappel, « dans une heure » ; et
+        // d'où elle vient, quand c'est du téléphone — la personne n'est sans doute pas devant l'ordinateur.
+        let d_ou = match self.au_telephone.as_deref().and_then(|id| self.telephones.nom(id)) {
+            Some(nom) => format!(" ; la personne te parle de son téléphone ({nom}), sans doute loin de l'ordinateur"),
+            None => String::new(),
+        };
         let mut message = format!(
-            "[Eve : nous sommes le {}, il est {}.]\n\n",
+            "[Eve : nous sommes le {}, il est {}{d_ou}.]\n\n",
             crate::ambiance::date_longue(&journal::date()).to_lowercase(),
             rappels::heure_dite(&journal::date_et_heure(), &journal::date())
         );
@@ -4251,9 +4378,14 @@ impl Chef {
 
     // ---- L'écran et la voix ----------------------------------------------------------------------------------------
 
+    /// La sourdine : celle des haut-parleurs du poste — la réponse à une demande du téléphone s'y dit quand même.
+    fn en_sourdine(&self) -> bool {
+        self.reglages.sourdine && self.au_telephone.is_none()
+    }
+
     /// Une phrase qu'Eve ne fait que dire (« Je n'ai rien entendu. », une alerte) : en sourdine, elle s'écrit à l'écran.
     fn dire(&mut self, texte: &str) {
-        if self.reglages.sourdine {
+        if self.en_sourdine() {
             self.systeme(texte);
         } else {
             self.dire_a_voix_haute(texte);
@@ -4268,7 +4400,7 @@ impl Chef {
 
     /// Une phrase dite à voix haute après ce qui la sépare de la précédente dans le texte (`saut`).
     fn dire_apres(&mut self, texte: &str, saut: parole::Saut) -> Option<u64> {
-        if self.reglages.sourdine || self.tour_sans_voix {
+        if self.en_sourdine() || self.tour_sans_voix {
             return None;
         }
         self.parole_id += 1;
@@ -4515,7 +4647,8 @@ impl Chef {
     /// Une notification de Windows (`titre`, `texte`), si la personne les veut et que la fenêtre n'est pas devant : sous
     /// ses yeux, Eve se voit et s'entend déjà.
     fn notifier(&self, titre: &str, texte: &str) {
-        if self.reglages.notifications && !self.fenetre_devant {
+        // La personne parle à Eve de son téléphone : il montre la réponse, et le poste n'a personne devant lui.
+        if self.reglages.notifications && !self.fenetre_devant && self.au_telephone.is_none() {
             self.notifications.montrer(titre, texte);
         }
     }
@@ -4794,10 +4927,14 @@ impl Chef {
             // Constructo AI : le bouton des réglages (« Se connecter à Constructo AI », le compte, « Se déconnecter »).
             "constructo": self.etat_constructo(),
             "version": version,
-        })
-        .to_string();
+        });
+        // Les téléphones (leur rubrique des réglages, le code carré d'un jumelage) : la fenêtre seule les voit.
+        let mut s = s;
+        s["telephones"] = self.telephones.etat();
+        let s = s.to_string();
         if s != self.dernier_publie {
             self.ecran.publier(&s);
+            self.telephones.publier(&s);
             self.dernier_publie = s;
         }
     }

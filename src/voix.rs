@@ -37,6 +37,7 @@ use eve::parole::{self, Forme, Saut};
 use crate::chef::Evt;
 use crate::journal;
 use crate::reglages::{Reglages, VOIX_PAR_DEFAUT, dossier_local};
+use crate::telephone::{ATTENTE_DU_TELEPHONE, Renvoi};
 
 use lecture::{Lecteur, Synthetiseur};
 pub use prosodie::{Marque, Repere};
@@ -95,6 +96,8 @@ enum Ordre {
     Prononciations(BTreeMap<String, String>),
     /// Réveille le fil : le seuil de la coupure est dans [`Coupure`].
     Taire,
+    /// Où la voix se joue désormais : sur ce téléphone, ou (`None`) par les haut-parleurs du poste.
+    Sortie(Option<Renvoi>),
 }
 
 /// La coupure par numéro, partagée entre le chef et le fil de la voix : `taire` coupe tout identifiant donné jusque-là,
@@ -502,6 +505,12 @@ impl Voix {
     /// Les prononciations de la personne : elles valent pour ce qui se donne ensuite.
     pub fn prononcer(&self, prononciations: BTreeMap<String, String>) {
         let _ = self.tx.send(Ordre::Prononciations(prononciations));
+    }
+
+    /// Où la voix se joue : sur ce téléphone (la demande en venait), ou par les haut-parleurs du poste (`None`). Le son
+    /// qui se dit finit là où il était ; le suivant part de la nouvelle sortie.
+    pub fn sortie(&self, renvoi: Option<Renvoi>) {
+        let _ = self.tx.send(Ordre::Sortie(renvoi));
     }
 }
 
@@ -1474,6 +1483,100 @@ enum Lu {
     Echec(String),
 }
 
+/// Où se joue la voix : les haut-parleurs du poste ([`Lecteur`]), ou un téléphone ([`AuTelephone`]) — le fil de la
+/// voix mène l'un comme l'autre.
+trait Sortie {
+    /// Ouvre d'avance le son qui suit.
+    fn precharger(&mut self, numero: u64, wav: &[u8]);
+    /// Le joue sans attendre, `pause` après la voix du précédent (le fil l'a déjà attendue : un téléphone la garde
+    /// entre deux sons qui lui arrivent trop tôt) ; rend le temps qu'il mettra sans doute à s'entendre.
+    fn jouer(&mut self, numero: u64, wav: Vec<u8>, pause: Duration) -> Result<Duration, String>;
+    fn sonder(&mut self) -> Lu;
+    /// Le temps que ce son mettrait à s'entendre si on le donnait maintenant.
+    fn attente(&self, numero: u64) -> Duration;
+    /// L'instant où le son en cours a commencé de s'entendre.
+    fn debut(&self) -> Option<Instant>;
+    /// Coupe le son tout de suite.
+    fn arreter(&mut self);
+}
+
+impl Sortie for Lecteur {
+    fn precharger(&mut self, numero: u64, wav: &[u8]) {
+        Lecteur::precharger(self, numero, wav);
+    }
+    fn jouer(&mut self, numero: u64, wav: Vec<u8>, _pause: Duration) -> Result<Duration, String> {
+        Lecteur::jouer(self, numero, wav)
+    }
+    fn sonder(&mut self) -> Lu {
+        Lecteur::sonder(self)
+    }
+    fn attente(&self, numero: u64) -> Duration {
+        Lecteur::attente(self, numero)
+    }
+    fn debut(&self) -> Option<Instant> {
+        Lecteur::debut(self)
+    }
+    fn arreter(&mut self) {
+        Lecteur::arreter(self);
+    }
+}
+
+/// La voix jouée sur un téléphone ([`crate::telephone`]) : chaque son lui part à son heure, dans son flux, et son temps
+/// passe ici comme s'il se jouait (le téléphone ne dit pas quand il joue) — la bouche du portrait de la fenêtre le suit
+/// de même. Le téléphone parti, le son ne s'entend nulle part : son temps est nul, et rien ne s'en dit au poste.
+struct AuTelephone {
+    renvoi: Renvoi,
+    depuis: Instant,
+    duree: Option<Duration>,
+}
+
+impl AuTelephone {
+    fn nouveau(renvoi: Renvoi) -> AuTelephone {
+        AuTelephone { renvoi, depuis: Instant::now(), duree: None }
+    }
+}
+
+impl Sortie for AuTelephone {
+    fn precharger(&mut self, _numero: u64, _wav: &[u8]) {}
+
+    fn jouer(&mut self, numero: u64, wav: Vec<u8>, pause: Duration) -> Result<Duration, String> {
+        let envoye = self.renvoi.voix(numero, pause, &wav);
+        self.depuis = Instant::now();
+        self.duree = Some(if envoye { duree_wav(&wav).unwrap_or_default() } else { Duration::ZERO });
+        Ok(if envoye { ATTENTE_DU_TELEPHONE } else { Duration::ZERO })
+    }
+
+    fn sonder(&mut self) -> Lu {
+        match self.duree {
+            Some(d) if self.depuis.elapsed() < ATTENTE_DU_TELEPHONE + d && !d.is_zero() => Lu::EnCours,
+            _ => Lu::Fini,
+        }
+    }
+
+    fn attente(&self, _numero: u64) -> Duration {
+        ATTENTE_DU_TELEPHONE
+    }
+
+    fn debut(&self) -> Option<Instant> {
+        let debut = self.depuis + ATTENTE_DU_TELEPHONE;
+        (self.duree.is_some() && Instant::now() >= debut).then_some(debut)
+    }
+
+    fn arreter(&mut self) {
+        self.renvoi.couper();
+        self.duree = None;
+    }
+}
+
+/// La sortie de la voix : le téléphone s'il y en a un, sinon les haut-parleurs (deux champs du fil, empruntés à part
+/// de ses autres champs).
+fn sortie<'a>(lecteur: &'a mut Lecteur, telephone: &'a mut Option<AuTelephone>) -> &'a mut dyn Sortie {
+    match telephone {
+        Some(t) => t,
+        None => lecteur,
+    }
+}
+
 /// Une synthèse de Windows en cours : sondée à chaque tour, sans l'attendre.
 #[cfg_attr(not(windows), allow(dead_code))]
 struct Synthese {
@@ -1537,6 +1640,10 @@ struct Fil {
     /// La synthèse de Windows en cours, et son morceau.
     synthese: Option<(u64, Synthese)>,
     lecteur: Lecteur,
+    /// Le téléphone où se joue la voix, à la place des haut-parleurs ; celui qui le remplacera (ou les haut-parleurs :
+    /// `Some(None)`) entre deux sons.
+    telephone: Option<AuTelephone>,
+    sortie_voulue: Option<Option<Renvoi>>,
     /// Le morceau qui se dit.
     lecture: Option<EnLecture>,
     /// La dernière parole dont le premier son s'est entendu (`Evt::VoixEntendue`).
@@ -1588,6 +1695,8 @@ impl Fil {
             synthetiseur: Synthetiseur::nouveau(),
             synthese: None,
             lecteur: Lecteur::nouveau(),
+            telephone: None,
+            sortie_voulue: None,
             lecture: None,
             entendue: 0,
             a_supprimer: Vec::new(),
@@ -1648,6 +1757,16 @@ impl Fil {
             Ordre::Choisir(id) => self.choisir(id),
             Ordre::Prononciations(p) => self.prononciations = p,
             Ordre::Taire => {}
+            Ordre::Sortie(renvoi) => self.sortie_voulue = Some(renvoi),
+        }
+    }
+
+    /// La sortie demandée, entre deux sons : le son qui se disait a fini là où il était.
+    fn changer_de_sortie(&mut self) {
+        if self.lecture.is_none()
+            && let Some(voulue) = self.sortie_voulue.take()
+        {
+            self.telephone = voulue.map(AuTelephone::nouveau);
         }
     }
 
@@ -1689,7 +1808,7 @@ impl Fil {
         // Ce qui suit la coupure part tout de suite : rien ne la précède.
         self.tait = None;
         if self.file.couper(seuil) {
-            self.lecteur.arreter();
+            sortie(&mut self.lecteur, &mut self.telephone).arreter();
             self.lecture = None;
             self.plus_rien_ne_s_entend();
             self.tracer(Trace::Coupee(Instant::now()));
@@ -2114,9 +2233,9 @@ impl Fil {
     fn jouer(&mut self) {
         self.reveil = None;
         if let Some(l) = self.lecture.as_mut() {
-            let lu = self.lecteur.sonder();
+            let lu = sortie(&mut self.lecteur, &mut self.telephone).sonder();
             // Le début du son, lu sur l'horloge du lecteur : la bouche s'y recale (elle partait de l'estimation).
-            let debut = self.lecteur.debut();
+            let debut = sortie(&mut self.lecteur, &mut self.telephone).debut();
             if let Some(d) = debut
                 && d != l.debut
             {
@@ -2141,8 +2260,9 @@ impl Fil {
                     // Le son qui suit s'ouvre déjà dans l'autre lecteur ; à son heure, il part, et celui-ci finit son
                     // silence de fin sans qu'on l'attende.
                     let Some((numero, son, pause)) = self.file.prochain_pret() else { return };
-                    self.lecteur.precharger(numero, &son.wav);
-                    let depart = depart(tait, pause, self.lecteur.attente(numero) + son.tete);
+                    let s = sortie(&mut self.lecteur, &mut self.telephone);
+                    s.precharger(numero, &son.wav);
+                    let depart = depart(tait, pause, s.attente(numero) + son.tete);
                     if maintenant < depart {
                         self.reveil = Some(depart);
                         return;
@@ -2169,9 +2289,14 @@ impl Fil {
             }
         }
         loop {
+            // Entre deux sons : la sortie demandée (le téléphone, ou les haut-parleurs) prend le suivant.
+            self.changer_de_sortie();
             // Le son suivant attend son heure : la fin de la voix d'avant, plus sa pause.
+            let mut pause_d_avant = Duration::ZERO;
             if let (Some(tait), Some((numero, pause, son))) = (self.tait, self.file.pause_en_tete()) {
-                let depart = depart(tait, pause, self.lecteur.attente(numero) + son.tete);
+                pause_d_avant = pause;
+                let attente = sortie(&mut self.lecteur, &mut self.telephone).attente(numero);
+                let depart = depart(tait, pause, attente + son.tete);
                 if Instant::now() < depart {
                     self.reveil = Some(depart);
                     return;
@@ -2183,7 +2308,7 @@ impl Fil {
             }
             let Some((numero, id, Son { wav, voix, .. })) = suivant else { return };
             let piste = piste_du_son(&wav, self.file.texte_en_cours());
-            match self.lecteur.jouer(numero, wav) {
+            match sortie(&mut self.lecteur, &mut self.telephone).jouer(numero, wav, pause_d_avant) {
                 Ok(attente) => {
                     // Le son partira dans un instant : la bouche le sait d'avance — l'écran montre ses images un peu
                     // après les avoir calculées ([`regler_le_retard_de_l_ecran`]), et le début de la phrase s'y voit.
@@ -2222,7 +2347,7 @@ impl Fil {
 
     /// La `Voix` a disparu : tout se tait, Piper s'arrête, et chaque parole qui restait se termine.
     fn fermer(&mut self) {
-        self.lecteur.arreter();
+        sortie(&mut self.lecteur, &mut self.telephone).arreter();
         self.lecture = None;
         self.plus_rien_ne_s_entend();
         if let Some((_, s)) = self.synthese.take() {

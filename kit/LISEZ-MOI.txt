@@ -165,6 +165,23 @@ dossier local ; Claude ne la voit jamais. Sans clé, rien ne se lit ni ne s'affi
   seul dit ce qui est posé. Eve la prend sans redémarrer.
 
 
+EVE SUR TON TÉLÉPHONE (ANDROID)
+-------------------------------
+L'appli Eve d'un téléphone Android te laisse parler à Eve d'ailleurs dans la maison : tu tiens son micro, ou tu lui
+écris, et elle te répond de sa voix, sur le téléphone. Le cerveau reste sur ton ordinateur (Claude Code, tes fichiers,
+Constructo AI) : il doit être allumé, Eve ouverte, et le téléphone sur le même réseau (le Wi-Fi de la maison).
+1. Installe l'appli : envoie Eve-pour-Android.apk (à la racine de ce dossier) à ton téléphone — par un câble, ton
+   espace de stockage en ligne ou un courriel à toi-même —, puis ouvre-le sur le téléphone. Android demande
+   d'autoriser l'installation d'applis de cette source : accepte ; s'il dit que l'appli est inconnue, « Installer
+   quand même ».
+2. Sur l'ordinateur, dans les réglages d'Eve, rubrique « Téléphones » : « Jumeler un téléphone ». Un code carré
+   s'affiche, pour cinq minutes. Si Windows demande d'autoriser Eve sur le réseau, accepte, pour les réseaux privés
+   (le réseau de la maison doit être « Privé » dans Windows).
+3. Sur le téléphone, ouvre Eve, touche « Scanner le code » et vise le code carré.
+Chaque téléphone a sa clé à lui ; « Retirer », dans la même rubrique, la lui ôte. Tout passe chiffré, et Eve
+n'écoute le réseau que pour un téléphone jumelé.
+
+
 OÙ EST QUOI
 -----------
 · Son dossier de travail (celui que tu as choisi) : PROFIL.md, son profil, que tu peux relire et modifier ;

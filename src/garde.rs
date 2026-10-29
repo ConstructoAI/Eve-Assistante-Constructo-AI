@@ -2623,12 +2623,15 @@ mod essais {
         );
     }
 
+    /// Les clés d'API du tableau de bord, et les téléphones jumelés et le certificat de leur serveur : Claude ne les lit
+    /// ni ne les écrit (une page piégée lui ferait glisser un téléphone de plus).
     #[test]
     fn les_cles_du_tableau_de_bord_ne_se_lisent_pas() {
         let dossier = r"C:\Users\x\AppData\Local\Eve\specialistes\assistante";
-        for cle in ["render.cle", "stripe.cle"] {
+        for cle in ["render.cle", "stripe.cle", "telephones.cle", "telephone-tls.cle"] {
             let fichier = format!(r"{dossier}\{cle}");
             assert!(refuse(&evaluer("Read", &json!({ "file_path": fichier }))));
+            assert!(refuse(&evaluer("Write", &json!({ "file_path": fichier, "content": "{}" }))));
             assert!(refuse(&evaluer("PowerShell", &json!({ "command": format!("Get-Content \"{fichier}\"") }))));
             assert!(refuse(&evaluer("Bash", &json!({ "command": format!("cp '{fichier}' /tmp/") }))));
         }

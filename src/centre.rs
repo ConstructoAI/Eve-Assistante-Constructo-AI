@@ -321,6 +321,15 @@ impl Centre {
         self.entreprise.lock().ok().and_then(|e| e.clone())
     }
 
+    /// Le planning du tableau de bord ([`crate::planning`]) : le calendrier, le Gantt et le Kanban, d'après la dernière
+    /// lecture de l'entreprise et les fichiers de la maison, `aujourdhui` (« AAAA-MM-JJ ») pour repère. Le point de
+    /// rencontre de l'équipe du planning : ses données le remplissent, ses vues le dessinent.
+    #[allow(dead_code)]
+    pub fn planning(&self, aujourdhui: &str) -> crate::planning::Planning {
+        let _ = aujourdhui;
+        crate::planning::Planning::default()
+    }
+
     /// Un centre lu d'un coup, sans fil ni fenêtre : les fichiers d'`activite\` du dossier de travail (`dossier`), la
     /// comptabilité nommée (son dossier ; vide : aucune), les rappels et la dernière lecture de l'entreprise
     /// (`entreprise.json`) du dossier local (`local`), tels qu'ils sont à l'instant. Pour le point du jour que dit le

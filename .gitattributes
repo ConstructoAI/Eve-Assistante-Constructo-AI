@@ -13,3 +13,7 @@
 *.bin binary
 *.onnx binary
 *.zip binary
+# Le lanceur de Gradle et ce que construit l'appli Android (mobile\), octet pour octet.
+*.jar binary
+*.apk binary
+*.webp binary

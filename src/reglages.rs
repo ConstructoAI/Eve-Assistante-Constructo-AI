@@ -27,12 +27,12 @@ pub const VOIX_PAR_DEFAUT: &str = "piper:fr_FR-upmc-medium#0";
 
 /// Ce qu'Eve ne prend qu'en démarrant : son nom et celui de l'entreprise (le titre de sa fenêtre, l'amorce de
 /// l'oreille), le dossier de l'Adjointe, l'oreille et son vocabulaire, le débit et la douceur de la voix, le port de la
-/// vitrine, la fenêtre, l'avance des rappels, et les privilèges de Claude — son espace d'actions se fixe au démarrage.
-/// Le reste vaut tout de suite (le modèle et l'effort de Claude : entre deux demandes, la conversation reprise ; le
-/// préchauffage : à la conversation suivante).
-const AU_DEMARRAGE: [&str; 14] = [
+/// vitrine et le serveur des téléphones, la fenêtre, l'avance des rappels, et les privilèges de Claude — son espace
+/// d'actions se fixe au démarrage. Le reste vaut tout de suite (le modèle et l'effort de Claude : entre deux demandes,
+/// la conversation reprise ; le préchauffage : à la conversation suivante).
+const AU_DEMARRAGE: [&str; 16] = [
     "nom", "entreprise", "adjointe", "oreille", "oreille_carte", "oreille_eveil", "vocabulaire", "debit", "douceur",
-    "port", "fenetre", "fenetre_native", "alertes.minutes_avant", "privileges",
+    "port", "port_telephone", "ecoute_telephone", "fenetre", "fenetre_native", "alertes.minutes_avant", "privileges",
 ];
 
 /// Une vérification de `reglages.json` au plus par seconde ([`Reglages::relire`]).
@@ -88,6 +88,11 @@ pub struct Reglages {
     pub effort: String,
     /// Le port local de la fenêtre.
     pub port: u16,
+    /// Le port du serveur des téléphones ([`crate::telephone`]) ; 0 : celui de la fenêtre plus mille.
+    pub port_telephone: u16,
+    /// L'adresse où le serveur des téléphones écoute : vide, toutes celles du poste (le Wi-Fi de la maison, Tailscale) ;
+    /// « 127.0.0.1 », le poste seul — un essai, avec l'émulateur d'Android (`adb reverse`).
+    pub ecoute_telephone: String,
     /// Ouvrir la fenêtre au démarrage.
     pub fenetre: bool,
     /// La fenêtre native, dans le programme (le lot 6), au lieu de la page dans Edge. Faux d'office tant qu'elle ne
@@ -273,6 +278,8 @@ impl Default for Reglages {
             // « medium » : au plus haut, une question simple a pris sept minutes ; la voix demande vite.
             effort: "medium".into(),
             port: 47811,
+            port_telephone: 0,
+            ecoute_telephone: String::new(),
             fenetre: true,
             fenetre_native: false,
             theme: "centre".into(),
@@ -776,6 +783,16 @@ impl Reglages {
             candidats.push(PathBuf::from(&self.adjointe));
         }
         candidats.into_iter().find(|d| d.join("CLAUDE.md").is_file() && d.join("scripts").is_dir())
+    }
+
+    /// Le port du serveur des téléphones : `port_telephone`, sinon celui de la fenêtre plus mille.
+    pub fn port_du_telephone(&self) -> u16 {
+        if self.port_telephone != 0 { self.port_telephone } else { self.port.saturating_add(1000) }
+    }
+
+    /// L'adresse où écoute le serveur des téléphones : `ecoute_telephone`, si c'en est une ; sinon toutes.
+    pub fn ecoute_du_telephone(&self) -> std::net::Ipv4Addr {
+        self.ecoute_telephone.trim().parse().unwrap_or(std::net::Ipv4Addr::UNSPECIFIED)
     }
 
     /// Le nom de l'entreprise : celui du réglage, sinon celui des réglages de l'Adjointe ; « » s'il n'y en a aucun.

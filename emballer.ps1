@@ -1,7 +1,8 @@
 # Emballe Eve a partager : dist\Eve-Assistante-Constructo-AI-vN.zip, N etant la revision (la version de Cargo.toml, sa
 # seule source : 7.0.0 donne v7) - le programme et le runtime Visual C++, son Python, son installateur et ses
 # gabarits, le telechargeur de la voix, le portrait d'Eve et ses poses (programme\portrait, tel quel, environ 200 Mo),
-# le guide et les licences - et l'empreinte SHA-256 de celle-ci. La voix et l'oreille - environ 410 Mo - n'y sont pas :
+# l'appli Android (Eve-pour-Android.apk, que mobile\Construire.bat construit d'abord), le guide et les licences - et
+# l'empreinte SHA-256 de celle-ci. La voix et l'oreille - environ 410 Mo - n'y sont pas :
 # l'installateur les telecharge, de leurs sources publiques officielles.
 #
 #   powershell -ExecutionPolicy Bypass -File emballer.ps1 [-Construire] [-Sortie <dossier>]
@@ -43,6 +44,12 @@ $crt = Get-ChildItem $vs -Directory -ErrorAction SilentlyContinue | Sort-Object 
 if (-not $crt) { throw "le runtime Visual C++ redistribuable (Microsoft.VC143.CRT) est introuvable : installer Visual Studio 2022 (C++)" }
 $dlls = @("msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll") | ForEach-Object { Join-Path $crt.FullName $_ }
 foreach ($d in $dlls) { if (-not (Test-Path $d)) { throw "runtime introuvable : $d" } }
+# L'appli Android (mobile\), construite d'avance par mobile\Construire.bat : elle part a la racine du kit.
+$apk = Join-Path $racine "mobile\app\build\outputs\apk\debug\app-debug.apk"
+if (-not (Test-Path $apk)) { throw "$apk manque : lancer d'abord mobile\Construire.bat" }
+if ((Get-Item $apk).LastWriteTime -lt (Get-Item (Join-Path $racine "Cargo.toml")).LastWriteTime) {
+  throw "l'appli Android est plus vieille que Cargo.toml (sa revision) : relancer mobile\Construire.bat"
+}
 $gabarits = @("entrevue.md", "redaction.md", "consigne_vocale.md", "claude.md", "eve.bat")
 foreach ($t in @("Installer.bat", "LISEZ-MOI.txt", "LICENCES-TIERS.txt", "outils\installer.py", "outils\ressources_eve.py",
   "portrait\portrait.png") + ($gabarits | ForEach-Object { "outils\gabarits\$_" })) {
@@ -67,6 +74,8 @@ Copy-Item (Join-Path $kit "outils\installer.py"), (Join-Path $kit "outils\ressou
 foreach ($g in $gabarits) { Copy-Item (Join-Path $kit "outils\gabarits\$g") (Join-Path $prog "outils\gabarits") }
 # Le portrait d'Eve et ses poses, tels quels : l'installateur les pose dans le dossier local de chaque specialiste.
 Copy-Item -Recurse (Join-Path $kit "portrait") (Join-Path $prog "portrait")
+# L'appli du telephone, a la racine : la personne l'envoie a son telephone et l'y installe (le LISEZ-MOI le dit).
+Copy-Item $apk (Join-Path $eve "Eve-pour-Android.apk")
 # Installer.bat en CRLF : cmd.exe perd ses etiquettes en LF, quoi que git en ait fait.
 $bat = [IO.File]::ReadAllText((Join-Path $kit "Installer.bat")) -replace "`r?`n", "`r`n"
 [IO.File]::WriteAllText((Join-Path $eve "Installer.bat"), $bat, (New-Object Text.ASCIIEncoding))
@@ -114,6 +123,17 @@ foreach ($d in @("src", "page", "kit")) { Copy-Item -Recurse (Join-Path $racine 
 Remove-Item -Recurse -Force (Join-Path $sources "kit\portrait")
 # Ce que Python compile quand on essaie l'installateur sur ce poste (__pycache__) ne part pas.
 Get-ChildItem -Recurse -Directory -Force $sources -Filter "__pycache__" | Remove-Item -Recurse -Force
+# Les sources de l'appli Android : celles que suit git (ni ce que Gradle refait, ni le chemin du SDK de ce poste).
+Push-Location $racine
+try {
+  $mobile = git ls-files -- mobile
+  if ($LASTEXITCODE -ne 0 -or -not $mobile) { throw "git ls-files mobile a echoue" }
+} finally { Pop-Location }
+foreach ($f in $mobile) {
+  $cible = Join-Path $sources $f
+  New-Item -ItemType Directory -Force (Split-Path $cible) | Out-Null
+  Copy-Item (Join-Path $racine $f) $cible
+}
 $texte = [IO.File]::ReadAllText((Join-Path $kit "LISEZ-MOI-SOURCES.txt"), [Text.Encoding]::UTF8) -replace "`r?`n", "`r`n"
 [IO.File]::WriteAllText((Join-Path $sources "LISEZ-MOI.txt"), $texte, $avecBom)
 

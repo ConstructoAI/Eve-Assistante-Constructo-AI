@@ -1441,6 +1441,8 @@ impl Fenetre {
                 ui.add_space(10.0);
             });
         }
+        // Les téléphones : l'appli Eve d'un téléphone Android, jumelée à cette Eve ([`crate::telephone`]).
+        self.rubrique_des_telephones(ui);
         // L'écoute.
         rubrique(ui, "Écoute");
         groupe(ui, |ui| {
@@ -1574,6 +1576,94 @@ impl Fenetre {
         let aide = "Opus et l'effort max réfléchissent plus loin, mais répondent plus lentement et coûtent plus cher. Eve \
                     change entre deux demandes ; la conversation continue, et ses agents prennent le même cerveau.";
         ui.label(RichText::new(aide).size(12.0).color(panneau(ui).encre_3));
+    }
+
+    /// La rubrique « Téléphones » des réglages ([`crate::telephone`]) : les téléphones jumelés, branchés ou non, chacun
+    /// retiré d'un second clic ; « Jumeler un téléphone », qui ouvre une offre de cinq minutes — son code carré, que
+    /// l'appli Eve du téléphone scanne, les adresses où il joint ce poste et le temps qui reste.
+    fn rubrique_des_telephones(&mut self, ui: &mut egui::Ui) {
+        let p = panneau(ui);
+        let t = self.etat.get("telephones").cloned().unwrap_or(Value::Null);
+        let liste = t["liste"].as_array().cloned().unwrap_or_default();
+        rubrique(ui, "Téléphones");
+        groupe(ui, |ui| {
+            ui.add_space(9.0);
+            if liste.is_empty() && t["offre"].is_null() {
+                let aide = "L'appli Eve d'un téléphone Android me parle d'ailleurs dans la maison, et je lui réponds de \
+                            ma voix : jumelle-la ici.";
+                ui.label(RichText::new(aide).size(13.5).color(p.encre_2));
+                ui.add_space(9.0);
+            }
+            for tel in &liste {
+                let id = tel["id"].as_str().unwrap_or("").to_string();
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(tel["nom"].as_str().unwrap_or("Téléphone")).size(14.0).color(p.encre));
+                    let (etat, couleur) = match tel["branche"].as_bool() {
+                        Some(true) => ("branché", p.accent),
+                        _ => ("pas branché", p.encre_3),
+                    };
+                    ui.label(RichText::new(etat).size(12.0).color(couleur));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        // Retirer : un second clic le confirme (son code ne vaudra plus rien).
+                        let confirme = egui::Id::unique(("retirer-le-telephone", id.as_str()));
+                        let a_confirmer = ui.ctx().data(|d| d.get_temp::<bool>(confirme)).unwrap_or(false);
+                        let texte = if a_confirmer { "Retirer pour de bon ?" } else { "Retirer" };
+                        if bouton(ui, None, texte, Bouton::Cerne).clicked() {
+                            if a_confirmer {
+                                ui.ctx().data_mut(|d| d.remove::<bool>(confirme));
+                                self.geste("telephone_retirer", Value::String(id.clone()));
+                            } else {
+                                ui.ctx().data_mut(|d| d.insert_temp(confirme, true));
+                            }
+                        }
+                    });
+                });
+                let qui =
+                    tel["qui"].as_str().filter(|q| !q.is_empty()).map(|q| format!(", pour {q}")).unwrap_or_default();
+                let jumele = format!("Jumelé le {}{qui}", tel["jumele"].as_str().unwrap_or(""));
+                ui.label(RichText::new(jumele).size(12.0).color(p.encre_3));
+                ui.add_space(8.0);
+            }
+            if let Some(offre) = t["offre"].as_object() {
+                let rangees: Vec<&str> =
+                    offre.get("qr").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).collect();
+                code_carre(ui, &rangees);
+                ui.add_space(8.0);
+                let reste = offre.get("reste").and_then(Value::as_u64).unwrap_or(0);
+                let consigne = format!(
+                    "Sur le téléphone, ouvre l'appli Eve, touche « Scanner le code » et vise ce carré. Il vaut encore \
+                     {} min {:02} s.",
+                    reste / 60,
+                    reste % 60
+                );
+                ui.label(RichText::new(consigne).size(13.5).color(p.encre));
+                let adresses: Vec<&str> = offre
+                    .get("adresses")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect();
+                let reseau = format!(
+                    "Le téléphone doit être sur le même Wi-Fi que ce poste ({}). Si Windows demande d'autoriser Eve sur \
+                     le réseau, accepte pour les réseaux privés.",
+                    adresses.join(", ")
+                );
+                ui.add_space(4.0);
+                ui.label(RichText::new(reseau).size(12.0).color(p.encre_3));
+                ui.add_space(8.0);
+                if bouton(ui, None, "Fermer", Bouton::Cerne).clicked() {
+                    self.geste("telephone_fermer", Value::Null);
+                }
+            } else if bouton(ui, None, "Jumeler un téléphone", Bouton::Plein(p.accent)).clicked() {
+                self.geste("telephone_jumeler", Value::Null);
+            }
+            if let Some(e) = t["erreur"].as_str() {
+                ui.add_space(6.0);
+                ui.label(RichText::new(e).size(13.0).color(p.crit));
+            }
+            ui.add_space(10.0);
+        });
     }
 
     /// Une rangée d'interrupteur des réglages : sa valeur (tenue quatre secondes après un clic), et le geste `reglage`
@@ -2113,6 +2203,28 @@ fn segments(ui: &mut egui::Ui, id: &str, choix: &[&str], choisi: usize) -> Optio
         }
     }
     clic
+}
+
+/// Un code carré (ses rangées de « 0 » et de « 1 », [`crate::telephone`]) : des modules noirs sur du blanc, même dans le
+/// thème sombre (un code inversé se lit mal), entourés de leur marge de quatre modules ; 240 points au plus.
+fn code_carre(ui: &mut egui::Ui, rangees: &[&str]) {
+    let n = rangees.len();
+    if n == 0 {
+        return;
+    }
+    let module = (240.0 / (n + 8) as f32).floor().max(2.0);
+    let cote = module * (n + 8) as f32;
+    let (cadre, _) = ui.allocate_exact_size(vec2(cote, cote), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(cadre, 6.0, Color32::WHITE);
+    for (y, rangee) in rangees.iter().enumerate() {
+        for (x, c) in rangee.chars().enumerate() {
+            if c == '1' {
+                let coin = cadre.min + vec2((x + 4) as f32 * module, (y + 4) as f32 * module);
+                p.rect_filled(egui::Rect::from_min_size(coin, vec2(module, module)), 0.0, Color32::BLACK);
+            }
+        }
+    }
 }
 
 /// Un groupe de rangées des réglages (la page : `.groupe`) : un fond un peu plus clair, un filet, des coins arrondis.
