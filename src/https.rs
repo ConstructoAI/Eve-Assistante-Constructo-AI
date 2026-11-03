@@ -48,14 +48,14 @@ pub fn get(url: &str, jeton: Option<&str>, delai: Duration) -> Result<(u16, Vec<
     if jeton.is_some_and(|j| !jeton_valable(j)) {
         return Err("le jeton n'a pas la forme d'un jeton : rien n'est envoyé".into());
     }
-    winhttp::envoyer("GET", &adresse, AGENT, jeton, &[], None, true, delai).map(|r| (r.statut, r.corps))
+    winhttp::envoyer("GET", &adresse, AGENT, jeton, &[], None, true, delai, false).map(|r| (r.statut, r.corps))
 }
 
 /// `GET url` à un service public (la météo) : sans jeton, sous le nom `AGENT_PUBLIC`, sans suivre de redirection ;
 /// rend le code HTTP et le corps. Et sans compression : à qui offre « gzip, deflate », open-meteo répond en deflate
 /// (zlib), et WinHTTP en abandonne la lecture (E_ABORT, vu le 24 octobre 2026) ; un bulletin fait moins d'un ko.
 pub fn get_public(url: &str, delai: Duration) -> Result<(u16, Vec<u8>), String> {
-    winhttp::envoyer("GET", &Adresse::lire(url)?, AGENT_PUBLIC, None, &[], None, false, delai)
+    winhttp::envoyer("GET", &Adresse::lire(url)?, AGENT_PUBLIC, None, &[], None, false, delai, false)
         .map(|r| (r.statut, r.corps))
 }
 
@@ -64,7 +64,7 @@ pub fn get_public(url: &str, delai: Duration) -> Result<(u16, Vec<u8>), String> 
 pub fn post_formulaire(url: &str, champs: &[(&str, &str)], delai: Duration) -> Result<(u16, Vec<u8>), String> {
     let corps = champs.iter().map(|(n, v)| format!("{}={}", encoder(n), encoder(v))).collect::<Vec<_>>().join("&");
     let corps = Some(("application/x-www-form-urlencoded", corps.as_bytes()));
-    winhttp::envoyer("POST", &Adresse::lire(url)?, AGENT_PUBLIC, None, &[], corps, false, delai)
+    winhttp::envoyer("POST", &Adresse::lire(url)?, AGENT_PUBLIC, None, &[], corps, false, delai, false)
         .map(|r| (r.statut, r.corps))
 }
 
@@ -72,7 +72,7 @@ pub fn post_formulaire(url: &str, champs: &[(&str, &str)], delai: Duration) -> R
 pub fn post_json(url: &str, corps: &serde_json::Value, delai: Duration) -> Result<(u16, Vec<u8>), String> {
     let octets = corps.to_string().into_bytes();
     let corps = Some(("application/json", octets.as_slice()));
-    winhttp::envoyer("POST", &Adresse::lire(url)?, AGENT_PUBLIC, None, &[], corps, false, delai)
+    winhttp::envoyer("POST", &Adresse::lire(url)?, AGENT_PUBLIC, None, &[], corps, false, delai, false)
         .map(|r| (r.statut, r.corps))
 }
 
@@ -80,7 +80,10 @@ pub fn post_json(url: &str, corps: &serde_json::Value, delai: Duration) -> Resul
 /// (`entreprise.rs` : un POST JSON-RPC, le DELETE qui ferme sa session) : `verbe`, un `corps` (son type et ses octets)
 /// s'il en a un. Sous le nom neutre, sans compression, sans suivre de redirection (le jeton n'irait nulle part
 /// ailleurs) ; rend la réponse entière, ses en-têtes compris. Un jeton ou un en-tête qui glisserait une ligne de plus
-/// est refusé avant tout envoi, et l'erreur ne le répète pas.
+/// est refusé avant tout envoi, et l'erreur ne le répète pas. `delai` borne la requête ENTIÈRE, sa réponse et tout son
+/// corps, pas seulement chaque attente : un flux SSE qui envoie « : ping » toutes les 15 s relançait sans fin une
+/// attente de 45 s (la QA5 du lot 13.2 : cinq pings à dix secondes d'écart, une réponse rendue en 51 s pour un délai de
+/// 45).
 pub fn requete(
     verbe: &str,
     url: &str,
@@ -101,7 +104,7 @@ pub fn requete(
     if !entetes.iter().all(|(n, v)| nom_valable(n) && valeur_valable(v)) {
         return Err("un en-tête n'a pas la forme d'un en-tête : rien n'est envoyé".into());
     }
-    winhttp::envoyer(verbe, &adresse, AGENT_PUBLIC, Some(jeton), entetes, corps, false, delai)
+    winhttp::envoyer(verbe, &adresse, AGENT_PUBLIC, Some(jeton), entetes, corps, false, delai, true)
 }
 
 /// Les en-têtes bruts d'une réponse (« HTTP/1.1 200 OK\r\nContent-Type: …\r\n… ») : la ligne d'état sautée, chaque nom
@@ -188,7 +191,7 @@ fn effacer(v: &mut [u16]) {
 #[cfg(windows)]
 mod winhttp {
     use std::ffi::c_void;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use windows::Win32::Networking::WinHttp::*;
     use windows::core::PCWSTR;
@@ -228,6 +231,19 @@ mod winhttp {
         if hr & 0xFFFF_0000 == 0x8007_0000 { hr & 0xFFFF } else { hr }
     }
 
+    /// L'attente qui vient (`option` : celle de la réponse, ou d'une lecture) n'a que ce qui reste avant `echeance` ;
+    /// plus rien : la requête a pris tout son délai, et l'erreur est celle d'une attente trop longue.
+    fn borner(requete: &Poignee, echeance: Instant, etape: &str, option: u32) -> Result<(), String> {
+        let reste = echeance.saturating_duration_since(Instant::now());
+        if reste.is_zero() {
+            return Err(erreur(etape, ERROR_WINHTTP_TIMEOUT));
+        }
+        let ms = u32::try_from(reste.as_millis()).unwrap_or(u32::MAX).max(1).to_ne_bytes();
+        // SAFETY : `requete` est ouverte ; l'option attend un DWORD, que porte `ms` pendant l'appel.
+        unsafe { WinHttpSetOption(Some(requete.0.cast_const()), option, Some(&ms)) }
+            .map_err(|e| erreur("délais", code(&e)))
+    }
+
     /// Les erreurs de WinHTTP, en français (leurs messages ne sont pas dans la table du système).
     fn erreur(etape: &str, code: u32) -> String {
         let quoi = match code {
@@ -258,7 +274,8 @@ mod winhttp {
     }
 
     /// Une requête : `verbe`, des en-têtes de plus (ils remplacent ceux d'office du même nom), et un `corps` (son type
-    /// et ses octets) pour un POST.
+    /// et ses octets) pour un POST. `delai` borne chaque attente de WinHTTP ; `total`, aussi la requête entière : la
+    /// réponse et chaque lecture du corps n'ont que ce qui reste du délai (`borner`).
     #[allow(clippy::too_many_arguments)]
     pub fn envoyer(
         verbe: &str,
@@ -269,7 +286,9 @@ mod winhttp {
         corps: Option<(&str, &[u8])>,
         compression: bool,
         delai: Duration,
+        total: bool,
     ) -> Result<Reponse, String> {
+        let echeance = total.then(|| Instant::now() + delai);
         let agent = large(agent);
         // SAFETY : l'agent est une chaîne terminée par un zéro qui vit jusqu'au retour ; le proxy automatique ne prend
         // ni nom de proxy ni liste d'exceptions (deux pointeurs nuls) ; le handle rendu est gardé par `Poignee`.
@@ -362,6 +381,10 @@ mod winhttp {
                     .map_err(|e| erreur("envoi", code(&e)))?;
             }
         }
+        if let Some(e) = echeance {
+            borner(&requete, e, "réponse", WINHTTP_OPTION_RECEIVE_RESPONSE_TIMEOUT)?;
+            borner(&requete, e, "réponse", WINHTTP_OPTION_RECEIVE_TIMEOUT)?;
+        }
         // SAFETY : `requete` vient d'être envoyée ; le paramètre réservé est nul.
         unsafe { WinHttpReceiveResponse(requete.0, std::ptr::null_mut()) }.map_err(|e| erreur("réponse", code(&e)))?;
 
@@ -413,6 +436,9 @@ mod winhttp {
 
         let mut corps: Vec<u8> = Vec::new();
         loop {
+            if let Some(e) = echeance {
+                borner(&requete, e, "lecture", WINHTTP_OPTION_RECEIVE_TIMEOUT)?;
+            }
             let mut dispo: u32 = 0;
             // SAFETY : `requete` a reçu sa réponse ; `dispo` vit pendant l'appel.
             unsafe { WinHttpQueryDataAvailable(requete.0, &mut dispo) }.map_err(|e| erreur("lecture", code(&e)))?;
@@ -453,6 +479,7 @@ mod winhttp {
         _corps: Option<(&str, &[u8])>,
         _compression: bool,
         _delai: Duration,
+        _total: bool,
     ) -> Result<Reponse, String> {
         Err("le HTTPS passe par WinHTTP : Windows seulement".into())
     }
@@ -460,6 +487,8 @@ mod winhttp {
 
 #[cfg(test)]
 mod essais {
+    use std::time::Instant;
+
     use super::*;
 
     fn adresse(url: &str) -> Adresse {
@@ -554,6 +583,71 @@ mod essais {
         let r = Reponse { statut: 200, entetes: e, corps: Vec::new() };
         assert_eq!(r.entete("Mcp-Session-Id"), Some("abc-123"));
         assert_eq!(r.entete("location"), None);
+    }
+
+    /// Un faux flux SSE sur le poste, comme celui du connecteur MCP (uvicorn : des morceaux, « chunked ») : il répond
+    /// 200 en `text/event-stream`, envoie « : ping » toutes les `intervalle` pendant `duree`, puis le message, et
+    /// ferme. Rend son adresse.
+    fn un_flux_qui_pingue(intervalle: Duration, duree: Duration) -> String {
+        use std::io::{BufRead, BufReader, Write};
+        let ecoute = std::net::TcpListener::bind("127.0.0.1:0").expect("un port du poste");
+        let port = ecoute.local_addr().expect("son adresse").port();
+        std::thread::spawn(move || {
+            let Ok((mut flux, _)) = ecoute.accept() else { return };
+            let Ok(copie) = flux.try_clone() else { return };
+            let mut lecteur = BufReader::new(copie);
+            let mut ligne = String::new();
+            // La demande, jusqu'à sa ligne vide (un GET : pas de corps).
+            loop {
+                ligne.clear();
+                match lecteur.read_line(&mut ligne) {
+                    Ok(0) | Err(_) => return,
+                    Ok(_) if ligne == "\r\n" => break,
+                    Ok(_) => {}
+                }
+            }
+            let morceau = |t: &str| format!("{:x}\r\n{t}\r\n", t.len());
+            let entete = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
+            if flux.write_all(entete.as_bytes()).is_err() {
+                return;
+            }
+            let debut = Instant::now();
+            while debut.elapsed() < duree {
+                // Le client parti (son délai passé), l'écriture échoue : le flux s'arrête là.
+                if flux.write_all(morceau(": ping\r\n\r\n").as_bytes()).and_then(|()| flux.flush()).is_err() {
+                    return;
+                }
+                std::thread::sleep(intervalle);
+            }
+            let fin = format!("{}0\r\n\r\n", morceau("data: {\"fin\":true}\n\n"));
+            let _ = flux.write_all(fin.as_bytes()).and_then(|()| flux.flush());
+        });
+        format!("http://127.0.0.1:{port}/mcp")
+    }
+
+    /// Un flux qui pingue sans fin ne relance plus le délai d'une requête : elle s'arrête à son délai, la réponse et
+    /// tout son corps compris (la QA5 du lot 13.2 : cinq pings à dix secondes d'écart rendaient une réponse en 51 s
+    /// pour un délai de 45 ; chaque ping relançait l'attente de WinHTTP). Et le témoin : un flux qui finit à temps se
+    /// lit en entier, comme avant. Le flux pingue vingt secondes, et la marge est large : ce qui précède l'envoi (le
+    /// proxy du poste, la connexion) n'est borné que par attente, et prend parfois des secondes quand tous les essais
+    /// tournent ensemble.
+    #[test]
+    fn un_flux_qui_pingue_ne_relance_pas_le_delai() {
+        let url = un_flux_qui_pingue(Duration::from_millis(250), Duration::from_secs(20));
+        let debut = Instant::now();
+        let e = match requete("GET", &url, "jeton", &[], None, Duration::from_millis(1500)) {
+            Ok(r) => panic!("rendue en {:?} : {}", debut.elapsed(), String::from_utf8_lossy(&r.corps)),
+            Err(e) => e,
+        };
+        let duree = debut.elapsed();
+        assert!(duree < Duration::from_secs(10), "le délai est de 1,5 s, la requête a pris {duree:?} : {e}");
+        assert!(e.contains("à temps"), "{e}");
+
+        let url = un_flux_qui_pingue(Duration::from_millis(100), Duration::from_millis(500));
+        let r = requete("GET", &url, "jeton", &[], None, Duration::from_secs(5)).expect("un flux qui finit à temps");
+        let corps = String::from_utf8_lossy(&r.corps);
+        assert_eq!(r.statut, 200);
+        assert!(corps.contains("data: {\"fin\":true}") && corps.matches(": ping").count() >= 3, "{corps}");
     }
 
     #[test]

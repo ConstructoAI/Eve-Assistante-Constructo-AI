@@ -3908,16 +3908,17 @@ mod essais_de_l_historique {
 
 // ---- Constructo AI : un faux serveur, pour essayer la connexion d'Eve -------------------------------------------------
 
-/// `eve --essai-constructo [port] [--duree secondes] [--outils N] [--reveil secondes] [--panne outil]… [--rediriger]` :
-/// le faux Constructo AI ([`FauxConstructo`]), sur le poste, jusqu'à Ctrl+C (le port 47997 d'office ; des jetons
-/// d'accès d'une heure, d'une minute au moins). Une Eve d'essai s'y relie avec
+/// `eve --essai-constructo [port] [--duree secondes] [--outils N] [--reveil secondes] [--panne outil]… [--rediriger]
+/// [--sans-compta]` : le faux Constructo AI ([`FauxConstructo`]), sur le poste, jusqu'à Ctrl+C (le port 47997 d'office
+/// ; des jetons d'accès d'une heure, d'une minute au moins). Une Eve d'essai s'y relie avec
 /// `EVE_CONSTRUCTO_MCP=http://127.0.0.1:<port>`, et `EVE_SANS_NAVIGATEUR=1` : elle joue alors elle-même la page de
-/// connexion, sans ouvrir de navigateur ; son tableau de bord y lit une entreprise inventée. `--outils N` : N lectures
-/// de plus, pour mesurer ce que coûtent des centaines d'outils ; `--reveil S` : son connecteur MCP dort, comme le vrai
-/// sur Render — la première requête le réveille, et toutes attendent S secondes (mesuré le 24 octobre 2026 : avec
-/// 40 s, Claude Code attend, `MCP_TIMEOUT` aidant) ; `--panne outil` : cet outil rend le texte d'erreur du vrai ;
-/// `--rediriger` : « /mcp » renvoie vers « /mcp/ », comme le `Mount` de Starlette. Chaque requête s'imprime — jamais
-/// un jeton.
+/// connexion, sans ouvrir de navigateur ; son tableau de bord y lit une entreprise inventée, et l'onglet « Comptabilité
+/// » le registre de la vitrine. `--outils N` : N lectures de plus, pour mesurer ce que coûtent des centaines d'outils ;
+/// `--reveil S` : son connecteur MCP dort, comme le vrai sur Render — la première requête le réveille, et toutes
+/// attendent S secondes (mesuré le 24 octobre 2026 : avec 40 s, Claude Code attend, `MCP_TIMEOUT` aidant) ; `--panne
+/// outil` : cet outil rend le texte d'erreur du vrai ; `--rediriger` : « /mcp » renvoie vers « /mcp/ », comme le
+/// `Mount` de Starlette ; `--sans-compta` : les deux outils de la comptabilité lui sont inconnus, comme au vrai avant
+/// leur mise à jour. Chaque requête s'imprime — jamais un jeton.
 pub fn constructo(args: &[String]) -> i32 {
     let nombre = |nom: &str| {
         args.iter().position(|a| a == nom).and_then(|i| args.get(i + 1)).and_then(|v| v.parse::<u64>().ok())
@@ -3945,11 +3946,18 @@ pub fn constructo(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--rediriger") {
         faux.rediriger();
     }
+    let compta = !args.iter().any(|a| a == "--sans-compta");
+    if !compta {
+        faux.sans_la_compta(false);
+    }
     println!(
         "faux Constructo AI : http://127.0.0.1:{} — des jetons de {duree} s, {} outils ; Ctrl+C l'arrête.\n\
          Une Eve d'essai s'y relie avec EVE_CONSTRUCTO_MCP=http://127.0.0.1:{} et EVE_SANS_NAVIGATEUR=1.",
         faux.port,
-        faux_constructo::OUTILS.len() + faux_planning::OUTILS.len() + nombreux,
+        faux_constructo::OUTILS.len()
+            + faux_planning::OUTILS.len()
+            + if compta { faux_compta::OUTILS.len() } else { 0 }
+            + nombreux,
         faux.port
     );
     let mut vus = 0;
@@ -4090,6 +4098,18 @@ mod faux_constructo {
         pannes: HashSet<String>,
         rediriger: bool,
         journal: Vec<String>,
+        /// Les deux outils de la comptabilité : offerts, ou inconnus comme sur un serveur d'avant eux.
+        compta: OffreDeLaCompta,
+    }
+
+    /// Ce que le faux serveur fait des deux outils de la comptabilité (`super::faux_compta`) : il les offre ; ou il ne
+    /// les connaît pas, comme le vrai avant leur mise à jour — FastMCP le dit par un résultat d'erreur (« Unknown tool:
+    /// … », `isError`), la spécification de MCP par une erreur JSON-RPC (-32602).
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum OffreDeLaCompta {
+        Offerte,
+        Inconnue,
+        InconnueEnJsonRpc,
     }
 
     /// Une réponse : son code, son type, ses en-têtes de plus, son corps.
@@ -4126,6 +4146,7 @@ mod faux_constructo {
                 pannes: HashSet::new(),
                 rediriger: false,
                 journal: vec![format!("démarrage : port {port}, des jetons de {duree} s")],
+                compta: OffreDeLaCompta::Offerte,
             }));
             let sommeil = Arc::new(Mutex::new(Sommeil::default()));
             let (partage, dort) = (etat.clone(), sommeil.clone());
@@ -4169,6 +4190,15 @@ mod faux_constructo {
             if let Ok(mut f) = self.etat.lock() {
                 f.rediriger = true;
                 f.noter("redirection : /mcp renvoie vers /mcp/".into());
+            }
+        }
+
+        /// Le serveur ne connaît plus les deux outils de la comptabilité, comme le vrai avant leur mise à jour : il le
+        /// dit en résultat d'erreur (`isError`, comme FastMCP), ou en erreur JSON-RPC (`en_jsonrpc`).
+        pub fn sans_la_compta(&self, en_jsonrpc: bool) {
+            if let Ok(mut f) = self.etat.lock() {
+                f.compta = if en_jsonrpc { OffreDeLaCompta::InconnueEnJsonRpc } else { OffreDeLaCompta::Inconnue };
+                f.noter("comptabilité : ses deux outils sont inconnus du serveur".into());
             }
         }
 
@@ -4504,7 +4534,16 @@ mod faux_constructo {
                 }
                 _ => json!({}),
             };
-            let message = json!({ "jsonrpc": "2.0", "id": id, "result": resultat });
+            // Un outil de la comptabilité que ce serveur ne connaît pas, dit comme la spécification de MCP le montre.
+            let inconnu = methode == "tools/call"
+                && self.compta == OffreDeLaCompta::InconnueEnJsonRpc
+                && super::faux_compta::est_a_elle(&outil);
+            let message = if inconnu {
+                let e = json!({ "code": -32602, "message": format!("Unknown tool: {outil}") });
+                json!({ "jsonrpc": "2.0", "id": id, "error": e })
+            } else {
+                json!({ "jsonrpc": "2.0", "id": id, "result": resultat })
+            };
             let mut r = if requete.entete("accept").is_some_and(|a| a.contains("text/event-stream")) {
                 // sse-starlette : des fins de ligne `\r\n`, un événement par message.
                 let flux = format!("event: message\r\ndata: {message}\r\n\r\n");
@@ -4519,6 +4558,10 @@ mod faux_constructo {
         /// Un outil : son texte, ou son erreur (`isError`, comme FastMCP pour un outil qu'il n'a pas). Un outil en
         /// panne rend le texte d'erreur du vrai, sans `isError` (les outils de lecture attrapent tout).
         fn appeler(&self, outil: &str, a: &Value) -> Result<String, String> {
+            // La comptabilité, sur un serveur d'avant ses deux outils : FastMCP ne les connaît pas.
+            if super::faux_compta::est_a_elle(outil) && self.compta != OffreDeLaCompta::Offerte {
+                return Err(format!("Unknown tool: {outil}"));
+            }
             if self.pannes.contains(outil) {
                 return Ok("Erreur lors de la lecture (voir logs serveur).".into());
             }
@@ -4533,14 +4576,17 @@ mod faux_constructo {
                 o if o.starts_with("lister_registre_") => "Aucune entrée.".into(),
                 o => entreprise_inventee(o, a)
                     .or_else(|| super::faux_planning::lecture(o, a))
+                    .or_else(|| super::faux_compta::lecture(o, a))
                     .ok_or_else(|| format!("Unknown tool: {o}"))?,
             })
         }
 
         fn outils(&self) -> Vec<Value> {
+            let compta: &[_] = if self.compta == OffreDeLaCompta::Offerte { &super::faux_compta::OUTILS } else { &[] };
             let mut liste: Vec<Value> = OUTILS
                 .iter()
                 .chain(super::faux_planning::OUTILS.iter())
+                .chain(compta.iter())
                 .map(|(nom, description, proprietes, requis)| {
                     let p: serde_json::Map<String, Value> =
                         proprietes.iter().map(|(n, t)| (n.to_string(), json!({ "type": t }))).collect();
@@ -4874,6 +4920,27 @@ mod faux_constructo {
             nom.trim().eq_ignore_ascii_case("location").then(|| valeur.trim().to_string())
         });
         Ok((statut, ou))
+    }
+
+    /// Un jeton d'accès de ce faux serveur, la connexion d'Eve jouée comme dans `connexion.rs` — l'enregistrement, la
+    /// page de connexion (qui accorde aussitôt), l'échange du code —, sans navigateur ni vitrine : pour une lecture
+    /// d'essai. Le lien rendu nomme son fichier de connexion, dans le dossier temporaire, que l'appelant efface.
+    pub fn jeton(faux: &FauxConstructo) -> Result<(String, crate::connexion::Lien), String> {
+        use crate::connexion::{Etat, Lien, Retour};
+        let dossier = std::env::temp_dir().join(format!("eve-faux-constructo-{}-{}", std::process::id(), faux.port));
+        std::fs::create_dir_all(&dossier).map_err(|e| e.to_string())?;
+        let lien = Lien { serveur: format!("http://127.0.0.1:{}", faux.port), fichier: dossier.join("connexion.bin") };
+        let (etat, en_cours, url) = lien.preparer(&Etat::default(), 47821)?;
+        let ou = demander_sans_suivre(&url)?.1.ok_or("la page de connexion ne renvoie nulle part")?;
+        let requete = ou.split_once('?').map_or("", |(_, r)| r);
+        let param = |nom: &str| {
+            let valeur = requete.split('&').filter_map(|p| p.split_once('=')).find(|(n, _)| *n == nom).map(|(_, v)| v);
+            decoder(valeur.unwrap_or_default())
+        };
+        let retour =
+            Retour { code: param("code"), etat_oauth: param("state"), emetteur: param("iss"), ..Retour::default() };
+        let code = lien.verifier_le_retour(Some(&en_cours), &retour)?;
+        Ok((lien.echanger(&etat, &en_cours, &code)?.acces, lien))
     }
 
     /// Le navigateur des essais (`EVE_SANS_NAVIGATEUR`) : la page de connexion du faux serveur, puis la redirection vers
@@ -5551,8 +5618,12 @@ struct SceneDuTheme {
 /// première lecture, le Gantt dans la vue de la famille, le Kanban sans tableau. Et le planning lu (« lue-… ») : le
 /// calendrier, le Gantt, le Kanban des chantiers et celui des opérations, tels que le centre les fait de
 /// l'`entreprise.json` du dossier local — une vraie lecture, celle d'une Eve d'essai reliée au faux Constructo AI
-/// (`eve --essai-constructo`) : rien n'y est imposé ni écrit.
-static SCENES_DU_THEME: [SceneDuTheme; 59] = [
+/// (`eve --essai-constructo`) : rien n'y est imposé ni écrit. Et la comptabilité lue (« lue-compta… », le lot 13.2) :
+/// l'onglet « Comptabilité » tel que le centre le relit de `registre.json` du dossier local, que chaque scène écrit
+/// d'abord d'une vraie lecture, celle du chef, dans un faux Constructo AI monté pour elle
+/// ([`lire_la_compta_du_faux_serveur`]) — le tableau de bord et l'historique lus ; puis un serveur d'avant les deux
+/// outils de la comptabilité : la lecture manque et le dit, sans lecture d'avant (sa carte), puis avec (son bandeau).
+static SCENES_DU_THEME: [SceneDuTheme; 73] = [
     SceneDuTheme { nom: "tableau", duree: 6.0, taille: Some([1560.0, 900.0]) },
     SceneDuTheme { nom: "reflexion", duree: 4.0, taille: None },
     SceneDuTheme { nom: "reponse", duree: 5.0, taille: None },
@@ -5596,6 +5667,16 @@ static SCENES_DU_THEME: [SceneDuTheme; 59] = [
     SceneDuTheme { nom: "vitrine-calendrier-factures", duree: 5.0, taille: Some([2100.0, 1180.0]) },
     SceneDuTheme { nom: "vitrine-gantt-soumissions", duree: 5.0, taille: Some([2100.0, 1180.0]) },
     SceneDuTheme { nom: "vitrine-gantt-factures", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "vitrine-compta", duree: 6.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "vitrine-compta-fournisseurs", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "vitrine-compta-clients", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "vitrine-compta-mois", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "vitrine-compta-fournisseur", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "vitrine-compta-chantier", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "vitrine-compta-historique", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "vitrine-compta-etroit", duree: 5.0, taille: Some([1180.0, 880.0]) },
+    SceneDuTheme { nom: "vitrine-compta-clients-retard", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "vitrine-compta-fournisseurs-etroit", duree: 5.0, taille: Some([1180.0, 880.0]) },
     SceneDuTheme { nom: "planning-non-relie", duree: 5.0, taille: Some([1560.0, 900.0]) },
     SceneDuTheme { nom: "planning-lecture", duree: 4.0, taille: None },
     SceneDuTheme { nom: "planning-famille", duree: 4.0, taille: None },
@@ -5612,6 +5693,10 @@ static SCENES_DU_THEME: [SceneDuTheme; 59] = [
     SceneDuTheme { nom: "lue-gantt-factures", duree: 5.0, taille: Some([2100.0, 1180.0]) },
     SceneDuTheme { nom: "lue-calendrier-factures", duree: 5.0, taille: Some([2100.0, 1180.0]) },
     SceneDuTheme { nom: "lue-calendrier-semaine", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "lue-compta", duree: 6.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "lue-compta-historique", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "lue-compta-sans-outils", duree: 5.0, taille: Some([2100.0, 1180.0]) },
+    SceneDuTheme { nom: "lue-compta-manquee", duree: 5.0, taille: Some([2100.0, 1180.0]) },
 ];
 
 /// Le fichier qui dit que l'`entreprise.json` du dossier local est celui de l'essai du thème : l'essai le réécrit.
@@ -5632,7 +5717,9 @@ const MARQUE_DE_L_ENTREPRISE: &str = "essai-theme-entreprise.txt";
 /// L'entreprise inventée (« Construction Exemple inc. », ses projets, ses factures, son pipeline) s'écrit dans
 /// l'`entreprise.json` du dossier local que nomme `EVE_DOSSIER_LOCAL`, scène après scène, comme Eve l'écrirait en
 /// lisant l'ERP : seulement si ce dossier est nommé (jamais celui d'office), et si son `entreprise.json` manque ou
-/// vient de cet essai (sa marque à côté). Sinon, les scènes de l'entreprise montrent ce qui s'y trouve.
+/// vient de cet essai (sa marque à côté). Sinon, les scènes de l'entreprise montrent ce qui s'y trouve. Les scènes de
+/// la comptabilité lue (`lue-compta…`, et donc l'essai d'office) veulent ce dossier : sans lui, l'essai se relance sur
+/// un dossier local à lui, temporaire ([`theme_sur_un_dossier_a_lui`]), avant d'ouvrir le journal ou les réglages.
 ///
 /// L'essai joue le chef : un texte écrit reçoit une réponse inventée, « Nouvelle conversation » vide le fil, l'accord
 /// se donne ou se refuse, le thème se change dans les réglages (« Centre de commande » : la musique du tableau se ferait
@@ -5671,6 +5758,12 @@ pub fn theme(args: &[String]) -> i32 {
         }
         None => SCENES_DU_THEME.iter().filter(|s| s.nom.starts_with("vitrine") == vitrine_voulue).collect(),
     };
+    // Les scènes de la comptabilité lue n'ont jamais le dossier local réel d'Eve : sans `EVE_DOSSIER_LOCAL`, `main` a
+    // relancé l'essai sur un dossier à lui ([`theme_sur_un_dossier_a_lui`]) ; s'il arrive ici quand même, il refuse.
+    if scenes.iter().any(|s| s.nom.starts_with("lue-compta")) && !dossier_local_nomme() {
+        eprintln!("les scènes de la comptabilité lue veulent EVE_DOSSIER_LOCAL : jamais le dossier local d'Eve");
+        return 1;
+    }
     let etrangeres = activite.is_dir() && !activite.join(MARQUE_DES_PANNEAUX).is_file();
     let vitrine = (vitrine_voulue || scenes.iter().any(|s| s.nom.starts_with("vitrine")))
         .then(|| crate::centre::numero_du_jour(JOUR_DE_LA_VITRINE))
@@ -5724,12 +5817,143 @@ pub fn theme(args: &[String]) -> i32 {
     ecran.publier(&etat.json());
     let abonnement = ecran.abonner();
     thread::spawn(move || mener_l_essai_du_theme(&ecran, &gestes, etat, &scenes, captures, secondes));
-    if crate::natif::lancer(abonnement, rapport, "Eve — Essai du thème", Some(dossier)) {
-        0
-    } else {
+    let ouverte = crate::natif::lancer(abonnement, rapport, "Eve — Essai du thème", Some(dossier));
+    if !ouverte {
         eprintln!("la fenêtre native ne s'ouvre pas (OpenGL)");
-        1
     }
+    let manquees = SCENES_MANQUEES.lock().map(|m| m.clone()).unwrap_or_default();
+    for (nom, raison) in &manquees {
+        eprintln!("ÉCHEC de la scène {nom} : {raison}");
+    }
+    code_de_l_essai_du_theme(ouverte, manquees.len())
+}
+
+/// Les scènes qui n'ont pas pu se jouer — une scène de la comptabilité lue dont la lecture ne s'est pas faite —, et
+/// pourquoi : l'essai le dit, et sort en échec ; jamais d'une capture qui ne montre pas ce qu'elle dit montrer (la QA5
+/// du lot 13.2 : ces scènes sortaient en code 0 sans avoir rien lu).
+static SCENES_MANQUEES: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// Le code de sortie de l'essai du thème : 0 si la fenêtre s'est ouverte et que chaque scène s'est jouée, 1 sinon.
+fn code_de_l_essai_du_theme(ouverte: bool, scenes_manquees: usize) -> i32 {
+    i32::from(!ouverte || scenes_manquees > 0)
+}
+
+/// `EVE_DOSSIER_LOCAL` nomme-t-il un dossier ?
+fn dossier_local_nomme() -> bool {
+    std::env::var_os("EVE_DOSSIER_LOCAL").is_some_and(|d| !d.is_empty())
+}
+
+/// Les scènes que jouera `eve --essai-theme` (`args` : ce qui suit `--essai-theme`) : celles de `--scenes`, ou,
+/// d'office, toutes sauf celles de la vitrine (`--vitrine` : les siennes seulement) ; `None` pour une scène inconnue
+/// (l'essai le dira).
+fn scenes_demandees(args: &[String]) -> Option<Vec<&'static str>> {
+    let vitrine = args.iter().any(|a| a == "--vitrine");
+    match args.iter().position(|a| a == "--scenes").and_then(|i| args.get(i + 1)) {
+        Some(noms) => noms
+            .split(',')
+            .map(|n| SCENES_DU_THEME.iter().find(|s| s.nom == n.trim()).map(|s| s.nom))
+            .collect::<Option<Vec<_>>>()
+            .map(|voulues| SCENES_DU_THEME.iter().map(|s| s.nom).filter(|n| voulues.contains(n)).collect()),
+        None => Some(SCENES_DU_THEME.iter().map(|s| s.nom).filter(|n| n.starts_with("vitrine") == vitrine).collect()),
+    }
+}
+
+/// `eve --essai-theme` qui joue des scènes de la comptabilité lue — elles montent un faux Constructo AI, s'y connectent
+/// et écrivent `registre.json` —, sans `EVE_DOSSIER_LOCAL` : relancé tel quel sur un dossier local à lui, AVANT que le
+/// journal et les réglages d'Eve ne s'ouvrent (la QA5 du lot 13.2 : ces scènes ne lisaient rien, et l'essai écrivait au
+/// vrai `eve.log` des lignes à l'heure de la vitrine). Rend le code de l'essai relancé ; `None` : il se fait ici.
+pub fn theme_sur_un_dossier_a_lui(args: &[String]) -> Option<i32> {
+    if dossier_local_nomme() {
+        return None;
+    }
+    let scenes = scenes_demandees(args)?;
+    scenes.iter().any(|n| n.starts_with("lue-compta")).then(|| relancer_sur_un_dossier_local_a_l_essai(args))
+}
+
+/// L'essai du thème relancé tel quel, sur un dossier local à lui (`EVE_DOSSIER_LOCAL`, un dossier temporaire neuf) :
+/// ses réglages, son journal, `registre.json` et la connexion jouée y vont, jamais dans ceux d'Eve. Le dossier s'efface
+/// à la fin ; rend le code de l'essai relancé.
+fn relancer_sur_un_dossier_local_a_l_essai(args: &[String]) -> i32 {
+    let local = std::env::temp_dir().join(format!("eve-essai-theme-local-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&local);
+    if let Err(e) = std::fs::create_dir_all(&local) {
+        eprintln!("{} : {e}", local.display());
+        return 1;
+    }
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("l'essai ne se relance pas ({e})");
+            return 1;
+        }
+    };
+    println!("les scènes de la comptabilité lue : un dossier local à l'essai, {}", local.display());
+    let code = std::process::Command::new(exe)
+        .arg("--essai-theme")
+        .args(args)
+        .env("EVE_DOSSIER_LOCAL", &local)
+        .status()
+        .map_or(1, |s| s.code().unwrap_or(1));
+    let _ = std::fs::remove_dir_all(&local);
+    code
+}
+
+/// Le fichier qui dit que le `registre.json` du dossier local est celui de l'essai du thème : l'essai le réécrit. Sans
+/// lui, un `registre.json` est celui d'une vraie Eve (sa lecture de la comptabilité de l'ERP) : rien n'y est écrit.
+const MARQUE_DU_REGISTRE: &str = "essai-theme-registre.txt";
+
+/// La comptabilité des scènes « lue-compta… » : une vraie lecture, celle du chef — le faux Constructo AI monté ici, la
+/// connexion d'Eve jouée, son client MCP qui lit le registre puis l'historique par pages
+/// ([`crate::entreprise::lire_la_compta`]), `registre.json` écrit comme le chef l'écrit
+/// ([`crate::entreprise::FichierDuRegistre`]) —, dans le dossier local que nomme `EVE_DOSSIER_LOCAL`, s'il n'en a pas
+/// ou si c'est celui de l'essai (sa marque à côté). `sans_outils` : la lecture se fait sur un serveur d'avant les deux
+/// outils de la comptabilité, et manque ; `avant` : une lecture réussie d'abord, que celle qui manque garde. Le centre
+/// de la fenêtre relit le fichier, et l'onglet le montre : rien ne lui est imposé. Rend ce que la lecture a trouvé, en
+/// nombres, ou la phrase de celle qui a manqué.
+fn lire_la_compta_du_faux_serveur(sans_outils: bool, avant: bool) -> Result<String, String> {
+    std::env::var_os("EVE_DOSSIER_LOCAL").filter(|d| !d.is_empty()).ok_or("EVE_DOSSIER_LOCAL n'est pas nommé")?;
+    let local = crate::reglages::dossier_local();
+    let (fichier, marque) = (local.join(crate::compta::FICHIER), local.join(MARQUE_DU_REGISTRE));
+    if fichier.exists() && !marque.is_file() {
+        return Err(format!("{} n'est pas celui de l'essai", fichier.display()));
+    }
+    let pose = "Ce registre.json est lu par eve --essai-theme dans un faux Constructo AI, à chaque scène.\n";
+    std::fs::write(&marque, pose).map_err(|e| format!("{} : {e}", marque.display()))?;
+    let faux = FauxConstructo::demarrer(0, 3600, 0).map_err(|e| format!("le faux serveur ne s'ouvre pas : {e}"))?;
+    let (jeton, lien) = faux_constructo::jeton(&faux)?;
+    let lire = || {
+        use crate::entreprise::{COMPTA_DUREE_MAX, PAGES, lire_la_compta};
+        lire_la_compta(&lien.ressource(), &jeton, PAGES, COMPTA_DUREE_MAX)
+    };
+    let lu_le = crate::journal::date_et_heure().replacen(' ', "T", 1);
+    let mut f = crate::entreprise::FichierDuRegistre::default();
+    let mut resume = String::new();
+    // La lecture qui réussit ; ou celle d'avant, que garde la lecture qui manque.
+    if !sans_outils || avant {
+        match lire() {
+            Ok(l) => {
+                resume = l.resume();
+                f = crate::entreprise::FichierDuRegistre::lu(l.registre, &lu_le);
+            }
+            Err(p) => {
+                let _ = std::fs::remove_file(&lien.fichier);
+                return Err(p.texte());
+            }
+        }
+    }
+    if sans_outils {
+        faux.sans_la_compta(false);
+        let Some(p) = lire().err() else {
+            let _ = std::fs::remove_file(&lien.fichier);
+            return Err("la lecture sur un serveur sans les outils de la comptabilité a réussi".into());
+        };
+        let phrase = crate::entreprise::phrase_de_la_compta(&p);
+        f = f.manque(&phrase);
+        resume = format!("une lecture manquée : {phrase}");
+    }
+    let _ = std::fs::remove_file(&lien.fichier);
+    f.ecrire(&local)?;
+    Ok(resume)
 }
 
 /// L'`entreprise.json` où l'essai du thème écrit son entreprise inventée : celui du dossier local que nomme
@@ -6112,7 +6336,7 @@ struct MomentDeLaVitrine {
 /// de l'après-midi (la petite qui fait de la fièvre : l'empathie) ; la fin de l'après-midi (le hockey du garçon :
 /// l'amusement ; puis la famille) ; enfin, quelques minutes plus tard, son planning (le calendrier, le Gantt, le
 /// Kanban : [`planning_invente`]).
-const MOMENTS_DE_LA_VITRINE: [MomentDeLaVitrine; 19] = [
+const MOMENTS_DE_LA_VITRINE: [MomentDeLaVitrine; 29] = [
     MomentDeLaVitrine {
         scene: "vitrine-joie",
         heure: 8 * 3600 + 12 * 60,
@@ -6278,6 +6502,97 @@ const MOMENTS_DE_LA_VITRINE: [MomentDeLaVitrine; 19] = [
     MomentDeLaVitrine {
         scene: "vitrine-gantt-factures",
         heure: 16 * 3600 + 54 * 60,
+        vue: "entreprise",
+        emotion: None,
+        lignes: 11,
+        meteo: (7.1, 3),
+        non_lus: (1, 4, false),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-compta",
+        heure: 16 * 3600 + 55 * 60,
+        vue: "entreprise",
+        emotion: None,
+        lignes: 11,
+        meteo: (7.1, 3),
+        non_lus: (1, 4, false),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-compta-fournisseurs",
+        heure: 16 * 3600 + 55 * 60 + 30,
+        vue: "entreprise",
+        emotion: None,
+        lignes: 11,
+        meteo: (7.1, 3),
+        non_lus: (1, 4, false),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-compta-clients",
+        heure: 16 * 3600 + 56 * 60,
+        vue: "entreprise",
+        emotion: None,
+        lignes: 11,
+        meteo: (7.1, 3),
+        non_lus: (1, 4, false),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-compta-mois",
+        heure: 16 * 3600 + 56 * 60 + 30,
+        vue: "entreprise",
+        emotion: None,
+        lignes: 11,
+        meteo: (7.1, 3),
+        non_lus: (1, 4, false),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-compta-fournisseur",
+        heure: 16 * 3600 + 57 * 60,
+        vue: "entreprise",
+        emotion: None,
+        lignes: 11,
+        meteo: (7.1, 3),
+        non_lus: (1, 4, false),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-compta-chantier",
+        heure: 16 * 3600 + 57 * 60 + 30,
+        vue: "entreprise",
+        emotion: None,
+        lignes: 11,
+        meteo: (7.1, 3),
+        non_lus: (1, 4, false),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-compta-historique",
+        heure: 16 * 3600 + 58 * 60,
+        vue: "entreprise",
+        emotion: None,
+        lignes: 11,
+        meteo: (7.1, 3),
+        non_lus: (1, 4, false),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-compta-etroit",
+        heure: 16 * 3600 + 58 * 60 + 30,
+        vue: "entreprise",
+        emotion: None,
+        lignes: 11,
+        meteo: (7.1, 3),
+        non_lus: (1, 4, false),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-compta-clients-retard",
+        heure: 16 * 3600 + 59 * 60,
+        vue: "entreprise",
+        emotion: None,
+        lignes: 11,
+        meteo: (7.1, 3),
+        non_lus: (1, 4, false),
+    },
+    MomentDeLaVitrine {
+        scene: "vitrine-compta-fournisseurs-etroit",
+        // Avant 17 h : le rappel du hockey de la vitrine sonnerait.
+        heure: 16 * 3600 + 59 * 60 + 30,
         vue: "entreprise",
         emotion: None,
         lignes: 11,
@@ -7039,6 +7354,19 @@ impl EtatDuTheme {
         // Le planning lu : Constructo AI relié, l'entreprise et la famille ensemble ; l'`entreprise.json` du dossier
         // local reste tel qu'une Eve l'a écrit.
         if nom.starts_with("lue-") {
+            // La comptabilité lue : une vraie lecture, dans un faux Constructo AI monté pour la scène.
+            if nom.starts_with("lue-compta") {
+                let sans_outils = matches!(nom, "lue-compta-sans-outils" | "lue-compta-manquee");
+                match lire_la_compta_du_faux_serveur(sans_outils, nom == "lue-compta-manquee") {
+                    Ok(dit) => println!("{nom} : la comptabilité, lue dans un faux Constructo AI : {dit}"),
+                    Err(e) => {
+                        eprintln!("{nom} : ÉCHEC, la comptabilité ne s'est pas lue ({e})");
+                        if let Ok(mut m) = SCENES_MANQUEES.lock() {
+                            m.push((nom.to_string(), e));
+                        }
+                    }
+                }
+            }
             self.vue = "tout".into();
             self.relier("connectee");
             self.lecture_finie_a = None;
@@ -7342,6 +7670,10 @@ fn mener_l_essai_du_theme(
                 }
                 // L'onglet du tableau de bord de la scène, et ce que montrent ses vues du planning.
                 crate::natif::planning::preparer_pour_l_essai(&ctx, &planning_de_la_scene(s.nom));
+                crate::natif::compta::preparer_pour_l_essai(&ctx, compta_de_la_scene(s.nom));
+                if let Some(a) = aller_de_la_scene(s.nom) {
+                    crate::natif::compta::aller(&ctx, a);
+                }
                 t
             });
             // Le bas de la page, jusqu'à une demi-seconde de la capture : la vue et la taille de la scène se prennent
@@ -10637,6 +10969,206 @@ mod faux_planning {
     }
 }
 
+/// La comptabilité sur le faux Constructo AI (`eve --essai-constructo`, le lot 13.2) : les deux outils de l'ERP que lit
+/// l'onglet « Comptabilité », dans leur contrat (celui de `mcp_server.py`) — un TEXTE JSON compact, les montants en
+/// texte au cent (« 1149.75 »), jamais en nombre à virgule —, sur le registre de la vitrine (`compta::vitrine` :
+/// l'entreprise inventée de l'onglet), au jour de l'essai. Ses pages, comme celles du vrai : `apres_id` et `limite` (de
+/// 1 à 1000) pour le registre, du plus petit id au plus grand — ou, avec `recentes_d_abord`, `avant_id`, du plus grand
+/// au plus petit (ce que lit Eve) ; `avant_id` et `limite` (de 1 à 500) pour l'historique, du plus récent au plus
+/// ancien ; `suivant`, l'id à redonner, ou rien après la dernière page.
+mod faux_compta {
+    use serde_json::{Value, json};
+
+    use crate::compta::{Cents, Changement, Cote, Facture, Registre};
+
+    /// Un outil du faux serveur, comme ceux de `faux_constructo` : son nom, sa description, ses paramètres, ceux qu'il
+    /// exige.
+    type Outil = (&'static str, &'static str, &'static [(&'static str, &'static str)], &'static [&'static str]);
+
+    pub const OUTILS: [Outil; 2] = [
+        (
+            crate::compta::OUTIL_DU_REGISTRE,
+            "Liste les factures, clients et fournisseurs, par pages ; les montants en texte. Lecture seule.",
+            &[
+                ("destinataire", "string"),
+                ("apres_id", "integer"),
+                ("limite", "integer"),
+                ("recentes_d_abord", "boolean"),
+                ("avant_id", "integer"),
+            ],
+            &[],
+        ),
+        (
+            crate::compta::OUTIL_DE_L_HISTORIQUE,
+            "Liste le journal d'audit de la comptabilité, du plus récent au plus ancien, par pages. Lecture seule.",
+            &[("avant_id", "integer"), ("limite", "integer")],
+            &[],
+        ),
+    ];
+
+    /// L'un des deux outils de la comptabilité ?
+    pub fn est_a_elle(outil: &str) -> bool {
+        OUTILS.iter().any(|o| o.0 == outil)
+    }
+
+    /// Le registre du faux serveur : celui de la vitrine, au jour de l'essai.
+    pub fn registre() -> Registre {
+        crate::compta::vitrine::registre(&crate::journal::date())
+    }
+
+    /// Un montant comme le rend le serveur : en texte, au cent (« 1149.75 », « -12.50 »).
+    pub fn en_texte(c: Cents) -> String {
+        let signe = if c < 0 { "-" } else { "" };
+        format!("{signe}{}.{:02}", c.unsigned_abs() / 100, c.unsigned_abs() % 100)
+    }
+
+    /// Une facture comme la rend `comptabilite_lister_registre`.
+    pub fn au_serveur(f: &Facture) -> Value {
+        let m = |c: Option<Cents>| c.map(en_texte);
+        let destinataire = match f.cote {
+            Cote::Client => "client",
+            Cote::Fournisseur => "fournisseur",
+        };
+        json!({
+            "id": f.id, "numero": f.numero, "numero_fournisseur": f.numero_fournisseur, "destinataire": destinataire,
+            "type_document": f.type_document, "statut": f.statut, "date": f.date, "echeance": f.echeance,
+            "paiement": f.paiement, "tiers": f.tiers, "tiers_id": f.tiers_id, "projet_id": f.projet_id,
+            "projet": f.projet, "section": f.section, "fiabilite": f.fiabilite, "sous_total": m(f.sous_total),
+            "tps": m(f.tps), "tvq": m(f.tvq), "total": m(f.total), "paye": m(f.paye), "solde": m(f.solde),
+            "taxe1": f.taxe1, "taxe2": f.taxe2, "cree_le": f.cree_le, "modifie_le": f.modifie_le,
+        })
+    }
+
+    /// Un entier des arguments : un nombre, ou un texte qui en est un.
+    fn entier(v: &Value) -> Option<i64> {
+        v.as_i64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+    }
+
+    /// Une lecture de la comptabilité, ou `None` : un outil que ce module n'a pas.
+    pub fn lecture(outil: &str, a: &Value) -> Option<String> {
+        match outil {
+            crate::compta::OUTIL_DU_REGISTRE => Some(page_du_registre(&registre(), a)),
+            crate::compta::OUTIL_DE_L_HISTORIQUE => Some(page_de_l_historique(&registre(), a)),
+            _ => None,
+        }
+    }
+
+    /// Une page du registre : les factures d'id plus grand que `apres_id` (d'un destinataire, s'il est nommé), au plus
+    /// `limite`, la plus ancienne d'abord ; avec `recentes_d_abord`, celles d'id plus petit que `avant_id` (zéro :
+    /// depuis la plus récente), la plus récente d'abord — et un `apres_id` avec lui est refusé, en texte, comme le
+    /// vrai. `suivant`, l'id de la dernière s'il en reste ; `total`, toutes celles de l'entreprise.
+    pub fn page_du_registre(r: &Registre, a: &Value) -> String {
+        let destinataire = a["destinataire"].as_str().unwrap_or("").trim().to_lowercase();
+        let apres = entier(&a["apres_id"]).unwrap_or(0);
+        let avant = entier(&a["avant_id"]).unwrap_or(0);
+        let recentes = a["recentes_d_abord"].as_bool() == Some(true);
+        if recentes && apres != 0 {
+            return "Erreur : apres_id ne va pas avec recentes_d_abord ; la page suivante se demande par avant_id."
+                .into();
+        }
+        let limite = entier(&a["limite"]).unwrap_or(500).clamp(1, 1000) as usize;
+        let toutes: Vec<&Facture> = r
+            .factures
+            .iter()
+            .filter(|f| match destinataire.as_str() {
+                "client" => f.cote == Cote::Client,
+                "fournisseur" => f.cote == Cote::Fournisseur,
+                _ => true,
+            })
+            .collect();
+        let mut ordre = toutes.clone();
+        if recentes {
+            ordre.sort_by(|x, y| y.id.cmp(&x.id));
+        } else {
+            ordre.sort_by_key(|f| f.id);
+        }
+        let mut suite =
+            ordre.iter().copied().filter(|f| if recentes { avant <= 0 || f.id < avant } else { f.id > apres });
+        let page: Vec<&Facture> = suite.by_ref().take(limite).collect();
+        let suivant = if suite.next().is_some() { page.last().map(|f| f.id) } else { None };
+        let factures: Vec<Value> = page.iter().map(|f| au_serveur(f)).collect();
+        json!({ "version": 1, "factures": factures, "suivant": suivant, "total": toutes.len(),
+                "colonnes_absentes": [] })
+        .to_string()
+    }
+
+    /// Une page de l'historique : les entrées d'id plus petit que `avant_id` (zéro : depuis la plus récente), au plus
+    /// `limite`, la plus récente d'abord ; `suivant`, l'id de la dernière s'il en reste. Un texte vide se rend `null`,
+    /// comme une colonne vide en base (une écriture du système n'a personne).
+    pub fn page_de_l_historique(r: &Registre, a: &Value) -> String {
+        let mut h: Vec<&Changement> = r.historique.iter().collect();
+        h.sort_by(|x, y| y.id.cmp(&x.id));
+        let avant = entier(&a["avant_id"]).unwrap_or(0);
+        let limite = entier(&a["limite"]).unwrap_or(200).clamp(1, 500) as usize;
+        let mut suite = h.iter().copied().filter(|c| avant <= 0 || c.id < avant);
+        let page: Vec<&Changement> = suite.by_ref().take(limite).collect();
+        let suivant = if suite.next().is_some() { page.last().map(|c| c.id) } else { None };
+        let texte = |s: &str| if s.is_empty() { Value::Null } else { json!(s) };
+        let changements: Vec<Value> = page
+            .iter()
+            .map(|c| {
+                json!({ "id": c.id, "quand": c.quand, "qui": texte(&c.qui), "action": c.action, "entite": c.entite,
+                        "entite_id": c.entite_id, "details": texte(&c.details) })
+            })
+            .collect();
+        json!({ "version": 1, "changements": changements, "suivant": suivant, "table_absente": false }).to_string()
+    }
+}
+
+#[cfg(test)]
+mod essais_du_faux_compta {
+    use serde_json::{Value, json};
+
+    use super::faux_compta::page_du_registre;
+
+    /// Le registre du faux serveur des plus récentes aux plus anciennes (`recentes_d_abord`, `avant_id`), comme le lit
+    /// Eve : chaque page sous la précédente, `suivant` l'id à redonner, rien après la dernière ; un `apres_id` avec lui
+    /// est refusé en texte, comme le vrai ; sans lui, du plus ancien au plus récent, comme avant.
+    #[test]
+    fn le_faux_registre_se_lit_des_plus_recentes() {
+        let r = crate::compta::vitrine::registre("2026-11-02");
+        let page = |a: Value| -> Value { serde_json::from_str(&page_du_registre(&r, &a)).unwrap() };
+        let ids = |p: &Value| -> Vec<i64> {
+            p["factures"].as_array().unwrap().iter().map(|f| f["id"].as_i64().unwrap()).collect()
+        };
+        let (min, max) = (r.factures.iter().map(|f| f.id).min(), r.factures.iter().map(|f| f.id).max());
+        let p1 = page(json!({ "recentes_d_abord": true, "avant_id": 0, "limite": 3 }));
+        let un = ids(&p1);
+        assert_eq!((un.len(), un.first().copied()), (3, max));
+        assert!(un.windows(2).all(|w| w[0] > w[1]), "{un:?}");
+        assert_eq!(p1["suivant"], json!(un[2]));
+        let deux = ids(&page(json!({ "recentes_d_abord": true, "avant_id": un[2], "limite": 3 })));
+        assert!(deux.len() == 3 && deux.iter().all(|&i| i < un[2]), "{deux:?}");
+        let refus = page_du_registre(&r, &json!({ "recentes_d_abord": true, "apres_id": 5 }));
+        assert!(!refus.trim_start().starts_with('{'), "{refus}");
+        assert_eq!(ids(&page(json!({ "apres_id": 0, "limite": 2 }))).first().copied(), min);
+        let toutes = page(json!({ "recentes_d_abord": true, "avant_id": 0, "limite": 1000 }));
+        assert_eq!((ids(&toutes).len(), &toutes["suivant"]), (r.factures.len(), &Value::Null));
+    }
+
+    /// L'essai du thème sort en échec quand une scène n'a pas pu se jouer, ou que la fenêtre ne s'ouvre pas.
+    #[test]
+    fn une_scene_manquee_fait_echouer_l_essai() {
+        assert_eq!(super::code_de_l_essai_du_theme(true, 0), 0);
+        assert_eq!(super::code_de_l_essai_du_theme(true, 1), 1);
+        assert_eq!(super::code_de_l_essai_du_theme(false, 0), 1);
+    }
+
+    /// Les scènes que jouera l'essai, pour savoir s'il se relance sur un dossier local à lui : celles de `--scenes`
+    /// (une inconnue : rien, l'essai le dira), ou d'office toutes sauf la vitrine — dont celles de la comptabilité lue.
+    #[test]
+    fn les_scenes_demandees() {
+        let a = |t: &[&str]| t.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let lues = |t: &[&str]| super::scenes_demandees(&a(t)).map(|v| v.iter().any(|n| n.starts_with("lue-compta")));
+        assert_eq!(lues(&["--scenes", "lue-compta,tableau"]), Some(true));
+        assert_eq!(lues(&["dossier", "--scenes", "tableau"]), Some(false));
+        assert_eq!(lues(&["--scenes", "tableau,inconnue"]), None);
+        assert_eq!(lues(&[]), Some(true), "d'office : toutes sauf la vitrine");
+        assert_eq!(lues(&["--vitrine"]), Some(false));
+        assert_eq!(super::scenes_demandees(&a(&["--scenes", " tableau "])), Some(vec!["tableau"]));
+    }
+}
+
 // ---- Le planning de la vitrine : le calendrier, le Gantt et le Kanban du tableau de bord -------------------------
 
 /// Les chantiers que le Gantt de la vitrine montre dépliés : l'entrepôt, l'école, les condos.
@@ -10678,10 +11210,41 @@ fn planning_de_la_scene(nom: &str) -> crate::natif::planning::Montre<'static> {
         "vitrine-kanban" | "vitrine-kanban-etroit" => Montre { tableau: "devis", ..montre(Onglet::Kanban) },
         "vitrine-operations" => Montre { tableau: "operations", ..montre(Onglet::Kanban) },
         "vitrine-gantt-etroit" => Montre { deplies: &deplies[..1], ..montre(Onglet::Gantt) },
+        n if n.starts_with("vitrine-compta") || n.starts_with("lue-compta") => montre(Onglet::Comptabilite),
         "planning-non-relie" | "planning-famille" => montre(Onglet::Gantt),
         "planning-lecture" | "planning-vide" => montre(Onglet::Kanban),
         _ => montre(Onglet::Tableau),
     }
+}
+
+/// La vue de l'onglet « Comptabilité » que montre une scène de la vitrine, ou de la comptabilité lue (le lot 13.2) ;
+/// `None` ailleurs.
+fn compta_de_la_scene(nom: &str) -> Option<crate::natif::compta::VueCompta> {
+    use crate::natif::compta::VueCompta;
+    Some(match nom {
+        "vitrine-compta" | "vitrine-compta-etroit" | "lue-compta" | "lue-compta-sans-outils" | "lue-compta-manquee" => {
+            VueCompta::Bord
+        }
+        "lue-compta-historique" => VueCompta::Historique,
+        "vitrine-compta-fournisseurs" | "vitrine-compta-fournisseurs-etroit" => VueCompta::Fournisseurs,
+        "vitrine-compta-clients" | "vitrine-compta-clients-retard" => VueCompta::Clients,
+        "vitrine-compta-mois" => VueCompta::ParMois,
+        "vitrine-compta-fournisseur" => VueCompta::ParFournisseur,
+        "vitrine-compta-chantier" => VueCompta::ParChantier,
+        "vitrine-compta-historique" => VueCompta::Historique,
+        _ => return None,
+    })
+}
+
+/// Le filtre qu'apporte à sa liste une scène de la vitrine qui y arrive du tableau de bord (un « aller à » : les factures
+/// des clients en retard) ; `None` ailleurs.
+fn aller_de_la_scene(nom: &str) -> Option<crate::natif::compta::Aller> {
+    use crate::natif::compta::{Aller, VueCompta};
+    (nom == "vitrine-compta-clients-retard").then(|| Aller {
+        vue: VueCompta::Clients,
+        etat: Some("en_retard"),
+        ..Aller::default()
+    })
 }
 
 /// Où défile la page d'une scène de la vitrine qui montre une vue du planning : sous la bannière, qui sort de la vue
@@ -10698,6 +11261,13 @@ impl EtatDuTheme {
     /// états du planning se prépare ici toute entière — la liaison, l'entreprise, la vue — et rend vrai.
     fn scene_du_planning(&mut self, nom: &str) -> bool {
         use crate::natif::planning::imposer;
+        // La comptabilité de la vitrine (le lot 13.2) : son entreprise inventée ; ailleurs, celle du centre.
+        crate::compta::imposer(
+            self.vitrine
+                .as_ref()
+                .filter(|_| nom.starts_with("vitrine-"))
+                .map(|v| crate::compta::vitrine::lecture(&crate::centre::date_du_numero(v.jour))),
+        );
         if nom.starts_with("vitrine-") {
             imposer(self.vitrine.as_ref().map(|v| planning_invente(v.jour, true)));
             return false;

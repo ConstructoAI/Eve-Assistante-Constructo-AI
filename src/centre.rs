@@ -79,6 +79,9 @@ const COURT: usize = 60;
 const TABLEAU_MAX: u64 = 4 * 1024 * 1024;
 /// La dernière lecture de l'ERP de Constructo AI, dans le dossier local : Eve l'écrit, le tableau de bord la montre.
 pub const ENTREPRISE: &str = "entreprise.json";
+/// Le plus gros `registre.json` que lit Eve : vingt mille factures, en JSON compact, en font une quinzaine de
+/// mégaoctets, avec des noms longs une trentaine ; au-delà, le fichier n'est pas le sien.
+const REGISTRE_MAX: u64 = 64 * 1024 * 1024;
 /// La couleur d'une personne qui ne dit pas la sienne : celle de son rang, les quatre quartiers du modèle (cdc:531)
 /// d'abord.
 const COULEURS: [[u8; 3]; 8] = [
@@ -107,6 +110,10 @@ pub struct Centre {
     /// La dernière lecture de l'ERP que garde le dossier local ([`ENTREPRISE`]) : ce qu'elle dit, ou pourquoi elle ne
     /// se lit pas ; `None` sans fichier, ou tant que le fil ne l'a pas lue.
     entreprise: Arc<Mutex<Option<Result<Arc<Value>, String>>>>,
+    /// La dernière lecture de la comptabilité de l'ERP que garde le dossier local (`registre.json`,
+    /// [`crate::compta::FICHIER`]), telle que le fil l'a lue ; `None` sans fichier, ou tant que le fil ne l'a pas lue.
+    /// Un fichier illisible n'y change rien : la lecture d'avant reste.
+    registre: Arc<Mutex<Option<Arc<crate::compta::Lecture>>>>,
     /// Réveille le fil : une comptabilité nommée se lit aussitôt. `None` sans fil.
     reveil: Option<mpsc::Sender<()>>,
     /// Combien de fois ce que lit le centre a changé (le fil le compte, et la fenêtre quand elle lui donne la famille
@@ -304,11 +311,12 @@ impl Centre {
         if dossier.is_some() || journal.is_some() {
             let (reveil, attente) = mpsc::channel();
             centre.reveil = Some(reveil);
-            let (valeurs, journee, comptabilite, entreprise, generation) = (
+            let (valeurs, journee, comptabilite, entreprise, registre, generation) = (
                 centre.valeurs.clone(),
                 centre.journee.clone(),
                 centre.comptabilite.clone(),
                 centre.entreprise.clone(),
+                centre.registre.clone(),
                 centre.generation.clone(),
             );
             thread::spawn(move || {
@@ -319,6 +327,7 @@ impl Centre {
                     journee: &journee,
                     comptabilite: &comptabilite,
                     entreprise: &entreprise,
+                    registre: &registre,
                     generation: &generation,
                 };
                 relire(activite.as_deref(), journal.as_deref(), &travail, lus, &attente, &ctx);
@@ -331,6 +340,13 @@ impl Centre {
     /// qu'elle dit, ou pourquoi elle ne se lit pas ; `None` sans fichier. Le tableau de bord la montre.
     pub fn entreprise(&self) -> Option<Result<Arc<Value>, String>> {
         self.entreprise.lock().ok().and_then(|e| e.clone())
+    }
+
+    /// La dernière lecture de la comptabilité de l'ERP que garde le dossier local (`registre.json`, [`crate::compta`]),
+    /// telle que le fil l'a lue — relue quand le fichier change, la lecture d'avant gardée quand il ne se lit pas ;
+    /// `None` sans fichier. L'onglet « Comptabilité » la montre : partagée, la fenêtre peut la demander à chaque image.
+    pub fn registre(&self) -> Option<Arc<crate::compta::Lecture>> {
+        self.registre.lock().ok().and_then(|r| r.clone())
     }
 
     /// Le planning du tableau de bord ([`crate::planning`]) : le calendrier, le Gantt et le Kanban, d'après la dernière
@@ -1609,20 +1625,21 @@ fn decompter(journal: &str, date: &str, dossier_de_travail: &Path) -> Decompte {
 }
 
 /// Ce que le fil tient à jour pour la fenêtre : les valeurs d'`activite\`, la journée en chiffres, la comptabilité, la
-/// dernière lecture de l'entreprise ; et combien de fois l'un d'eux a changé.
+/// dernière lecture de l'entreprise, celle de sa comptabilité ; et combien de fois l'un d'eux a changé.
 struct Lus<'a> {
     valeurs: &'a Mutex<HashMap<String, Value>>,
     journee: &'a Mutex<Journee>,
     comptabilite: &'a Mutex<Comptabilite>,
     entreprise: &'a Mutex<Option<Result<Arc<Value>, String>>>,
+    registre: &'a Mutex<Option<Arc<crate::compta::Lecture>>>,
     generation: &'a AtomicU64,
 }
 
 /// Relit sans fin `activite\` — un fichier changé (sa date) se relit, ses affectations remplacent les anciennes —, le
-/// tableau de la comptabilité nommée, la dernière lecture de l'entreprise (dans le dossier local, `journal`), et,
-/// chaque minute, le journal d'Eve : la journée en chiffres du jour que montre la fenêtre (aussitôt quand ce jour
-/// change). La fenêtre se redessine quand quelque chose a changé. `attente` réveille le fil avant son pas (une
-/// comptabilité nommée) ; la fenêtre partie, il s'arrête.
+/// tableau de la comptabilité nommée, la dernière lecture de l'entreprise et celle de sa comptabilité (dans le dossier
+/// local, `journal`), et, chaque minute, le journal d'Eve : la journée en chiffres du jour que montre la fenêtre
+/// (aussitôt quand ce jour change). La fenêtre se redessine quand quelque chose a changé. `attente` réveille le fil
+/// avant son pas (une comptabilité nommée) ; la fenêtre partie, il s'arrête.
 fn relire(
     activite: Option<&Path>,
     journal: Option<&Path>,
@@ -1631,18 +1648,25 @@ fn relire(
     attente: &mpsc::Receiver<()>,
     ctx: &egui::Context,
 ) {
-    let Lus { valeurs, journee, comptabilite, entreprise, generation } = lus;
+    let Lus { valeurs, journee, comptabilite, entreprise, registre, generation } = lus;
     // Les rappels du dossier local (`rappels.json`, leur seule source) : ceux à venir, sous `EVE_RAPPELS`.
     let mut rappels = journal.map(crate::rappels::Rappels::ouvrir);
     let mut vus: HashMap<&str, SystemTime> = HashMap::new();
     let mut suivi = Suivi::default();
     let mut suivi_de_l_entreprise = Suivi::default();
+    let mut suivi_du_registre = Suivi::default();
     let mut compte_a: Option<Instant> = None;
     loop {
         let mut change = activite.is_some_and(|d| relire_activite(d, &mut vus, valeurs));
         change |= relire_la_comptabilite(comptabilite, &mut suivi, travail);
         if let Some(local) = journal {
             change |= relire_l_entreprise(&local.join(ENTREPRISE), entreprise, &mut suivi_de_l_entreprise);
+        }
+        // La comptabilité de l'ERP : l'onglet se redessine ; le planning, qui ne la lit pas, ne se refait pas.
+        if journal.is_some_and(|local| {
+            relire_le_registre(&local.join(crate::compta::FICHIER), registre, &mut suivi_du_registre)
+        }) {
+            ctx.request_repaint();
         }
         if let Some(r) = &mut rappels {
             r.relire();
@@ -1767,6 +1791,57 @@ fn relire_l_entreprise(
     let Ok(mut e) = entreprise.lock() else { return false };
     *e = lue;
     true
+}
+
+/// Un passage du fil sur la dernière lecture de la comptabilité de l'ERP (`chemin`, `registre.json` du dossier local) :
+/// relue si elle a changé (sa date ou sa taille), comme celle de l'entreprise. Lue, elle se montre aussitôt ; absente,
+/// l'onglet n'en montre plus rien. Si elle ne se lit pas, elle attend d'être restée la même d'un passage à l'autre
+/// (elle s'écrit peut-être encore), puis l'onglet garde la lecture d'avant — ou rien — et le journal le dit, une fois.
+/// Vrai si ce que montre l'onglet a changé.
+fn relire_le_registre(chemin: &Path, registre: &Mutex<Option<Arc<crate::compta::Lecture>>>, suivi: &mut Suivi) -> bool {
+    let version = crate::reglages::date_de(chemin);
+    if suivi.montree == Some(version) {
+        return false;
+    }
+    let stable = suivi.vue == Some(version);
+    suivi.vue = Some(version);
+    let lue = match version.map(|_| lire_le_registre(chemin)) {
+        Some(Err(_)) if !stable => return false,
+        Some(Err(raison)) => {
+            suivi.montree = Some(version);
+            if suivi.dite.as_ref() != Some(&raison) {
+                crate::journal::ecrire(&format!(
+                    "comptabilité : {} {raison} — l'onglet garde la lecture d'avant",
+                    crate::compta::FICHIER
+                ));
+                suivi.dite = Some(raison);
+            }
+            return false;
+        }
+        Some(Ok(l)) => Some(Arc::new(l)),
+        None => None,
+    };
+    suivi.montree = Some(version);
+    suivi.dite = None;
+    let Ok(mut r) = registre.lock() else { return false };
+    *r = lue;
+    true
+}
+
+/// La dernière lecture de la comptabilité de l'ERP (`registre.json` : [`crate::compta::Lecture`]), en JSON strict (une
+/// marque d'ordre des octets en tête passe) ; si elle ne se lit pas, pourquoi, en quelques mots. Le chef la relit aussi
+/// ainsi, pour la réécrire.
+pub fn lire_le_registre(chemin: &Path) -> Result<crate::compta::Lecture, String> {
+    let ouvert = |e: std::io::Error| match e.kind() {
+        std::io::ErrorKind::NotFound => "est introuvable".to_string(),
+        _ => "ne s'ouvre pas".to_string(),
+    };
+    if std::fs::metadata(chemin).map_err(ouvert)?.len() > REGISTRE_MAX {
+        return Err("est trop gros pour une comptabilité".into());
+    }
+    let octets = std::fs::read(chemin).map_err(ouvert)?;
+    let octets = octets.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&octets);
+    serde_json::from_slice(octets).map_err(|e| format!("ne se lit pas (ligne {}, colonne {})", e.line(), e.column()))
 }
 
 /// La dernière lecture de l'entreprise, en JSON strict (une marque d'ordre des octets en tête passe) ; si elle ne se
@@ -3375,5 +3450,52 @@ mod essais {
         );
         assert_eq!(anniversaires("11-02", "2026-09-01", "2027-10-29"), [("2026-11-02".to_string(), None)]);
         assert!(anniversaires("le 2 novembre", "2026-09-01", "2027-10-29").is_empty());
+    }
+
+    /// `registre.json`, relu par le fil comme `entreprise.json` : absent, rien ; écrit, sa lecture ; illisible, la
+    /// lecture d'avant reste — au premier passage (il s'écrit peut-être encore) comme une fois resté le même ; réécrit,
+    /// la nouvelle (une marque d'ordre des octets en tête passe) ; retiré, rien.
+    #[test]
+    fn le_registre_se_relit_et_garde_la_lecture_d_avant() {
+        let dossier = std::env::temp_dir().join(format!("eve-centre-registre-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dossier);
+        std::fs::create_dir_all(&dossier).unwrap();
+        let chemin = dossier.join(crate::compta::FICHIER);
+        let registre: Mutex<Option<Arc<crate::compta::Lecture>>> = Mutex::new(None);
+        let mut suivi = Suivi::default();
+        assert!(relire_le_registre(&chemin, &registre, &mut suivi), "le premier passage : rien à montrer");
+        assert!(!relire_le_registre(&chemin, &registre, &mut suivi), "puis rien de neuf");
+        assert!(registre.lock().unwrap().is_none());
+        let premiere = concat!(
+            r#"{"etat":"a_jour","lu_le":"2026-11-02T14:05:09","erreur":"","#,
+            r#""registre":{"factures":[{"id":104,"total":114975}],"au_serveur":1}}"#
+        );
+        std::fs::write(&chemin, premiere).unwrap();
+        assert!(relire_le_registre(&chemin, &registre, &mut suivi));
+        let avant = registre.lock().unwrap().clone().unwrap();
+        assert_eq!(avant.lu_le, "2026-11-02T14:05:09");
+        let facture = avant.registre.as_ref().map(|r| (r.factures[0].id, r.factures[0].total, r.au_serveur));
+        assert_eq!(facture, Some((104, Some(114_975), 1)));
+        // Illisible : rien ne change, ni au premier passage ni au suivant ; la lecture d'avant reste, la même.
+        std::fs::write(&chemin, b"{\"etat\":").unwrap();
+        assert!(!relire_le_registre(&chemin, &registre, &mut suivi));
+        assert!(!relire_le_registre(&chemin, &registre, &mut suivi));
+        assert!(registre.lock().unwrap().as_ref().is_some_and(|l| Arc::ptr_eq(l, &avant)));
+        // Réécrit (d'une autre taille), avec une marque d'ordre des octets : la nouvelle.
+        let seconde = r#"{"etat":"erreur","lu_le":"2026-11-02T14:05:09","erreur":"Constructo AI ne répond pas."}"#;
+        let mut octets = b"\xEF\xBB\xBF".to_vec();
+        octets.extend_from_slice(seconde.as_bytes());
+        std::fs::write(&chemin, &octets).unwrap();
+        assert!(relire_le_registre(&chemin, &registre, &mut suivi));
+        let l = registre.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            (l.etat.as_str(), l.erreur.as_str(), l.registre.is_none()),
+            ("erreur", "Constructo AI ne répond pas.", true)
+        );
+        // Retiré : rien.
+        std::fs::remove_file(&chemin).unwrap();
+        assert!(relire_le_registre(&chemin, &registre, &mut suivi));
+        assert!(registre.lock().unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dossier);
     }
 }

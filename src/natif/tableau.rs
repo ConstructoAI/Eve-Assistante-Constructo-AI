@@ -178,14 +178,14 @@ impl Liaison {
 /// L'heure de l'image, pour dire l'âge d'une lecture : le jour local (son numéro depuis 1970), l'heure locale en
 /// secondes civiles (comptées comme une heure universelle), et l'heure universelle ; leur écart est le fuseau du poste.
 #[derive(Clone, Copy, Debug)]
-struct Maintenant {
-    jour: i64,
-    local: i64,
-    unix: i64,
+pub(super) struct Maintenant {
+    pub(super) jour: i64,
+    pub(super) local: i64,
+    pub(super) unix: i64,
 }
 
 impl Maintenant {
-    fn du_poste() -> Maintenant {
+    pub(super) fn du_poste() -> Maintenant {
         let local = secondes_civiles(&crate::journal::date_et_heure()).unwrap_or(0);
         let unix = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
         Maintenant { jour: local.div_euclid(86_400), local, unix }
@@ -210,7 +210,7 @@ impl Maintenant {
     /// L'âge d'une lecture faite à `lu_a` (« 2026-10-26T13:45:00-04:00 », « …Z », ou l'heure du poste sans fuseau), en
     /// secondes (jamais négatif : une horloge en avance dit « à l'instant »), et son heure locale en secondes civiles ;
     /// `None` pour une heure qui ne se lit pas.
-    fn age(&self, lu_a: &str) -> Option<(i64, i64)> {
+    pub(super) fn age(&self, lu_a: &str) -> Option<(i64, i64)> {
         let (civiles, fuseau) = instant_ecrit(lu_a)?;
         let (age, local) = match fuseau {
             Some(decalage) => {
@@ -260,7 +260,7 @@ fn instant_ecrit(texte: &str) -> Option<(i64, Option<i64>)> {
 
 /// Quand une lecture a été faite, à dire après « Mis à jour » : « à 15 h 40 » aujourd'hui, « hier à 18 h 05 », « le 24
 /// oct. à 9 h » ; `local` : son heure locale en secondes civiles.
-fn quand_dit(local: i64, m: &Maintenant) -> String {
+pub(super) fn quand_dit(local: i64, m: &Maintenant) -> String {
     let jour = local.div_euclid(86_400);
     let s = local.rem_euclid(86_400);
     let heure = centre::heure_parlee(&format!("{:02}:{:02}", s / 3600, s / 60 % 60));
@@ -298,7 +298,7 @@ struct Fraicheur {
 
 /// Des chiffres de plus de 30 minutes se disent d'un moment, un point ambre devant : Eve les relit toutes les dix
 /// minutes environ.
-const PERIMES: i64 = 30 * 60;
+pub(super) const PERIMES: i64 = 30 * 60;
 
 /// La fraîcheur des chiffres de l'entreprise : la liaison d'abord, puis ce que dit la lecture (son `etat`, son
 /// `lu_a`) — « Mis à jour à 15 h 40 », comme le modèle.
@@ -1843,6 +1843,10 @@ impl Fenetre {
                 ui.add_space(ECART);
             }
         }
+        if onglet == Onglet::Comptabilite {
+            self.page_de_la_compta(ui, vue, liaison, aujourdhui);
+            return;
+        }
         if !au_tableau {
             let erreur = erreur_de_lecture(lecture.as_ref());
             self.page_du_planning(ui, onglet, vue, liaison, lue.is_some(), erreur, aujourdhui);
@@ -2375,7 +2379,7 @@ pub(super) fn premiere_lecture(ui: &mut egui::Ui) {
 
 /// De quand datent des chiffres : « à 15 h 40 » → « de 15 h 40 », « hier à 18 h » → « d'hier à 18 h », « le 24 oct. à
 /// 9 h » → « du 24 oct. à 9 h ».
-fn de_quand(q: &str) -> String {
+pub(super) fn de_quand(q: &str) -> String {
     if let Some(reste) = q.strip_prefix("le ") {
         format!("du {reste}")
     } else if let Some(reste) = q.strip_prefix("à ") {
@@ -2466,7 +2470,7 @@ fn bouton_relire(ui: &mut egui::Ui, permis: bool, lit: bool) -> egui::Response {
 }
 
 /// La roue d'une attente : un arc de trois quarts qui tourne (immobile quand Windows ne veut pas d'animations).
-fn roue(ui: &egui::Ui, centre: Pos2, rayon: f32, couleur: Color32) {
+pub(super) fn roue(ui: &egui::Ui, centre: Pos2, rayon: f32, couleur: Color32) {
     let vivant = theme::animations(ui.ctx());
     let debut = if vivant { (ui.input(|i| i.time) * 5.0) as f32 } else { 0.0 };
     let points: Vec<Pos2> = (0..=28)

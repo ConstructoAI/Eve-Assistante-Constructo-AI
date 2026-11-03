@@ -45,15 +45,23 @@ pub(crate) enum Onglet {
     Calendrier,
     Gantt,
     Kanban,
+    Comptabilite,
 }
 
 /// Chaque onglet : son icône (Segoe Fluent Icons, vérifiées sur une planche rendue — les quatre tuiles du tableau de
 /// bord, le calendrier, les barres décalées d'un Gantt, les colonnes d'un tableau), son nom, sa bulle.
-const ONGLETS: [(Onglet, char, &str, &str); 4] = [
+const ONGLETS: [(Onglet, char, &str, &str); 5] = [
     (Onglet::Tableau, '\u{F0E2}', "Tableau de bord", "Ce qui presse, la journée, l'entreprise et la famille"),
     (Onglet::Calendrier, '\u{E787}', "Calendrier", "Le mois ou la semaine : l'entreprise et la maison"),
     (Onglet::Gantt, '\u{EABB}', "Gantt", "Les tableaux du suivi dans le temps : les chantiers, les soumissions…"),
     (Onglet::Kanban, '\u{E8C0}', "Kanban", "Les tableaux du suivi de Constructo AI, colonne par colonne"),
+    // La comptabilité de l'entreprise (le lot 13.2) : les vues d'Entrepreneur Général, `natif\compta.rs`.
+    (
+        Onglet::Comptabilite,
+        '\u{E8C7}',
+        "Comptabilité",
+        "Les factures, les sommaires et l'historique de la comptabilité",
+    ),
 ];
 
 /// Où la fenêtre garde l'onglet ouvert.
@@ -62,7 +70,7 @@ const ONGLET: &str = "onglet-du-tableau-de-bord";
 impl Onglet {
     /// Le Gantt et le Kanban ne montrent que l'entreprise.
     fn de_l_entreprise(self) -> bool {
-        matches!(self, Onglet::Gantt | Onglet::Kanban)
+        matches!(self, Onglet::Gantt | Onglet::Kanban | Onglet::Comptabilite)
     }
 }
 
@@ -89,13 +97,25 @@ fn onglets(ui: &mut egui::Ui, ouvert: Onglet, avec_l_entreprise: bool) -> Option
     let aucune = Color32::PLACEHOLDER;
     let mut x = rangee.left();
     let mut clic = None;
-    for (k, (o, icone, mot, aide)) in ONGLETS.iter().enumerate() {
-        if o.de_l_entreprise() && !avec_l_entreprise {
-            continue;
-        }
+    let montres = || ONGLETS.iter().enumerate().filter(|(_, (o, ..))| !(o.de_l_entreprise() && !avec_l_entreprise));
+    // Les onglets ne tiennent pas avec leurs noms (une fenêtre étroite, la conversation élargie : le cinquième,
+    // « Comptabilité », se lisait « Comptabi » ou disparaissait — la QA5 du lot 13.2) : les fermés n'y gardent que leur
+    // icône, leur nom en bulle ; l'ouvert garde le sien.
+    let pleine: f32 = montres()
+        .map(|(_, (_, icone, mot, _))| {
+            let i = p.layout_no_wrap(icone.to_string(), icones.clone(), aucune).size().x;
+            let m = p.layout_no_wrap(mot.to_string(), police.clone(), aucune).size().x;
+            14.0 + i + 9.0 + m + 14.0 + 4.0
+        })
+        .sum();
+    let serres = pleine > rangee.width();
+    for (k, (o, icone, mot, aide)) in montres() {
         let g_icone = p.layout_no_wrap(icone.to_string(), icones.clone(), aucune);
-        let g_mot = p.layout_no_wrap(mot.to_string(), police.clone(), aucune);
-        let l = 14.0 + g_icone.size().x + 9.0 + g_mot.size().x + 14.0;
+        let nomme = !serres || *o == ouvert;
+        let g_mot = p.layout_no_wrap(if nomme { mot.to_string() } else { String::new() }, police.clone(), aucune);
+        let l =
+            if nomme { 14.0 + g_icone.size().x + 9.0 + g_mot.size().x + 14.0 } else { 12.0 + g_icone.size().x + 12.0 };
+        let aide = if nomme { (*aide).to_string() } else { format!("{mot} — {aide}") };
         let r = Rect::from_min_size(pos2(x, rangee.top()), vec2(l, rangee.height() - 4.0));
         x += l + 4.0;
         let rep = ui.interact(r, egui::Id::unique(("onglet-du-tableau", k)), Sense::click());
@@ -109,8 +129,11 @@ fn onglets(ui: &mut egui::Ui, ouvert: Onglet, avec_l_entreprise: bool) -> Option
             _ => (erp::TEXTE_2, erp::TEXTE_2),
         };
         let l_icone = g_icone.size().x;
-        p.galley(pos2(r.left() + 14.0, r.center().y - g_icone.size().y / 2.0), g_icone, accent);
-        p.galley(pos2(r.left() + 14.0 + l_icone + 9.0, r.center().y - g_mot.size().y / 2.0), g_mot, encre);
+        let gauche = if nomme { 14.0 } else { 12.0 };
+        p.galley(pos2(r.left() + gauche, r.center().y - g_icone.size().y / 2.0), g_icone, accent);
+        if nomme {
+            p.galley(pos2(r.left() + 14.0 + l_icone + 9.0, r.center().y - g_mot.size().y / 2.0), g_mot, encre);
+        }
         if choisi {
             let soulignement = Rect::from_min_max(
                 pos2(r.left() + 10.0, rangee.bottom() - 3.0),
@@ -119,7 +142,7 @@ fn onglets(ui: &mut egui::Ui, ouvert: Onglet, avec_l_entreprise: bool) -> Option
             let arrets = [erp::MARINE_HAUT, erp::AZUR];
             p.add(theme::rectangle_degrade(soulignement, 1.5, |q| theme::degrade_css(soulignement, 90.0, &arrets, q)));
         }
-        if rep.on_hover_text(*aide).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !choisi {
+        if rep.on_hover_text(aide).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !choisi {
             clic = Some(*o);
         }
     }
@@ -204,7 +227,8 @@ impl Fenetre {
         let lue = entreprise_lue || !planning.lu.is_empty();
         let pas_reliee = matches!(liaison, Liaison::NonReliee | Liaison::EnCours);
         let action = match onglet {
-            Onglet::Tableau => None,
+            // La comptabilité a sa page à elle (`natif\compta.rs`) : le tableau de bord l'y envoie avant d'arriver ici.
+            Onglet::Tableau | Onglet::Comptabilite => None,
             Onglet::Calendrier => {
                 if pas_reliee && !lue {
                     if vue == Vue::Entreprise {
@@ -664,7 +688,7 @@ enum FormeDeCle {
 
 /// Un état vide d'une vue, dans une carte : la pastille de son icône, son titre, ce qu'il en est, et un bouton au
 /// besoin. Rend vrai si le bouton est cliqué.
-fn etat_vide(
+pub(super) fn etat_vide(
     ui: &mut egui::Ui,
     icone: char,
     teinte: erp::Teinte,
@@ -997,5 +1021,43 @@ mod essais {
         assert!(se_montre(Cote::Famille, Vue::Tout) && se_montre(Cote::Entreprise, Vue::Tout));
         assert!(se_montre(Cote::Entreprise, Vue::Entreprise) && !se_montre(Cote::Famille, Vue::Entreprise));
         assert!(se_montre(Cote::Famille, Vue::Famille) && !se_montre(Cote::Entreprise, Vue::Famille));
+    }
+}
+
+/// QA5 du lot 13.2, passe 2 (mutation) : l'essai qui manquait aux onglets serrés.
+#[cfg(test)]
+mod manques_qa2 {
+    use super::*;
+
+    /// Les rectangles des cinq onglets, dessinés dans un écran de `largeur` points, l'onglet `ouvert` choisi.
+    fn onglets_dans(largeur: f32, ouvert: Onglet) -> Vec<Rect> {
+        let ctx = egui::Context::default();
+        crate::natif::polices(&ctx);
+        for t in [0.1, 0.2] {
+            let entree = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(largeur, 400.0))),
+                time: Some(t),
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(entree, |ui| {
+                onglets(ui, ouvert, true);
+            });
+        }
+        (0..ONGLETS.len())
+            .map(|k| ctx.read_response(egui::Id::unique(("onglet-du-tableau", k))).expect("l'onglet").rect)
+            .collect()
+    }
+
+    /// Les onglets qui ne tiennent pas avec leurs noms : tous tiennent dans la rangée, les fermés en icônes, l'ouvert
+    /// (« Comptabilité ») avec son nom (mutant 731 : jamais serrés, « Comptabilité » sortait de la rangée ; mutant 732 :
+    /// l'ouvert perdait aussi son nom). Large, tous gardent leur nom.
+    #[test]
+    fn manque_731_732_les_onglets_serres() {
+        let larges = onglets_dans(1_600.0, Onglet::Comptabilite);
+        assert!(larges.iter().all(|r| r.width() > 60.0), "{larges:?}");
+        let serres = onglets_dans(380.0, Onglet::Comptabilite);
+        assert!(serres.iter().all(|r| r.right() <= 380.0), "{serres:?}");
+        let ouvert = serres[4].width();
+        assert!(serres[..4].iter().all(|r| r.width() * 2.0 < ouvert), "{serres:?}");
     }
 }

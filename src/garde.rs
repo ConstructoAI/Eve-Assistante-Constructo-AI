@@ -2482,6 +2482,33 @@ mod essais {
         assert!(constructo("magasin_stock_lister_lots", json!({})).is_some());
     }
 
+    /// La comptabilité de l'ERP (le lot 13.2) : les deux outils que lit l'onglet « Comptabilité » d'Eve sont des
+    /// lectures — le verbe « lister » en deuxième mot, comme pour `mcp_profils.est_lecture` du serveur — et partent
+    /// sans accord ; la copie des outils du serveur (`essais/outils_constructo.json`) les porte, rangés en lecture.
+    #[test]
+    fn la_comptabilite_d_eve_se_lit() {
+        let outils = ["comptabilite_lister_registre", "comptabilite_lister_historique"];
+        for nom in outils {
+            assert!(est_lecture_constructo(nom), "{nom}");
+            assert_eq!(constructo(nom, json!({ "apres_id": 104, "limite": 1000 })), None, "{nom}");
+            let outil = format!("mcp__claude_ai_Constructo_AI__{nom}");
+            assert_eq!(examiner(&outil, &json!({ "avant_id": 5521 })), Decision::Libre, "{nom}");
+        }
+        // Le verbe en troisième, ce n'est plus une lecture : le serveur ne regarde que les deux premiers mots.
+        assert!(!est_lecture_constructo("comptabilite_registre_lister"));
+        assert!(constructo("comptabilite_executer_script", json!({})).is_some(), "sa voisine écrit, elle");
+        let chemin = concat!(env!("CARGO_MANIFEST_DIR"), "/essais/outils_constructo.json");
+        let Ok(texte) = std::fs::read_to_string(chemin) else {
+            eprintln!("{chemin} n'est pas là (il ne part pas avec les sources) : la copie ne se vérifie pas");
+            return;
+        };
+        let serveur: Value = serde_json::from_str(&texte).unwrap();
+        for nom in outils {
+            let o = serveur["outils"].as_array().unwrap().iter().find(|o| o["nom"] == nom);
+            assert_eq!(o.map(|o| o["lecture"].clone()), Some(json!(true)), "{nom}");
+        }
+    }
+
     #[test]
     fn la_recherche_sql_de_constructo_lit_seulement() {
         let sql = |q: &str| constructo("recherche_sql", json!({ "requete_sql": q }));

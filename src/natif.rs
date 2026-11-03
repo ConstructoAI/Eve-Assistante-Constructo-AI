@@ -13,6 +13,7 @@
 //!
 //! [`Ecran::abonner`]: crate::ecran::Ecran::abonner
 
+pub(crate) mod compta;
 pub(crate) mod graphiques;
 pub(crate) mod pieces;
 pub(crate) mod planning;

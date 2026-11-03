@@ -11,6 +11,7 @@ mod centre;
 mod cerveau;
 mod chef;
 mod cles;
+mod compta;
 mod connexion;
 mod ecran;
 mod entreprise;
@@ -71,6 +72,13 @@ fn main() {
         // La capture de l'écran sans les fenêtres d'Eve : rien ne s'écrit, pas même le journal.
         #[cfg(windows)]
         Some("--essai-capture") => std::process::exit(capture::essai()),
+        // L'essai du thème qui joue des scènes de la comptabilité lue, sans `EVE_DOSSIER_LOCAL` : relancé sur un
+        // dossier local à lui avant que le journal et les réglages d'Eve ne s'ouvrent — il n'y touche jamais.
+        Some("--essai-theme") => {
+            if let Some(code) = essais::theme_sur_un_dossier_a_lui(&args[1..]) {
+                std::process::exit(code);
+            }
+        }
         _ => {}
     }
     // Les profils (`--profils`, `--profil-ajouter`, `--profil`, `--profil-retirer`), le cerveau (`--modele`,

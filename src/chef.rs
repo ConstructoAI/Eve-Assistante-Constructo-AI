@@ -19,6 +19,9 @@
 //!   renouvellement, et son branchement dans Claude Code, au lancement et à chaque jeton neuf ;
 //! - **le tableau de bord de l'entreprise** ([`entreprise`]) : une lecture de l'ERP au démarrage, toutes les dix
 //!   minutes et à la demande, dans un fil, avec le jeton d'accès du moment ; `entreprise.json`, que lui seul écrit ;
+//! - **la comptabilité de l'ERP** (l'onglet « Comptabilité », [`crate::compta`]) : une lecture seulement quand l'onglet
+//!   se montre et la demande (au plus une fois par dix minutes, « Relire » une fois par trente secondes), dans un fil,
+//!   avec le même jeton ; `registre.json`, que lui seul écrit ;
 //! - **la mise à jour** ([`mise_a_jour`]) : une relance demandée attend la fin du tour, puis le gardien prend le relais
 //!   et Eve se ferme ; la marque de santé, cinq secondes après le démarrage, la fenêtre ouverte ;
 //! - **le téléphone** ([`crate::telephone`]) : l'appli Android, une fenêtre de plus — ses gestes et la voix de la
@@ -41,7 +44,10 @@ use serde_json::{Value, json};
 use crate::cerveau::{self, Cerveau, Lancement};
 use crate::connexion::{self, EnCours, Etat as Connexion, Lien, Refus, Retour};
 use crate::ecran::{self, Ecran};
-use crate::entreprise::{self, Entreprise, Lecture, Panne};
+use crate::entreprise::{
+    self, EcrivainDuRegistre, Entreprise, EtatDeLaConnexion, FichierDuRegistre, LaCompta, Lecture, LectureDeLaCompta,
+    Panne, PourLaCompta,
+};
 use crate::epingles::{self, Epingles};
 use crate::fenetre;
 use crate::historique::{self, Entree};
@@ -155,6 +161,20 @@ pub enum Evt {
         emis: u64,
         duree: Duration,
         issue: Result<Lecture, Panne>,
+    },
+    /// Une lecture de la comptabilité de l'ERP (l'onglet « Comptabilité ») a fini, dans son fil : comme `Entreprise` ;
+    /// `relire` : elle répondait à « Relire ».
+    Compta {
+        tour: u64,
+        emis: u64,
+        relire: bool,
+        duree: Duration,
+        issue: Result<LectureDeLaCompta, Panne>,
+    },
+    /// `registre.json` chargé dans son fil, à la première demande de l'onglet ; `tour` : la connexion qui l'a demandé.
+    RegistreCharge {
+        tour: u64,
+        fichier: FichierDuRegistre,
     },
     /// La capture de l'écran que demandait `texte` (« regarde mon écran ») est prise et jointe, ou ne l'a pas été
     /// (`erreur`) : la demande part ([`crate::capture`]).
@@ -652,6 +672,8 @@ pub struct Chef {
     entreprise_a: Option<Instant>,
     entreprise_delai: Duration,
     entreprise_refuse: Option<u64>,
+    /// Le dernier renouvellement qu'un jeton refusé a fait demander, par la lecture de l'entreprise ou par celle de la
+    /// comptabilité : un par quart d'heure au plus, pour les deux.
     entreprise_renouvelee: Option<Instant>,
     /// Une écriture de Claude dans l'ERP a réussi pendant une lecture, qui ne l'a peut-être pas vue : une autre suit.
     entreprise_apres_lecture: bool,
@@ -660,6 +682,11 @@ pub struct Chef {
     /// (`entreprise::SUIVI_INTERVALLE`).
     suivi_voulu: bool,
     suivi_tente_a: Option<Instant>,
+    /// La comptabilité de l'ERP, pour l'onglet « Comptabilité » ([`crate::compta`]) : ce que dit `registre.json` et
+    /// ses demandes, ses gardes ([`LaCompta`] : pure, essayée ; le chef fait ce qu'elle demande) ; le fil qui l'écrit
+    /// ([`EcrivainDuRegistre`] : vingt mille factures prendraient un dixième de seconde au chef).
+    compta: LaCompta,
+    compta_ecrivain: EcrivainDuRegistre,
     /// Le dossier porte sa propre consigne (`EVE_CONSIGNE.md`, un poste d'architecture) : ce n'est pas l'Adjointe de la
     /// trousse — ni la base d'Entrepreneur Général, ni le `Scan\` où classer une numérisation.
     propre: bool,
@@ -915,6 +942,8 @@ impl Chef {
             entreprise_apres_lecture: false,
             suivi_voulu: false,
             suivi_tente_a: None,
+            compta: LaCompta::default(),
+            compta_ecrivain: EcrivainDuRegistre::demarrer(dossier_local()),
             propre,
             profil,
             laisses: Laisses::default(),
@@ -1040,6 +1069,7 @@ impl Chef {
         // était reliée. Reliée, elle relit l'ERP dès que son jeton d'accès vaut (`lire_l_entreprise`).
         if !chef.espace.constructo || !chef.connexion.connectee() {
             chef.montrer_l_entreprise(Entreprise::non_connecte(chef.espace.constructo));
+            chef.oublier_la_compta();
         }
         chef
     }
@@ -1215,6 +1245,8 @@ impl Chef {
             Evt::Retour(r) => self.retour_de_connexion(r),
             Evt::Connexion { tour, etape } => self.etape_de_connexion(tour, etape),
             Evt::Entreprise { tour, emis, duree, issue } => self.entreprise_lue(tour, emis, duree, issue),
+            Evt::Compta { tour, emis, relire, duree, issue } => self.compta_lue(tour, emis, relire, duree, issue),
+            Evt::RegistreCharge { tour, fichier } => self.registre_charge(tour, fichier),
             Evt::EcranPris { texte, fin_de_parole, erreur } => self.ecran_pris(texte, fin_de_parole, erreur),
             Evt::Telephone(e) => self.du_telephone(e),
         }
@@ -1364,6 +1396,9 @@ impl Chef {
             ("entreprise_lire", _) => self.actualiser_l_entreprise(),
             // Le Gantt du tableau de bord s'ouvre : le suivi de production de l'ERP, s'il a plus d'une demi-heure.
             ("planning_lire", _) => self.vouloir_le_suivi(),
+            // L'onglet « Comptabilité » se montre (toutes les deux minutes), ou « Relire » (`true`) : la comptabilité
+            // de l'ERP, si son moment est venu.
+            ("compta_lire", _) => self.vouloir_la_compta(valeur.as_bool() == Some(true)),
             ("navigateur_erreur", Some(e)) => self.systeme(&format!("Le navigateur ne s'ouvre pas : {e}")),
             ("fenetre_fermee", _) => self.fenetre_fermee = true,
             ("quitter", _) => self.quitter = true,
@@ -2016,11 +2051,13 @@ impl Chef {
         self.connexion_en_cours = None;
         self.constructo_erreur = None;
         self.constructo_branche = false;
-        // Le tableau de bord n'a plus rien de l'entreprise ; une lecture en route sera écartée (son tour est passé).
+        // Le tableau de bord n'a plus rien de l'entreprise ni de sa comptabilité ; une lecture en route sera écartée
+        // (son tour est passé).
         self.entreprise_occupee = false;
         self.entreprise_a = None;
         self.entreprise_refuse = None;
         self.montrer_l_entreprise(Entreprise::non_connecte(true));
+        self.oublier_la_compta();
         if self.init_ok {
             self.branchement = None;
             if let Some(Err(e)) = self.cerveau.as_ref().map(|c| c.brancher_mcp(self.lien.serveurs_mcp(None))) {
@@ -2299,16 +2336,7 @@ impl Chef {
                 self.entreprise_a = None;
                 let message = "Constructo AI a refusé le jeton d'Eve : elle relira l'entreprise avec le suivant.";
                 self.montrer_l_entreprise(self.entreprise.manquee(message, &a));
-                let permis = self.entreprise_renouvelee.is_none_or(|t| t.elapsed() > Duration::from_secs(15 * 60));
-                if emis == self.connexion.emis
-                    && permis
-                    && !self.connexion.renouvellement.is_empty()
-                    && self.renouveler_a.is_none()
-                {
-                    self.entreprise_renouvelee = Some(Instant::now());
-                    self.connexion.expire = 0;
-                    self.renouveler();
-                }
+                self.renouveler_apres_un_refus(emis);
             }
             Err(p) => {
                 let delai = self.entreprise_delai;
@@ -2349,6 +2377,114 @@ impl Chef {
             self.entreprise_a = None;
             self.entreprise_delai = entreprise::APRES_UNE_PANNE;
         }
+    }
+
+    /// Une lecture (de l'entreprise ou de la comptabilité) a vu refuser le jeton de l'émission `emis` : si le chef le
+    /// croyait bon, un renouvellement tranche — au plus un par quart d'heure pour les deux lectures : un serveur qui
+    /// refuserait tout ne fait pas tourner les jetons.
+    fn renouveler_apres_un_refus(&mut self, emis: u64) {
+        let permis = self.entreprise_renouvelee.is_none_or(|t| t.elapsed() > Duration::from_secs(15 * 60));
+        if emis == self.connexion.emis
+            && permis
+            && !self.connexion.renouvellement.is_empty()
+            && self.renouveler_a.is_none()
+        {
+            self.entreprise_renouvelee = Some(Instant::now());
+            self.connexion.expire = 0;
+            self.renouveler();
+        }
+    }
+
+    // ---- La comptabilité de l'ERP (l'onglet « Comptabilité ») ----------------------------------------------------
+
+    /// Ce que le chef sait de sa connexion, pour la comptabilité ([`LaCompta`] en décide).
+    fn etat_de_la_connexion(&self) -> EtatDeLaConnexion {
+        let t = connexion::maintenant();
+        EtatDeLaConnexion {
+            reliee: self.espace.constructo && self.connexion.connectee(),
+            occupee: self.connexion_occupee,
+            acces_valable: self.connexion.acces_valable(t),
+            a_renouveler: self.connexion.a_renouveler(t),
+            emis: self.connexion.emis,
+            tour: self.connexion_tour,
+        }
+    }
+
+    /// Ce que demande [`LaCompta`] : `registre.json` chargé dans un fil, ou écrit par le sien (l'onglet le relit quand
+    /// il change : le fil du centre) ; une lecture dans un fil, avec le jeton d'accès du moment — celui de
+    /// renouvellement jamais ; un jeton refusé à faire renouveler ; une ligne au journal.
+    fn faire_pour_la_compta(&mut self, ordres: Vec<PourLaCompta>) {
+        for ordre in ordres {
+            match ordre {
+                PourLaCompta::Charger { tour } => {
+                    let (rapport, dossier) = (self.rapport.clone(), dossier_local());
+                    std::thread::spawn(move || {
+                        let fichier = FichierDuRegistre::charger(&dossier);
+                        let _ = rapport.send(Evt::RegistreCharge { tour, fichier });
+                    });
+                }
+                PourLaCompta::Ecrire(f) => self.compta_ecrivain.ecrire(f),
+                PourLaCompta::Lire { tour, emis, relire } => {
+                    let rapport = self.rapport.clone();
+                    let (ressource, jeton) = (self.lien.ressource(), self.connexion.acces.clone());
+                    entreprise::lire_la_compta_dans_un_fil(ressource, jeton, move |duree, issue| {
+                        let _ = rapport.send(Evt::Compta { tour, emis, relire, duree, issue });
+                    });
+                }
+                PourLaCompta::Renouveler { emis } => self.renouveler_apres_un_refus(emis),
+                PourLaCompta::Noter(ligne) => journal::ecrire(&ligne),
+            }
+        }
+    }
+
+    /// L'onglet « Comptabilité » se montre (le geste `compta_lire`, toutes les deux minutes ; `relire` : « Relire » ou
+    /// « Réessayer ») : la comptabilité de l'ERP se lit au prochain battement si son moment est venu — une demande
+    /// ordinaire au plus une fois par dix minutes (la première de la séance : si `registre.json` a dix minutes, ou
+    /// qu'une lecture y est restée en cours), « Relire » au plus une fois par trente secondes
+    /// ([`entreprise::DemandesDeLaCompta::vouloir`]). Jamais sans connexion, jamais deux à la fois.
+    fn vouloir_la_compta(&mut self, relire: bool) {
+        let c = self.etat_de_la_connexion();
+        let ordres = self.compta.demande(relire, Instant::now(), &journal::date_et_heure(), &c);
+        self.faire_pour_la_compta(ordres);
+    }
+
+    /// `registre.json` est chargé, dans son fil : la demande qui l'attendait se fait ([`LaCompta::charge`]).
+    fn registre_charge(&mut self, tour: u64, fichier: FichierDuRegistre) {
+        let c = self.etat_de_la_connexion();
+        let ordres = self.compta.charge(fichier, tour, Instant::now(), &journal::date_et_heure(), &c);
+        self.faire_pour_la_compta(ordres);
+    }
+
+    /// Au battement : la lecture de la comptabilité que l'onglet a demandée, quand son moment est venu et que le jeton
+    /// le permet ; sans connexion, ce qui restait s'efface ([`LaCompta::battement`]).
+    fn lire_la_compta(&mut self, maintenant: Instant) {
+        let c = self.etat_de_la_connexion();
+        let ordres = self.compta.battement(maintenant, &c);
+        self.faire_pour_la_compta(ordres);
+    }
+
+    /// Une lecture de la comptabilité a fini : `registre.json` prend la nouvelle, ou garde l'ancienne et dit pourquoi ;
+    /// une lecture d'avant la déconnexion est écartée ([`LaCompta::lue`]).
+    fn compta_lue(
+        &mut self,
+        tour: u64,
+        emis: u64,
+        relire: bool,
+        duree: Duration,
+        issue: Result<LectureDeLaCompta, Panne>,
+    ) {
+        let c = self.etat_de_la_connexion();
+        let lu_le = entreprise::heure_de_la_lecture();
+        let ordres = self.compta.lue(tour, emis, relire, duree, issue, Instant::now(), &lu_le, &c);
+        self.faire_pour_la_compta(ordres);
+    }
+
+    /// Sans connexion, `registre.json` ne garde rien de l'entreprise : une lecture d'avant s'efface (un fichier qui ne
+    /// dit déjà que cela, ou pas de fichier, ne s'écrit pas) ; plus aucune demande n'attend
+    /// ([`LaCompta::sans_connexion`]).
+    fn oublier_la_compta(&mut self) {
+        let ordres = self.compta.sans_connexion(|| FichierDuRegistre::rien_a_effacer(&dossier_local()));
+        self.faire_pour_la_compta(ordres);
     }
 
     // ---- La parole de la personne ----------------------------------------------------------------------------
@@ -4107,6 +4243,7 @@ impl Chef {
         self.relire_la_precedente(maintenant);
         self.surveiller_la_connexion(maintenant);
         self.lire_l_entreprise(maintenant);
+        self.lire_la_compta(maintenant);
         self.suivre_les_veilles(maintenant);
         self.relire_les_reglages();
         self.suivre_claude();

@@ -640,8 +640,9 @@ const ENTETE_TABLEAU: &str = "TABLEAU DE BORD";
 /// Claude épingle ses cartes — une carte « epingle » de sa réponse, que le chef range dans `epingles.json` du dossier
 /// local (`local` ; [`crate::epingles`]) — à côté des notes de la personne ; et, quand Constructo AI lui est permis
 /// (`constructo`), l'entreprise, qu'elle lit elle-même dans l'ERP (`entreprise.rs`) et dont la dernière lecture est dans
-/// `entreprise.json` — Claude y répond à une question d'ensemble sans rappeler l'ERP. Elle vit avec le programme qui
-/// dessine ces cartes et écrit ces fichiers, et n'en recopie rien.
+/// `entreprise.json` — Claude y répond à une question d'ensemble sans rappeler l'ERP —, et sa comptabilité, lue à la
+/// demande de son onglet, dans `registre.json` ([`crate::compta`]). Elle vit avec le programme qui dessine ces cartes
+/// et écrit ces fichiers, et n'en recopie rien.
 pub fn consigne_du_tableau(local: &Path, constructo: bool) -> String {
     let entreprise = if constructo {
         format!(
@@ -650,8 +651,11 @@ pub fn consigne_du_tableau(local: &Path, constructo: bool) -> String {
              factures des fournisseurs, les achats en route, les heures des employés, l'agenda partagé, les comptes en \
              banque. Sa dernière lecture est dans {fichier} (du JSON ; son heure : lu_a) : pour une question d'ensemble \
              (« où en est l'entreprise ? », « qui n'a pas d'heures vendredi ? »), lis-le d'abord, sans appeler l'ERP ; \
-             pour un détail, ou un chiffre à la minute près, prends l'outil de Constructo AI.",
-            fichier = local.join(crate::entreprise::FICHIER).display()
+             pour un détail, ou un chiffre à la minute près, prends l'outil de Constructo AI. La dernière lecture de \
+             la comptabilité de l'ERP est dans {registre} (les factures des clients et des fournisseurs, l'historique \
+             ; du JSON compact, son heure : lu_le), lue à la demande quand l'onglet « Comptabilité » se montre.",
+            fichier = local.join(crate::entreprise::FICHIER).display(),
+            registre = local.join(crate::compta::FICHIER).display()
         )
     } else {
         String::new()
@@ -1050,6 +1054,11 @@ mod essais {
             "sans appeler l'ERP",
             r"C:\Users\Sam\AppData\Local\Eve\specialistes\essai\epingles.json",
             "\"retirer\":true",
+            // La comptabilité de l'ERP (le lot 13.2) : où est sa dernière lecture, et quand elle se lit.
+            "La dernière lecture de la comptabilité de l'ERP est dans C:",
+            r"\specialistes\essai\registre.json (les factures des clients et des fournisseurs, l'historique",
+            "lu_le",
+            "lue à la demande quand l'onglet « Comptabilité » se montre.",
         ] {
             assert!(c.contains(attendu), "{attendu} manque :\n{c}");
         }
@@ -1060,6 +1069,7 @@ mod essais {
         assert!(!c.contains("  ") && !montant, "ni blancs doublés ni montant :\n{c}");
         let sans = consigne_du_tableau(local, false);
         assert!(sans.contains("epingles.json") && !sans.contains("entreprise.json") && !sans.contains("l'entreprise,"));
+        assert!(!sans.contains("registre.json") && !sans.contains("Comptabilité"), "sans Constructo AI, pas d'ERP");
         // Les deux cartes d'exemple sont du JSON (« … » mis à part).
         let liste = c.split("(\"rangees\" : ").nth(1).and_then(|x| x.split(", ou de").next()).unwrap();
         assert!(serde_json::from_str::<serde_json::Value>(liste).is_ok(), "{liste}");

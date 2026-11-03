@@ -33,11 +33,20 @@
 //!
 //! Les formes que rend chaque outil, du texte ou du JSON, sont lues ici d'après `mcp_server.py` ; les essais en gardent
 //! un exemple de chacune, et le faux serveur d'`eve --essai-constructo` les rend telles quelles.
+//!
+//! La comptabilité de l'ERP (le lot 13.2 : l'onglet « Comptabilité », [`crate::compta`]) se lit à part, avec le même
+//! client et le même jeton, et seulement à la demande de son onglet qui se montre ([`lire_la_compta`]) : le registre
+//! des factures, clients et fournisseurs, par pages de mille (`comptabilite_lister_registre`, jusqu'à
+//! `compta::FACTURES_MAX`), puis l'historique de la comptabilité, par pages de cinq cents
+//! (`comptabilite_lister_historique`, jusqu'à `compta::CHANGEMENTS_MAX`). Le chef en décide le moment
+//! ([`DemandesDeLaCompta`]) et l'écrit dans `registre.json` du dossier local ([`FichierDuRegistre`]). Un serveur
+//! d'avant ces deux outils le dit en une phrase ([`COMPTA_PAS_ENCORE`]), jamais en panne obscure.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eve::garde::{ecourter, est_lecture_constructo};
@@ -46,6 +55,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::centre::{date_du_numero, jours_entre, milliers, numero_du_jour};
+use crate::compta;
 use crate::connexion::sans_porteur;
 use crate::https;
 use crate::reglages::ecrire_d_un_geste;
@@ -100,8 +110,9 @@ pub const ERREUR: &str = "erreur";
 
 /// Les seuls outils de Constructo AI qu'Eve appelle elle-même : des lectures, nommées une à une (leurs formes :
 /// `mcp_server.py`). Un outil s'ajoute ici, jamais ailleurs ; [`permis`] demande en plus que la garde le tienne pour
-/// une lecture. Les derniers, ceux du suivi de production ([`OUTILS_DU_SUIVI`]), seulement à la demande.
-pub const OUTILS_LUS: [&str; 22] = [
+/// une lecture. Les derniers, ceux du suivi de production ([`OUTILS_DU_SUIVI`]) et ceux de la comptabilité
+/// ([`OUTILS_DE_LA_COMPTA`]), seulement à la demande.
+pub const OUTILS_LUS: [&str; 24] = [
     "tableau_kpis",
     "tableau_alertes",
     "tableau_factures_agees",
@@ -126,12 +137,19 @@ pub const OUTILS_LUS: [&str; 22] = [
     "suivi_lister_dependances_gantt",
     "suivi_lister_baselines",
     "lister_employes",
+    // La comptabilité, à la demande de son onglet.
+    compta::OUTIL_DU_REGISTRE,
+    compta::OUTIL_DE_L_HISTORIQUE,
 ];
 
 /// Le suivi de production : les opérations des bons de travail (leur responsable nommé d'après la liste des employés),
 /// les dépendances et les références du Gantt. Ils ne se lisent qu'à la demande ([`SUIVI_INTERVALLE`]).
 pub const OUTILS_DU_SUIVI: [&str; 4] =
     ["suivi_lister_operations", "suivi_lister_dependances_gantt", "suivi_lister_baselines", "lister_employes"];
+
+/// La comptabilité de l'ERP : le registre des factures et l'historique, lus à part de la lecture de l'entreprise,
+/// seulement quand l'onglet « Comptabilité » se montre ([`lire_la_compta`]).
+pub const OUTILS_DE_LA_COMPTA: [&str; 2] = [compta::OUTIL_DU_REGISTRE, compta::OUTIL_DE_L_HISTORIQUE];
 
 /// Un outil qu'Eve peut appeler elle-même : nommé dans [`OUTILS_LUS`] et tenu pour une lecture par la garde — les
 /// deux, pour qu'une erreur d'un côté ne laisse jamais passer une écriture.
@@ -808,6 +826,12 @@ pub enum Panne {
     Outil(String),
     /// Un outil hors de la liste d'Eve : jamais envoyé.
     Refuse(String),
+    /// Le serveur ne connaît pas cet outil (« Unknown tool » : un serveur d'avant lui) : il manque à la lecture de
+    /// l'entreprise, comme un outil qui flanche ; la comptabilité le dit en une phrase ([`COMPTA_PAS_ENCORE`]).
+    Inconnu(String),
+    /// Le serveur refuse l'accès lui-même (403) : un jeton neuf n'y changerait rien ; la lecture s'arrête, et la
+    /// comptabilité ne garde rien de l'entreprise ([`refus_d_autorisation`]).
+    Interdit,
 }
 
 impl Panne {
@@ -819,8 +843,18 @@ impl Panne {
             Panne::Serveur(m) | Panne::Outil(m) => m.clone(),
             Panne::Session => "Constructo AI a oublié la session".into(),
             Panne::Refuse(o) => format!("l'outil {o} n'est pas une lecture permise à Eve"),
+            Panne::Inconnu(o) => format!("{o} : un outil que Constructo AI ne connaît pas"),
+            Panne::Interdit => raison_http(403),
         }
     }
+}
+
+/// Le serveur dit-il qu'il ne connaît pas l'outil ? FastMCP le rend en résultat d'erreur (`isError`, « Unknown tool:
+/// comptabilite_lister_registre » : `mcp/server/fastmcp/tools/tool_manager.py`), la spécification de MCP en erreur
+/// JSON-RPC (le code -32602, « Unknown tool: … ») ; d'autres serveurs disent « Tool not found ».
+fn outil_inconnu(message: &str) -> bool {
+    let m = message.to_lowercase();
+    m.contains("unknown tool") || m.contains("tool not found")
 }
 
 /// Une lecture réussie : ce qu'elle a tiré de l'ERP (les données seulement : le chef y met l'état et l'heure), les
@@ -911,7 +945,7 @@ pub fn lire_dans_un_fil(
 /// une panne. `suivi` : le suivi de production aussi, après tout le reste.
 pub fn lire(ressource: &str, jeton: &str, aujourdhui: &str, suivi: bool) -> Result<Lecture, Panne> {
     let debut = Instant::now();
-    let mut client = Client::ouvrir(ressource, jeton)?;
+    let mut client = Client::ouvrir(ressource, jeton, None)?;
     let ouverture = debut.elapsed();
     let appels = appels(aujourdhui, suivi);
     let outils = outils_de(&appels).len();
@@ -919,7 +953,7 @@ pub fn lire(ressource: &str, jeton: &str, aujourdhui: &str, suivi: bool) -> Resu
     for (outil, arguments) in appels {
         match client.appeler(outil, arguments) {
             Ok(texte) => reponses.push((outil, Ok(texte))),
-            Err(p @ (Panne::Outil(_) | Panne::Refuse(_))) => reponses.push((outil, Err(p.texte()))),
+            Err(p @ (Panne::Outil(_) | Panne::Refuse(_) | Panne::Inconnu(_))) => reponses.push((outil, Err(p.texte()))),
             Err(p) => {
                 client.fermer();
                 return Err(p);
@@ -935,6 +969,905 @@ pub fn lire(ressource: &str, jeton: &str, aujourdhui: &str, suivi: bool) -> Resu
     Ok(Lecture { entreprise, manques, ouverture, duree: debut.elapsed(), outils, suivi })
 }
 
+// ---- La comptabilité : registre.json --------------------------------------------------------------------------------
+
+/// Ce que dit Eve quand Constructo AI n'a pas encore les deux outils de la comptabilité (un serveur d'avant eux : ils
+/// arrivent avec une mise à jour de l'ERP, qu'une Eve peut précéder) : une lecture manquée comme une autre, dite en une
+/// phrase — jamais une panne obscure, ni des relectures en boucle (la suivante attend la demande d'après).
+pub const COMPTA_PAS_ENCORE: &str =
+    "Constructo AI n'offre pas encore la lecture de la comptabilité : elle viendra avec sa prochaine mise à jour.";
+
+/// La comptabilité se relit à la demande de son onglet, qui la redemande toutes les deux minutes tant qu'il se montre :
+/// une demande ordinaire, au plus une fois par dix minutes ; « Relire » (ou « Réessayer »), au plus une fois par trente
+/// secondes. Comptées depuis le début de la lecture d'avant, à cinq secondes près : la cinquième demande de l'onglet
+/// tombe à dix minutes, à une poussière près — sans cette marge, chaque lecture glisserait à douze.
+pub const COMPTA_INTERVALLE: Duration = Duration::from_secs(10 * 60);
+pub const COMPTA_RELIRE: Duration = Duration::from_secs(30);
+const COMPTA_MARGE: Duration = Duration::from_secs(5);
+/// Un serveur sans les outils de la comptabilité ([`FinDeLecture::Absente`]) : une demande ordinaire par heure, pas
+/// une par dix minutes — sa mise à jour les apportera, et la séance doit la voir sans « Relire » (la QA5, passe 2 :
+/// l'onglet disait « n'offre pas encore » toute la séance après la mise à jour de l'ERP).
+pub const COMPTA_ABSENTE: Duration = Duration::from_secs(60 * 60);
+/// Une lecture de la comptabilité entière ne dure jamais plus : un outil bloqué chez le serveur — son flux SSE envoie «
+/// : ping » toutes les 15 s, ce qui relançait sans fin chaque attente de WinHTTP (la QA5 du lot 13.2) — ne laisse plus
+/// « Lecture en cours… » à l'écran pour toujours. Chaque requête n'en prend que ce qui reste ; au-delà, la lecture
+/// manque et le dit ([`LECTURE_TROP_LONGUE`]).
+pub const COMPTA_DUREE_MAX: Duration = Duration::from_secs(5 * 60);
+pub const LECTURE_TROP_LONGUE: &str =
+    "Constructo AI a mis plus de cinq minutes à rendre la comptabilité : Eve a arrêté la lecture";
+
+/// Combien de factures et d'entrées de l'historique Eve demande par appel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pages {
+    pub registre: usize,
+    pub historique: usize,
+}
+
+/// Les pages d'une lecture : les bornes du serveur (1000 factures, 500 entrées).
+pub const PAGES: Pages = Pages { registre: 1000, historique: 500 };
+/// Jamais plus de pages : un serveur qui rendrait des pages de quelques factures ne fait pas durer une lecture des
+/// heures (deux cents pages de cent factures font déjà `compta::FACTURES_MAX`). Au-delà, la liste se dit tronquée.
+const PAGES_DU_REGISTRE_MAX: usize = 200;
+const PAGES_DE_L_HISTORIQUE_MAX: usize = 20;
+
+/// Une lecture de la comptabilité réussie : le registre (les factures, l'historique ; le chef y met l'état et l'heure)
+/// et, pour le journal, en nombres, ce qu'elle a été : ses pages, ce qui ne s'y lisait pas, ses temps.
+#[derive(Clone, Debug, Default)]
+pub struct LectureDeLaCompta {
+    pub registre: compta::Registre,
+    pub pages: usize,
+    pub pages_de_l_historique: usize,
+    /// Des factures ou des entrées laissées de côté (sans id, ou en double) ; des pages qui ne se lisaient pas (leur
+    /// liste s'arrête là, et se dit tronquée).
+    pub lignes_ecartees: usize,
+    pub pages_illisibles: usize,
+    /// Le jeton d'accès refusé (un 401) pendant l'historique : le registre lu reste, et le chef fait renouveler le
+    /// jeton comme après une lecture refusée.
+    pub jeton_refuse: bool,
+    /// L'ouverture de la session (le réveil du serveur, s'il dormait), et toute la lecture.
+    pub ouverture: Duration,
+    pub duree: Duration,
+}
+
+impl LectureDeLaCompta {
+    /// Ce que la lecture a trouvé, en nombres, pour le journal : jamais une donnée de l'entreprise.
+    pub fn resume(&self) -> String {
+        let r = &self.registre;
+        let n = |x: usize, un: &str, des: &str| format!("{x} {}", if x > 1 { des } else { un });
+        let mut s = format!(
+            "{} en {} ({} au serveur), {} en {}, lue en {} (la session ouverte en {})",
+            n(r.factures.len(), "facture", "factures"),
+            n(self.pages, "page", "pages"),
+            r.au_serveur,
+            n(r.historique.len(), "entrée d'historique", "entrées d'historique"),
+            n(self.pages_de_l_historique, "page", "pages"),
+            secondes(self.duree),
+            secondes(self.ouverture),
+        );
+        for (vrai, quoi) in [
+            (r.tronque, "le registre tronqué"),
+            (r.historique_tronque, "l'historique tronqué"),
+            (r.historique_absent, "pas de journal d'audit"),
+        ] {
+            if vrai {
+                s.push_str(&format!(" ; {quoi}"));
+            }
+        }
+        for (x, un, des) in [
+            (r.colonnes_absentes.len(), "colonne absente", "colonnes absentes"),
+            (self.lignes_ecartees, "ligne écartée", "lignes écartées"),
+            (self.pages_illisibles, "page illisible", "pages illisibles"),
+        ] {
+            if x > 0 {
+                s.push_str(&format!(" ; {}", n(x, un, des)));
+            }
+        }
+        s
+    }
+}
+
+/// Une lecture de la comptabilité dans un fil (elle parle au serveur, qui dort parfois) : `rapporter` reçoit son temps
+/// et ce qu'elle a donné ; une panique y devient une panne.
+pub fn lire_la_compta_dans_un_fil(
+    ressource: String,
+    jeton: String,
+    rapporter: impl FnOnce(Duration, Result<LectureDeLaCompta, Panne>) + Send + 'static,
+) {
+    std::thread::spawn(move || {
+        let debut = Instant::now();
+        let lecture = || lire_la_compta(&ressource, &jeton, PAGES, COMPTA_DUREE_MAX);
+        let issue = std::panic::catch_unwind(std::panic::AssertUnwindSafe(lecture))
+            .unwrap_or_else(|_| Err(Panne::Serveur("la lecture de la comptabilité a planté (voir eve.log)".into())));
+        rapporter(debut.elapsed(), issue);
+    });
+}
+
+/// Une lecture de la comptabilité : une session MCP au connecteur (`ressource` : `<serveur>/mcp`), le registre puis
+/// l'historique, page par page ([`lire_les_pages`]), puis la session fermée. `pages` : leur taille ([`PAGES`] ; un
+/// essai les fait petites, pour en lire plusieurs) ; `duree` : la lecture entière n'en prend jamais plus
+/// ([`COMPTA_DUREE_MAX`] ; chaque requête n'a que ce qui en reste).
+pub fn lire_la_compta(ressource: &str, jeton: &str, pages: Pages, duree: Duration) -> Result<LectureDeLaCompta, Panne> {
+    let debut = Instant::now();
+    let echeance = debut + duree;
+    let mut client = Client::ouvrir(ressource, jeton, Some(echeance))?;
+    let ouverture = debut.elapsed();
+    let lu =
+        lire_les_pages(&mut |outil: &str, arguments: Value| client.appeler(outil, arguments), pages, Some(echeance));
+    client.fermer();
+    let mut l = lu?;
+    l.ouverture = ouverture;
+    l.duree = debut.elapsed();
+    Ok(l)
+}
+
+/// Les deux listes, page par page ; `appeler` rend le texte d'un outil (le client MCP ; un essai le remplace). Le
+/// registre d'abord, du plus récent au plus ancien (`recentes_d_abord`, `avant_id`), jusqu'à sa dernière page ou les
+/// `compta::FACTURES_MAX` plus récentes : à la borne, ce sont les plus anciennes qui manquent, jamais celles du moment
+/// (une lecture du plus ancien au plus récent gardait les vingt mille premières, et les indicateurs du mois étaient
+/// faux : la QA5 du lot 13.2). Puis l'historique, du plus récent au plus ancien (`avant_id`), jusqu'à sa dernière page
+/// ou `compta::CHANGEMENTS_MAX` entrées. Une panne du serveur pendant le registre — son texte d'erreur, un outil qu'il
+/// ne connaît pas, le réseau, le jeton, l'échéance passée — fait manquer la lecture (le chef garde alors la dernière) ;
+/// pendant l'historique, elle l'arrête là sans jeter le registre lu, et se dit (`historique_erreur`). Une facture ou
+/// une entrée qui ne se lit pas est écartée et comptée ; une page qui ne se lit pas arrête sa liste, dite tronquée, et
+/// se compte — sauf la première du registre : sans rien de lisible, la lecture manque. `echeance` : au-delà, plus rien
+/// ne se demande.
+fn lire_les_pages(
+    appeler: &mut dyn FnMut(&str, Value) -> Result<String, Panne>,
+    pages: Pages,
+    echeance: Option<Instant>,
+) -> Result<LectureDeLaCompta, Panne> {
+    let passee = || echeance.is_some_and(|e| Instant::now() >= e);
+    let mut l = LectureDeLaCompta::default();
+    // Le registre, du plus récent au plus ancien.
+    let mut factures: Vec<compta::Facture> = Vec::new();
+    let (mut lues, mut total, mut tronque) = (0usize, 0u64, false);
+    let mut colonnes: Vec<String> = Vec::new();
+    let mut avant = 0i64;
+    loop {
+        if passee() {
+            return Err(Panne::Serveur(LECTURE_TROP_LONGUE.into()));
+        }
+        let arguments = json!({ "recentes_d_abord": true, "avant_id": avant, "limite": pages.registre });
+        let texte = appeler(compta::OUTIL_DU_REGISTRE, arguments)?;
+        let page = match page_lue(&texte, "factures") {
+            Ok(p) => p,
+            Err(PageManquee::Erreur(e)) => return Err(Panne::Outil(e)),
+            Err(PageManquee::Illisible) if l.pages == 0 => {
+                return Err(Panne::Serveur("Constructo AI a rendu un registre illisible".into()));
+            }
+            Err(PageManquee::Illisible) => {
+                l.pages_illisibles += 1;
+                tronque = true;
+                break;
+            }
+        };
+        l.pages += 1;
+        total = total.max(page.total.unwrap_or(0));
+        for c in page.colonnes_absentes {
+            if !colonnes.contains(&c) {
+                colonnes.push(c);
+            }
+        }
+        lues += page.lignes.len();
+        for v in &page.lignes {
+            match compta::Facture::du_serveur(v) {
+                Some(f) => factures.push(f),
+                None => l.lignes_ecartees += 1,
+            }
+        }
+        if factures.len() >= compta::FACTURES_MAX {
+            tronque = factures.len() > compta::FACTURES_MAX || page.suivant != Suivant::Fin;
+            // Les plus récentes (le plus grand id), même d'une page qui ne viendrait pas dans l'ordre.
+            factures.sort_unstable_by(|a, b| b.id.cmp(&a.id));
+            factures.truncate(compta::FACTURES_MAX);
+            break;
+        }
+        match page.suivant {
+            Suivant::Fin => break,
+            // Un `suivant` plus petit que la page d'avant : la liste descend.
+            Suivant::Id(s) if s > 0 && (avant == 0 || s < avant) => {
+                if l.pages >= PAGES_DU_REGISTRE_MAX {
+                    tronque = true;
+                    break;
+                }
+                avant = s;
+            }
+            // Un `suivant` qui ne se lit pas, ou qui ne mène pas plus loin : la liste s'arrête là.
+            _ => {
+                l.pages_illisibles += 1;
+                tronque = true;
+                break;
+            }
+        }
+    }
+    // Dans l'ordre des id (le contrat), chacune une fois.
+    factures.sort_by_key(|f| f.id);
+    let lues_une_fois = factures.len();
+    factures.dedup_by_key(|f| f.id);
+    l.lignes_ecartees += lues_une_fois - factures.len();
+    // L'historique, dans l'ordre du serveur : le plus récent d'abord. Sa panne ne jette pas le registre lu (elle le
+    // faisait : la QA5 du lot 13.2) : il s'arrête là, tronqué, et elle se dit.
+    let mut historique: Vec<compta::Changement> = Vec::new();
+    let mut vus: HashSet<i64> = HashSet::new();
+    let (mut absent, mut historique_tronque) = (false, false);
+    let mut historique_erreur = String::new();
+    let mut avant_id = 0i64;
+    loop {
+        if passee() {
+            historique_tronque = true;
+            historique_erreur = phrase_de_l_historique(&Panne::Serveur(LECTURE_TROP_LONGUE.into()));
+            break;
+        }
+        let arguments = json!({ "avant_id": avant_id, "limite": pages.historique });
+        let texte = match appeler(compta::OUTIL_DE_L_HISTORIQUE, arguments) {
+            Ok(t) => t,
+            // Un 403 refuse l'accès lui-même, pas l'historique seul : la lecture entière manque, et rien ne reste.
+            Err(p @ Panne::Interdit) => return Err(p),
+            Err(p) => {
+                l.jeton_refuse = p == Panne::Jeton;
+                historique_tronque = true;
+                historique_erreur = phrase_de_l_historique(&p);
+                break;
+            }
+        };
+        let page = match page_lue(&texte, "changements") {
+            Ok(p) => p,
+            Err(PageManquee::Erreur(e)) => {
+                historique_tronque = true;
+                historique_erreur = phrase_de_l_historique(&Panne::Outil(e));
+                break;
+            }
+            Err(PageManquee::Illisible) => {
+                l.pages_illisibles += 1;
+                historique_tronque = true;
+                break;
+            }
+        };
+        l.pages_de_l_historique += 1;
+        if page.table_absente {
+            absent = true;
+            break;
+        }
+        for v in &page.lignes {
+            match compta::Changement::du_serveur(v) {
+                Some(c) if vus.insert(c.id) => historique.push(c),
+                _ => l.lignes_ecartees += 1,
+            }
+        }
+        if historique.len() >= compta::CHANGEMENTS_MAX {
+            historique_tronque = historique.len() > compta::CHANGEMENTS_MAX || page.suivant != Suivant::Fin;
+            historique.truncate(compta::CHANGEMENTS_MAX);
+            break;
+        }
+        match page.suivant {
+            Suivant::Fin => break,
+            Suivant::Id(s) if s > 0 && (avant_id == 0 || s < avant_id) => {
+                if l.pages_de_l_historique >= PAGES_DE_L_HISTORIQUE_MAX {
+                    historique_tronque = true;
+                    break;
+                }
+                avant_id = s;
+            }
+            _ => {
+                l.pages_illisibles += 1;
+                historique_tronque = true;
+                break;
+            }
+        }
+    }
+    l.registre = compta::Registre {
+        au_serveur: total.max(lues as u64),
+        factures,
+        tronque,
+        colonnes_absentes: colonnes,
+        historique,
+        historique_absent: absent,
+        historique_tronque,
+        historique_erreur,
+    };
+    Ok(l)
+}
+
+/// Où mène une page : nulle part (la dernière), à l'id à redonner au serveur, ou on ne sait où (ce qu'il a écrit ne se
+/// lit pas).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Suivant {
+    Fin,
+    Id(i64),
+    Illisible,
+}
+
+/// Une page de l'un des deux outils : ses lignes (`factures` ou `changements`), où elle mène, et ce que le serveur en
+/// dit — combien de factures il a, les colonnes que sa base n'a pas, un journal d'audit qui n'existe pas encore.
+#[derive(Debug)]
+struct PageLue {
+    lignes: Vec<Value>,
+    suivant: Suivant,
+    total: Option<u64>,
+    colonnes_absentes: Vec<String>,
+    table_absente: bool,
+}
+
+/// Pourquoi une page ne se lit pas : le serveur a rendu son texte d'erreur au lieu du JSON (« Erreur lors de… » : une
+/// panne de lecture, dite telle quelle), ou un JSON qui n'est pas celui du contrat.
+#[derive(Debug, PartialEq)]
+enum PageManquee {
+    Erreur(String),
+    Illisible,
+}
+
+/// Une page telle que la rend l'outil : un TEXTE JSON compact, un objet (le contrat : `mcp_server.py`) ; `cle`, la
+/// liste qu'il porte. Un texte qui n'est pas un objet JSON est l'erreur du serveur.
+fn page_lue(texte: &str, cle: &str) -> Result<PageLue, PageManquee> {
+    let t = texte.trim();
+    if t.is_empty() {
+        return Err(PageManquee::Illisible);
+    }
+    if !t.starts_with('{') {
+        return Err(PageManquee::Erreur(ecourter(&sans_porteur(t), 200)));
+    }
+    let Ok(Value::Object(mut o)) = serde_json::from_str::<Value>(t) else { return Err(PageManquee::Illisible) };
+    let table_absente = o.get("table_absente").and_then(Value::as_bool) == Some(true);
+    let lignes = match o.remove(cle) {
+        Some(Value::Array(l)) => l,
+        None | Some(Value::Null) if table_absente => Vec::new(),
+        _ => return Err(PageManquee::Illisible),
+    };
+    let suivant = match o.get("suivant") {
+        None | Some(Value::Null) => Suivant::Fin,
+        Some(v) => v
+            .as_i64()
+            .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+            .map_or(Suivant::Illisible, Suivant::Id),
+    };
+    let total = o.get("total").and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())));
+    let colonnes_absentes = o
+        .get("colonnes_absentes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|c| ecourter(c, 64))
+        .collect();
+    Ok(PageLue { lignes, suivant, total, colonnes_absentes, table_absente })
+}
+
+/// Pourquoi une lecture de la comptabilité a manqué, dit pour la personne (l'onglet le montre) : le serveur qui n'a pas
+/// encore ses outils ([`COMPTA_PAS_ENCORE`]), le jeton refusé, la lecture qu'un administrateur n'a pas ouverte à
+/// l'entreprise (le refus de `mcp_profils`), l'erreur du serveur entre guillemets, ou la panne telle qu'elle se dit.
+pub fn phrase_de_la_compta(p: &Panne) -> String {
+    match p {
+        Panne::Inconnu(_) => COMPTA_PAS_ENCORE.to_string(),
+        Panne::Jeton => "Constructo AI a refusé le jeton d'Eve : elle relira la comptabilité avec le suivant.".into(),
+        Panne::Outil(m) => {
+            let m = sans_le_nom_de_l_outil(m);
+            if refus_de_profil(m) {
+                "La lecture de la comptabilité n'est pas activée pour ton entreprise dans Constructo AI : un \
+                 administrateur peut l'ajouter depuis Configuration \u{2192} MCP."
+                    .into()
+            } else if refus_de_tenant(m) {
+                REFUS_DE_TENANT.into()
+            } else if base_occupee(m) {
+                "La base de Constructo AI était occupée : rien de la comptabilité n'a été lu. Réessaie dans un moment."
+                    .into()
+            } else {
+                format!("Constructo AI n'a pas pu lire la comptabilité : « {} ».", m.trim_end_matches(['.', ' ']))
+            }
+        }
+        autre => ponctuee(autre.texte()),
+    }
+}
+
+/// Le refus d'une connexion qui ne porte aucune entreprise, dit par Eve.
+const REFUS_DE_TENANT: &str = "Constructo AI ne rattache la connexion d'Eve à aucune entreprise : reconnecte-la avec \
+                               les identifiants de ton entreprise.";
+
+/// Le refus du serveur quand la connexion ne porte aucune entreprise (`_REG_REFUS_TENANT` de `mcp_server.py` : «
+/// Refus : aucune entreprise n'est rattachee a cette connexion… ») : un refus d'accès, comme celui de `mcp_profils`
+/// (la QA5, passe 2 : il gardait le registre d'avant).
+fn refus_de_tenant(m: &str) -> bool {
+    m.starts_with("Refus :") || m.starts_with("Refus:")
+}
+
+/// Une lecture que la base a coupée — un verrou en file, son délai dépassé (`_reg_message_erreur` : « Erreur : la base
+/// est occupee ou la lecture … a pris trop de temps ») : dite par Eve, pas en texte brut sans accents (la QA5, passe 2).
+fn base_occupee(m: &str) -> bool {
+    m.starts_with("Erreur : la base est occupee")
+}
+
+/// Pourquoi l'historique s'est arrêté avant sa fin, dit pour la personne (`Registre::historique_erreur`) : le registre
+/// lu, lui, reste.
+pub fn phrase_de_l_historique(p: &Panne) -> String {
+    match p {
+        Panne::Inconnu(_) => "Constructo AI n'offre pas encore l'historique de la comptabilité : il viendra avec sa \
+                              prochaine mise à jour."
+            .into(),
+        Panne::Jeton => "Constructo AI a refusé le jeton d'Eve pendant la lecture de l'historique : il se relira avec \
+                         le suivant."
+            .into(),
+        Panne::Serveur(t) if t == LECTURE_TROP_LONGUE => {
+            "Constructo AI a mis plus de cinq minutes à rendre la comptabilité : l'historique s'est arrêté là.".into()
+        }
+        Panne::Outil(m) => {
+            let m = sans_le_nom_de_l_outil(m);
+            if refus_de_profil(m) {
+                "La lecture de l'historique n'est pas activée pour ton entreprise dans Constructo AI : un \
+                 administrateur peut l'ajouter depuis Configuration \u{2192} MCP."
+                    .into()
+            } else if refus_de_tenant(m) {
+                REFUS_DE_TENANT.into()
+            } else if base_occupee(m) {
+                "La base de Constructo AI était occupée pendant la lecture de l'historique : il s'est arrêté là.".into()
+            } else {
+                format!("Constructo AI n'a pas pu lire l'historique : « {} ».", m.trim_end_matches(['.', ' ']))
+            }
+        }
+        autre => format!("L'historique s'est arrêté avant sa fin — {}", ponctuee(autre.texte())),
+    }
+}
+
+/// La panne refuse-t-elle l'accès lui-même — pas une lecture qui flanche, une lecture qui n'est pas permise ? Un 403
+/// ([`Panne::Interdit`]), un outil qu'Eve ne s'accorde pas ([`Panne::Refuse`]), le refus de `mcp_profils` (« n'est pas
+/// activé pour votre entreprise »), celui d'une connexion sans entreprise (« Refus : »). Alors rien de l'entreprise ne
+/// reste — ni à l'écran ni dans `registre.json`, que lit Claude (la QA5 du lot 13.2) : une lecture d'avant, permise
+/// alors, ne l'est plus.
+pub fn refus_d_autorisation(p: &Panne) -> bool {
+    match p {
+        Panne::Interdit | Panne::Refuse(_) => true,
+        Panne::Outil(m) => {
+            let m = sans_le_nom_de_l_outil(m);
+            refus_de_profil(m) || refus_de_tenant(m)
+        }
+        _ => false,
+    }
+}
+
+/// Le texte d'un outil en panne, sans le nom de l'outil que le client met devant (« comptabilite_lister_registre : …
+/// »).
+fn sans_le_nom_de_l_outil(m: &str) -> &str {
+    OUTILS_DE_LA_COMPTA.iter().find_map(|o| m.strip_prefix(format!("{o} : ").as_str())).unwrap_or(m).trim()
+}
+
+/// Le refus de `mcp_profils.cabler` : « L'outil « … » n'est pas activé pour votre entreprise. Un administrateur peut
+/// l'ajouter depuis Configuration → MCP. »
+fn refus_de_profil(m: &str) -> bool {
+    m.contains("n'est pas activé")
+}
+
+/// Une phrase avec son point final.
+fn ponctuee(t: String) -> String {
+    if t.ends_with(['.', '!', '?']) { t } else { format!("{t}.") }
+}
+
+/// Ce que dit `registre.json` du dossier local ([`compta::FICHIER`] ; la forme de [`compta::Lecture`]), tel que le chef
+/// le tient : l'état de la lecture, l'heure de la dernière réussie (celle du poste, « AAAA-MM-JJTHH:MM:SS »), pourquoi
+/// la dernière a manqué, et le registre — partagé, pour que la lecture qui commence (`en_cours`) ou qui manque
+/// (`erreur`) le réécrive tel quel, sans le recopier (vingt mille factures pèsent).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FichierDuRegistre {
+    pub etat: String,
+    pub lu_le: String,
+    pub erreur: String,
+    pub registre: Option<Arc<compta::Registre>>,
+}
+
+/// `registre.json` tel qu'il s'écrit : la forme de `compta::Lecture`, son registre emprunté.
+#[derive(Serialize)]
+struct RegistreEcrit<'a> {
+    etat: &'a str,
+    lu_le: &'a str,
+    erreur: &'a str,
+    registre: Option<&'a compta::Registre>,
+}
+
+impl FichierDuRegistre {
+    /// Eve n'est pas reliée à Constructo AI : rien de la comptabilité — une déconnexion efface ce qui restait.
+    pub fn non_connecte() -> FichierDuRegistre {
+        FichierDuRegistre { etat: NON_CONNECTE.into(), ..FichierDuRegistre::default() }
+    }
+
+    /// Une lecture commence : la précédente reste, avec son heure.
+    pub fn en_cours(&self) -> FichierDuRegistre {
+        FichierDuRegistre { etat: EN_COURS.into(), erreur: String::new(), ..self.clone() }
+    }
+
+    /// Une lecture réussie, faite à `lu_le` (l'heure du poste, « AAAA-MM-JJTHH:MM:SS »).
+    pub fn lu(registre: compta::Registre, lu_le: &str) -> FichierDuRegistre {
+        FichierDuRegistre {
+            etat: A_JOUR.into(),
+            lu_le: lu_le.into(),
+            erreur: String::new(),
+            registre: Some(Arc::new(registre)),
+        }
+    }
+
+    /// Une lecture manquée : la dernière réussie reste, avec son heure ; `erreur` dit pourquoi, pour la personne.
+    pub fn manque(&self, erreur: &str) -> FichierDuRegistre {
+        FichierDuRegistre { etat: ERREUR.into(), erreur: erreur.into(), ..self.clone() }
+    }
+
+    /// Une lecture que Constructo AI refuse (un 403, la lecture qu'un administrateur n'a pas ouverte à l'entreprise :
+    /// [`refus_d_autorisation`]) : rien de l'entreprise ne reste — ni la lecture d'avant, permise alors, ni son heure ;
+    /// `erreur` dit pourquoi.
+    pub fn refusee(erreur: &str) -> FichierDuRegistre {
+        FichierDuRegistre { etat: ERREUR.into(), erreur: erreur.into(), ..FichierDuRegistre::default() }
+    }
+
+    /// À la première demande ordinaire de la séance : la comptabilité est-elle à relire ? Lue il y a dix minutes ou
+    /// plus ([`COMPTA_INTERVALLE`], qui survit ainsi à un redémarrage), jamais lue, son heure illisible ou dans
+    /// l'avenir (l'horloge du poste a reculé), ou une lecture restée « en cours » (Eve s'est arrêtée pendant).
+    /// `maintenant` : l'heure du poste, « AAAA-MM-JJ HH:MM:SS ».
+    pub fn a_relire(&self, maintenant: &str) -> bool {
+        if self.etat == EN_COURS || self.registre.is_none() {
+            return true;
+        }
+        let intervalle = COMPTA_INTERVALLE.saturating_sub(COMPTA_MARGE).as_secs() as i64;
+        match (crate::rappels::en_secondes(&self.lu_le), crate::rappels::en_secondes(maintenant)) {
+            (Some(lu), Some(m)) => !(0..intervalle).contains(&(m - lu)),
+            _ => true,
+        }
+    }
+
+    /// Écrit `registre.json` dans le dossier local, d'un geste : du JSON compact (vingt mille factures font une
+    /// dizaine de mégaoctets ; indentées, la moitié de plus), la forme de `compta::Lecture`.
+    pub fn ecrire(&self, dossier: &Path) -> Result<(), String> {
+        let e = RegistreEcrit {
+            etat: &self.etat,
+            lu_le: &self.lu_le,
+            erreur: &self.erreur,
+            registre: self.registre.as_deref(),
+        };
+        let texte = serde_json::to_vec(&e).map_err(|err| err.to_string())?;
+        ecrire_d_un_geste(&dossier.join(compta::FICHIER), &texte)
+            .map_err(|err| format!("{} ne s'écrit pas ({err})", compta::FICHIER))
+    }
+
+    /// La dernière lecture gardée dans le dossier local ; rien, ou illisible : une lecture vide (jamais lue).
+    pub fn charger(dossier: &Path) -> FichierDuRegistre {
+        match crate::centre::lire_le_registre(&dossier.join(compta::FICHIER)) {
+            Ok(l) => {
+                FichierDuRegistre { etat: l.etat, lu_le: l.lu_le, erreur: l.erreur, registre: l.registre.map(Arc::new) }
+            }
+            Err(_) => FichierDuRegistre::default(),
+        }
+    }
+
+    /// `registre.json` n'a rien à effacer : il n'existe pas, ou il ne dit déjà que `non_connecte` (sans lire en entier
+    /// un gros fichier : c'est une lecture de l'entreprise, à effacer).
+    pub fn rien_a_effacer(dossier: &Path) -> bool {
+        let chemin = dossier.join(compta::FICHIER);
+        match fs::metadata(&chemin) {
+            Err(_) => true,
+            Ok(m) if m.len() > 4096 => false,
+            Ok(_) => {
+                crate::centre::lire_le_registre(&chemin).is_ok_and(|l| l.etat == NON_CONNECTE && l.registre.is_none())
+            }
+        }
+    }
+}
+
+/// L'écriture de `registre.json`, dans un fil à part : vingt mille factures s'écrivent en un dixième de seconde et plus
+/// (mesuré : `mesure_d_un_grand_registre`), deux fois par lecture, que le fil du chef ne passe pas à attendre. Les
+/// états s'écrivent dans l'ordre où le chef les donne — d'un geste chacun ([`FichierDuRegistre::ecrire`]) — ; s'il en
+/// attend plusieurs pendant une écriture, seul le dernier s'écrit : c'est lui que le fichier doit dire. Le chef parti,
+/// le fil finit ce qu'il a et s'arrête.
+pub struct EcrivainDuRegistre {
+    envoi: std::sync::mpsc::Sender<FichierDuRegistre>,
+}
+
+impl EcrivainDuRegistre {
+    /// Le fil qui écrit dans `dossier` (le dossier local).
+    pub fn demarrer(dossier: std::path::PathBuf) -> EcrivainDuRegistre {
+        let (envoi, recu) = std::sync::mpsc::channel::<FichierDuRegistre>();
+        std::thread::spawn(move || {
+            while let Ok(mut f) = recu.recv() {
+                while let Ok(plus_recent) = recu.try_recv() {
+                    f = plus_recent;
+                }
+                if let Err(e) = f.ecrire(&dossier) {
+                    crate::journal::ecrire(&format!("comptabilité : {e}"));
+                }
+            }
+        });
+        EcrivainDuRegistre { envoi }
+    }
+
+    /// `registre.json` dira `f` (un partage du registre : rien ne se recopie).
+    pub fn ecrire(&self, f: FichierDuRegistre) {
+        let _ = self.envoi.send(f);
+    }
+}
+
+/// Les demandes de lecture de la comptabilité, telles que le chef les mène (pur : l'heure arrive en argument) : la
+/// demande qui attend son moment (pas avant cet instant ; et si c'est « Relire »), la lecture qui se fait (une à la
+/// fois), le début de la dernière de la séance, le jeton qu'une lecture a vu refusé (son émission), un serveur qui n'a
+/// pas les outils de la comptabilité. [`LaCompta`] y met les gestes de l'onglet et les battements du chef.
+#[derive(Clone, Debug, Default)]
+pub struct DemandesDeLaCompta {
+    voulue: Option<(Instant, bool)>,
+    occupee: bool,
+    partie_a: Option<Instant>,
+    refuse: Option<u64>,
+    absente: bool,
+}
+
+/// Comment une lecture de la comptabilité a fini, pour ses demandes ([`DemandesDeLaCompta::finie`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FinDeLecture {
+    /// Lue : un serveur qui n'avait pas les outils les a maintenant.
+    Lue,
+    /// Manquée d'une panne : la suivante attend son moment.
+    Manquee,
+    /// Le jeton de cette émission refusé (un 401) : la demande revient, et attend le jeton suivant.
+    JetonRefuse(u64),
+    /// Le serveur n'a pas les outils de la comptabilité ([`Panne::Inconnu`]) : une demande ordinaire par heure
+    /// seulement ([`COMPTA_ABSENTE`] : rien ne les fera venir d'ici dix minutes, ils arrivent avec une mise à jour de
+    /// l'ERP) ; « Relire » essaie encore.
+    Absente,
+}
+
+impl DemandesDeLaCompta {
+    /// L'onglet la demande (`relire` : « Relire », « Réessayer ») : une demande ordinaire, si la dernière lecture de la
+    /// séance a commencé il y a dix minutes au moins — la première de la séance, si `a_relire` (ce qu'en dit
+    /// `registre.json` : [`FichierDuRegistre::a_relire`]) ; « Relire », dès que trente secondes ont passé depuis le
+    /// début de la dernière — plus tôt, elle attend la fin des trente secondes. Pendant une lecture, rien : celle qui
+    /// se fait y répond. Un serveur sans les outils de la comptabilité : une demande ordinaire par heure
+    /// ([`COMPTA_ABSENTE`]), « Relire » comme d'habitude.
+    pub fn vouloir(&mut self, relire: bool, maintenant: Instant, a_relire: impl FnOnce() -> bool) {
+        if self.occupee {
+            return;
+        }
+        if self.absente && !relire && !self.partie_a.is_some_and(|t| maintenant + COMPTA_MARGE >= t + COMPTA_ABSENTE) {
+            return;
+        }
+        let quand = match self.partie_a {
+            Some(t) if relire => (t + COMPTA_RELIRE).max(maintenant),
+            Some(t) if maintenant + COMPTA_MARGE >= t + COMPTA_INTERVALLE => maintenant,
+            Some(_) => return,
+            None => {
+                if !relire && !a_relire() {
+                    return;
+                }
+                maintenant
+            }
+        };
+        // Une demande attend déjà : la plus proche des deux.
+        self.voulue = Some(match self.voulue {
+            Some((t, r)) => (t.min(quand), r || relire),
+            None => (quand, relire),
+        });
+    }
+
+    /// Au battement, la connexion le permettant (le jeton de l'émission `emis`, valable) : la lecture part-elle ? Oui :
+    /// `Some` (« Relire » ou non), et la voilà en cours. Jamais avec un jeton qu'une lecture a vu refusé : la demande
+    /// attend le suivant.
+    pub fn partir(&mut self, maintenant: Instant, emis: u64) -> Option<bool> {
+        let (quand, relire) = self.voulue?;
+        if self.occupee || maintenant < quand || self.refuse == Some(emis) {
+            return None;
+        }
+        self.voulue = None;
+        self.occupee = true;
+        self.partie_a = Some(maintenant);
+        Some(relire)
+    }
+
+    /// La lecture a fini ([`FinDeLecture`]) : un jeton refusé fait revenir la demande, qui attend le jeton suivant ; un
+    /// serveur sans les outils n'est plus relu qu'une fois par heure, ou sur « Relire », jusqu'à une lecture qui
+    /// réussit.
+    pub fn finie(&mut self, fin: FinDeLecture, relire: bool, maintenant: Instant) {
+        self.occupee = false;
+        match fin {
+            FinDeLecture::Lue => self.absente = false,
+            FinDeLecture::Manquee => {}
+            FinDeLecture::JetonRefuse(emis) => {
+                self.refuse = Some(emis);
+                self.voulue = Some((maintenant, relire));
+            }
+            FinDeLecture::Absente => self.absente = true,
+        }
+    }
+
+    /// La connexion s'en va : plus rien n'attend, et une lecture en route sera écartée (son tour est passé).
+    pub fn oublier(&mut self) {
+        *self = DemandesDeLaCompta::default();
+    }
+
+    /// Une demande attend-elle son moment ?
+    pub fn voulue(&self) -> bool {
+        self.voulue.is_some()
+    }
+}
+
+/// Ce que le chef sait de sa connexion à Constructo AI, pour la comptabilité : reliée (l'espace de Constructo AI, une
+/// connexion faite), un renouvellement en cours, le jeton d'accès valable et pas encore à renouveler, son émission, et
+/// le tour de connexion (une déconnexion le fait passer).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EtatDeLaConnexion {
+    pub reliee: bool,
+    pub occupee: bool,
+    pub acces_valable: bool,
+    pub a_renouveler: bool,
+    pub emis: u64,
+    pub tour: u64,
+}
+
+/// Ce que [`LaCompta`] demande au chef : charger `registre.json` dans un fil (pour le tour `tour`) ; l'écrire, par son
+/// fil ([`EcrivainDuRegistre`]) ; lire la comptabilité dans un fil, avec le jeton du moment ; faire renouveler le jeton
+/// de l'émission `emis`, refusé ; une ligne au journal.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PourLaCompta {
+    Charger { tour: u64 },
+    Ecrire(FichierDuRegistre),
+    Lire { tour: u64, emis: u64, relire: bool },
+    Renouveler { emis: u64 },
+    Noter(String),
+}
+
+/// La comptabilité de l'ERP telle que le chef la mène, pure : l'heure et sa connexion arrivent en argument, ce qu'il y
+/// a à faire en sort ([`PourLaCompta`]) ; le chef le fait. Elle tient ce que dit `registre.json` (`None` : pas encore
+/// chargé ; il se charge dans un fil à la première demande — vingt mille factures se lisent en un dixième de seconde,
+/// que le fil du chef ne passe pas à attendre), le chargement en route (son tour), la demande qui l'attend (« Relire »
+/// ou non), et les demandes ([`DemandesDeLaCompta`]). Ses gardes sont essayées une à une (la QA5 du lot 13.2 : quatre
+/// gardes du chef retirées ensemble laissaient les essais verts) : une lecture d'avant la déconnexion écartée, une
+/// lecture qui ne part qu'avec un jeton prêt, la déconnexion qui efface tout, un jeton refusé qui fait renouveler.
+#[derive(Clone, Debug, Default)]
+pub struct LaCompta {
+    fichier: Option<FichierDuRegistre>,
+    chargement: Option<u64>,
+    en_attente: Option<bool>,
+    demandes: DemandesDeLaCompta,
+}
+
+impl LaCompta {
+    /// Plus de connexion (une déconnexion, ou Eve lancée sans elle) : `registre.json` ne garde rien de l'entreprise —
+    /// ce qui restait s'efface ; un fichier qui ne dit déjà que cela ne se réécrit pas (`rien_a_effacer` ne se demande
+    /// que s'il n'est pas chargé). Plus aucune demande n'attend, et un chargement en route sera écarté.
+    pub fn sans_connexion(&mut self, rien_a_effacer: impl FnOnce() -> bool) -> Vec<PourLaCompta> {
+        self.demandes.oublier();
+        self.chargement = None;
+        self.en_attente = None;
+        let deja = match &self.fichier {
+            Some(f) => *f == FichierDuRegistre::non_connecte(),
+            None => rien_a_effacer(),
+        };
+        self.fichier = Some(FichierDuRegistre::non_connecte());
+        if deja { Vec::new() } else { vec![PourLaCompta::Ecrire(FichierDuRegistre::non_connecte())] }
+    }
+
+    /// L'onglet la demande (`relire` : « Relire », « Réessayer » ; `heure` : celle du poste, « AAAA-MM-JJ HH:MM:SS ») :
+    /// [`DemandesDeLaCompta::vouloir`]. Sans connexion, rien. `registre.json` pas encore chargé : il se charge, une
+    /// fois, et la demande l'attend.
+    pub fn demande(
+        &mut self,
+        relire: bool,
+        maintenant: Instant,
+        heure: &str,
+        c: &EtatDeLaConnexion,
+    ) -> Vec<PourLaCompta> {
+        if !c.reliee {
+            return Vec::new();
+        }
+        if let Some(f) = &self.fichier {
+            self.demandes.vouloir(relire, maintenant, || f.a_relire(heure));
+            return Vec::new();
+        }
+        self.en_attente = Some(self.en_attente.unwrap_or(false) || relire);
+        if self.chargement.is_some() {
+            return Vec::new();
+        }
+        self.chargement = Some(c.tour);
+        vec![PourLaCompta::Charger { tour: c.tour }]
+    }
+
+    /// `registre.json` est chargé, dans son fil (`tour` : la connexion qui l'a demandé) : la demande qui l'attendait se
+    /// fait. Un chargement d'avant une déconnexion (son tour passé, ou le fichier déjà effacé) est écarté.
+    pub fn charge(
+        &mut self,
+        f: FichierDuRegistre,
+        tour: u64,
+        maintenant: Instant,
+        heure: &str,
+        c: &EtatDeLaConnexion,
+    ) -> Vec<PourLaCompta> {
+        if self.chargement != Some(tour) || tour != c.tour || self.fichier.is_some() {
+            return vec![PourLaCompta::Noter(
+                "comptabilité : un registre.json chargé avant la déconnexion, écarté".into(),
+            )];
+        }
+        self.chargement = None;
+        let attendue = self.en_attente.take();
+        let f = self.fichier.insert(f);
+        if let Some(relire) = attendue
+            && c.reliee
+        {
+            self.demandes.vouloir(relire, maintenant, || f.a_relire(heure));
+        }
+        Vec::new()
+    }
+
+    /// Au battement. Sans connexion, ce qui restait s'efface (la déconnexion l'a fait ; le battement le garantit). Avec
+    /// elle, la lecture que l'onglet a demandée part quand son moment est venu — jamais pendant un renouvellement, ni
+    /// avec un jeton qui ne vaut plus ou arrive à échéance, ni avec un jeton déjà refusé ; `registre.json` dit qu'elle
+    /// commence, la lecture d'avant gardée.
+    pub fn battement(&mut self, maintenant: Instant, c: &EtatDeLaConnexion) -> Vec<PourLaCompta> {
+        if !c.reliee {
+            let a_effacer = self.fichier.as_ref().is_some_and(|f| *f != FichierDuRegistre::non_connecte());
+            if a_effacer || self.demandes.voulue() || self.chargement.is_some() || self.en_attente.is_some() {
+                return self.sans_connexion(|| false);
+            }
+            return Vec::new();
+        }
+        if !self.demandes.voulue() || c.occupee || !c.acces_valable || c.a_renouveler {
+            return Vec::new();
+        }
+        let Some(relire) = self.demandes.partir(maintenant, c.emis) else { return Vec::new() };
+        let en_cours = self.fichier.get_or_insert_with(FichierDuRegistre::default).en_cours();
+        self.fichier = Some(en_cours.clone());
+        vec![PourLaCompta::Ecrire(en_cours), PourLaCompta::Lire { tour: c.tour, emis: c.emis, relire }]
+    }
+
+    /// Une lecture a fini, dans son fil (`tour`, `emis`, `relire` : ce qu'elle était ; `lu_le` : l'heure du poste,
+    /// « AAAA-MM-JJTHH:MM:SS »). Une lecture d'avant la déconnexion est écartée : jamais la comptabilité d'une autre
+    /// connexion dans `registre.json`. Réussie, `registre.json` la prend (`a_jour`) ; manquée, il garde la dernière et
+    /// dit pourquoi — un refus d'accès ([`refus_d_autorisation`]) n'en laisse rien. Un jeton refusé fait renouveler, et
+    /// la demande attend le suivant ; un serveur sans les outils n'est plus relu que sur « Relire ». Au journal, une
+    /// ligne : sa durée et des nombres.
+    #[allow(clippy::too_many_arguments)]
+    pub fn lue(
+        &mut self,
+        tour: u64,
+        emis: u64,
+        relire: bool,
+        duree: Duration,
+        issue: Result<LectureDeLaCompta, Panne>,
+        maintenant: Instant,
+        lu_le: &str,
+        c: &EtatDeLaConnexion,
+    ) -> Vec<PourLaCompta> {
+        if tour != c.tour || !c.reliee {
+            return vec![PourLaCompta::Noter("comptabilité : une lecture d'avant la déconnexion, écartée".into())];
+        }
+        let demande = if relire { " (« Relire »)" } else { "" };
+        match issue {
+            Ok(l) => {
+                self.demandes.finie(FinDeLecture::Lue, relire, maintenant);
+                let mut ordres = vec![PourLaCompta::Noter(format!("comptabilité{demande} : {}", l.resume()))];
+                let f = FichierDuRegistre::lu(l.registre, lu_le);
+                self.fichier = Some(f.clone());
+                ordres.push(PourLaCompta::Ecrire(f));
+                if l.jeton_refuse {
+                    ordres.push(PourLaCompta::Renouveler { emis });
+                }
+                ordres
+            }
+            Err(p) => {
+                let fin = match p {
+                    Panne::Jeton => FinDeLecture::JetonRefuse(emis),
+                    Panne::Inconnu(_) => FinDeLecture::Absente,
+                    _ => FinDeLecture::Manquee,
+                };
+                self.demandes.finie(fin, relire, maintenant);
+                let quoi =
+                    if p == Panne::Jeton { "Constructo AI refuse le jeton d'accès".to_string() } else { p.texte() };
+                let phrase = phrase_de_la_compta(&p);
+                let f = if refus_d_autorisation(&p) {
+                    FichierDuRegistre::refusee(&phrase)
+                } else {
+                    self.fichier.get_or_insert_with(FichierDuRegistre::default).manque(&phrase)
+                };
+                self.fichier = Some(f.clone());
+                let note = format!("comptabilité{demande} : lecture manquée en {} — {quoi}", secondes(duree));
+                let mut ordres = vec![PourLaCompta::Noter(note), PourLaCompta::Ecrire(f)];
+                if p == Panne::Jeton {
+                    ordres.push(PourLaCompta::Renouveler { emis });
+                }
+                ordres
+            }
+        }
+    }
+}
+
 // ---- Le client MCP -------------------------------------------------------------------------------------------------
 
 /// Une session MCP au connecteur de Constructo AI.
@@ -946,16 +1879,20 @@ struct Client {
     version: Option<String>,
     /// Le numéro de la prochaine requête JSON-RPC.
     suivant: u64,
+    /// L'échéance de toute la lecture (la comptabilité : [`COMPTA_DUREE_MAX`]) : chaque requête n'a que ce qui en
+    /// reste.
+    echeance: Option<Instant>,
 }
 
 impl Client {
-    fn ouvrir(url: &str, jeton: &str) -> Result<Client, Panne> {
+    fn ouvrir(url: &str, jeton: &str, echeance: Option<Instant>) -> Result<Client, Panne> {
         let mut c = Client {
             url: url.trim_end_matches('/').to_string(),
             jeton: jeton.to_string(),
             session: None,
             version: None,
             suivant: 1,
+            echeance,
         };
         c.initialiser()?;
         Ok(c)
@@ -995,11 +1932,26 @@ impl Client {
     /// Un message au serveur (un POST). La seule redirection prise : « /mcp » vers « /mcp/ » ([`barre_finale`]).
     fn poster(&mut self, message: &Value, delai: Duration) -> Result<https::Reponse, Panne> {
         let corps = message.to_string().into_bytes();
+        let echeance = self.echeance;
+        // Une requête qui manque à l'échéance — à un quart de seconde près : la minuterie de WinHTTP n'est pas plus
+        // juste — manque d'elle, pas du serveur.
+        let a_l_echeance = || echeance.is_some_and(|e| Instant::now() + Duration::from_millis(250) >= e);
         for _ in 0..2 {
+            // Une lecture qui a son échéance : la requête n'en prend que ce qui reste ; plus rien, elle ne part pas.
+            let delai = match echeance {
+                Some(e) => match e.saturating_duration_since(Instant::now()) {
+                    reste if reste.is_zero() => return Err(Panne::Serveur(LECTURE_TROP_LONGUE.into())),
+                    reste => delai.min(reste),
+                },
+                None => delai,
+            };
             let entetes = self.entetes();
             let entetes: Vec<(&str, &str)> = entetes.iter().map(|(n, v)| (*n, v.as_str())).collect();
             let r = https::requete("POST", &self.url, &self.jeton, &entetes, Some(("application/json", &corps)), delai)
-                .map_err(|e| Panne::Serveur(format!("Constructo AI ne répond pas : {e}")))?;
+                .map_err(|e| match a_l_echeance() {
+                    true => Panne::Serveur(LECTURE_TROP_LONGUE.into()),
+                    false => Panne::Serveur(format!("Constructo AI ne répond pas : {e}")),
+                })?;
             if matches!(r.statut, 307 | 308)
                 && let Some(ailleurs) = r.entete("location").and_then(|l| barre_finale(&self.url, l))
             {
@@ -1010,6 +1962,7 @@ impl Client {
             return match r.statut {
                 200..=299 => Ok(r),
                 401 => Err(Panne::Jeton),
+                403 => Err(Panne::Interdit),
                 404 if self.session.is_some() => Err(Panne::Session),
                 s => Err(Panne::Serveur(raison_http(s))),
             };
@@ -1046,11 +1999,17 @@ impl Client {
             r => r?.1,
         };
         if let Some(e) = message.get("error") {
+            if outil_inconnu(e["message"].as_str().unwrap_or("")) {
+                return Err(Panne::Inconnu(outil.to_string()));
+            }
             return Err(Panne::Outil(format!("{outil} : {}", erreur_jsonrpc(e))));
         }
         let resultat = &message["result"];
         let texte = texte_du_resultat(resultat);
         if resultat["isError"].as_bool() == Some(true) {
+            if outil_inconnu(&texte) {
+                return Err(Panne::Inconnu(outil.to_string()));
+            }
             return Err(Panne::Outil(format!("{outil} : {}", ecourter(&sans_porteur(&texte), 200))));
         }
         Ok(texte)
@@ -2129,6 +3088,13 @@ pub fn maintenant_iso() -> String {
     let decalage = crate::rappels::en_secondes(&local)
         .map_or(0, |l| ((l - unix_maintenant()) as f64 / 900.0).round() as i64 * 900);
     iso(&local, decalage)
+}
+
+/// L'heure d'une lecture de la comptabilité (`registre.json`, `lu_le`) : celle du poste AVEC son décalage, comme celle
+/// de la lecture de l'entreprise — l'âge d'une lecture se compte juste au changement d'heure (la QA5, passe 2 : écrite
+/// sans fuseau, « Lue à 1 h 50 » à 1 h 10, et une lecture d'un quart d'heure qui « datait » de 1 h 15).
+pub fn heure_de_la_lecture() -> String {
+    maintenant_iso()
 }
 
 /// « 2026-10-26 13:45:00 » et son décalage en secondes → « 2026-10-26T13:45:00-04:00 ».
@@ -3347,10 +4313,21 @@ mod essais {
         // Le suivi de production ne part qu'à la demande ; chaque outil de la liste sert à l'une ou l'autre lecture.
         let sans_suivi = outils_de(&appels("2026-10-26", false));
         let avec_suivi = outils_de(&appels("2026-10-26", true));
-        assert_eq!((sans_suivi.len(), avec_suivi.len()), (18, OUTILS_LUS.len()));
+        assert_eq!((sans_suivi.len(), avec_suivi.len(), OUTILS_LUS.len()), (18, 22, 24));
         for o in OUTILS_DU_SUIVI {
             assert!(!sans_suivi.contains(&o) && avec_suivi.contains(&o), "{o}");
         }
+        // La comptabilité ne part avec aucune lecture de l'entreprise : à la demande de son onglet seulement
+        // (`lire_la_compta`). Les deux lectures, ensemble, prennent toute la liste, chaque outil une fois.
+        assert_eq!(OUTILS_DE_LA_COMPTA, ["comptabilite_lister_registre", "comptabilite_lister_historique"]);
+        for o in OUTILS_DE_LA_COMPTA {
+            assert!(permis(o) && est_lecture_constructo(o) && !avec_suivi.contains(&o), "{o}");
+        }
+        let mut toutes: Vec<&str> = avec_suivi.iter().chain(&OUTILS_DE_LA_COMPTA).copied().collect();
+        let mut liste = OUTILS_LUS.to_vec();
+        toutes.sort_unstable();
+        liste.sort_unstable();
+        assert_eq!(toutes, liste);
         // Les colonnes du Kanban : une lecture que la garde tient pour telle, en plus du serveur.
         assert!(permis("suivi_colonnes"));
         for o in [
@@ -3366,6 +4343,7 @@ mod essais {
             session: None,
             version: None,
             suivant: 1,
+            echeance: None,
         };
         assert_eq!(c.appeler("creer_facture", json!({})), Err(Panne::Refuse("creer_facture".into())));
         assert!(matches!(c.appeler("tableau_kpis", json!({})), Err(Panne::Serveur(_))), "une lecture, elle, part");
@@ -3714,5 +4692,1396 @@ mod essais {
         assert_eq!(jours, dans_l_ordre, "dans l'ordre du calendrier");
         let _ = fs::remove_dir_all(&dossier);
         let _ = fs::remove_file(&lien.fichier);
+    }
+
+    // ---- La comptabilité ----------------------------------------------------------------------------------------
+
+    /// Deux pages du registre, écrites à la main dans la forme du contrat : `comptabilite_lister_registre` rend un
+    /// texte JSON compact, les montants en texte ; des plus récentes aux plus anciennes (`recentes_d_abord`), la
+    /// première jusqu'à la facture 230, la seconde après elle.
+    const PAGE_1: &str = concat!(
+        r#"{"version":1,"factures":[{"id":230,"numero":"FACT-2026-00230","destinataire":"client","#,
+        r#""type_document":"AVOIR","statut":"ENVOYEE","date":"2026-10-30","tiers":"Habitations Exemple","#,
+        r#""sous_total":"-50.00","tps":"-2.50","tvq":"-4.99","total":null,"paye":null,"solde":"0.00"},"#,
+        r#"{"numero":"sans id"}],"suivant":230,"total":4,"colonnes_absentes":["section"]}"#
+    );
+    const PAGE_2: &str = concat!(
+        r#"{"version":1,"factures":[{"id":105,"numero":"FF-105","numero_fournisseur":"BE-40017","#,
+        r#""destinataire":"fournisseur","type_document":"facture","statut":"partiellement_payee","#,
+        r#""date":"2026-10-20","echeance":null,"paiement":"2026-10-28","tiers":"Béton Fictif ltée","#,
+        r#""tiers_id":201,"projet_id":7,"projet":"Entrepôt Lévis","section":"2. Fondation","#,
+        r#""fiabilite":"a_verifier","sous_total":"8432.07","tps":"421.60","tvq":"841.10","total":"9694.77","#,
+        r#""paye":"4847.38","solde":"4847.39","taxe1":"TPS","taxe2":"TVQ","cree_le":null,"modifie_le":null},"#,
+        r#"{"id":104,"numero":"FACT-2026-00104","numero_fournisseur":null,"destinataire":"client","#,
+        r#""type_document":"FACTURE","statut":"ENVOYEE","date":"2026-11-01","echeance":"2026-12-01","#,
+        r#""paiement":null,"tiers":"Habitations Exemple","tiers_id":12,"projet_id":7,"projet":"Entrepôt Lévis","#,
+        r#""section":null,"fiabilite":null,"sous_total":"1000.00","tps":"50.00","tvq":"99.75","total":"1149.75","#,
+        r#""paye":"0.00","solde":"1149.75","taxe1":"TPS","taxe2":"TVQ","cree_le":"2026-11-01T15:12:00Z","#,
+        r#""modifie_le":"2026-11-02T16:04:00Z"}],"suivant":null,"total":4,"colonnes_absentes":["section"]}"#
+    );
+    const HISTORIQUE_1: &str = concat!(
+        r#"{"version":1,"changements":[{"id":5521,"quand":"2026-11-02T16:04:00Z","qui":"luc@exemple.ca","#,
+        r#""action":"paiement","entite":"facture","entite_id":105,"details":"{\"montant\":\"4847.38\"}"},"#,
+        r#"{"id":5400,"quand":"2026-11-01T15:12:00Z","qui":null,"action":"creation","entite":"facture","#,
+        r#""entite_id":104,"details":null}],"suivant":5400,"table_absente":false}"#
+    );
+    const HISTORIQUE_2: &str = concat!(
+        r#"{"version":1,"changements":[{"quand":"sans id"},{"id":5399,"quand":"2026-10-30T09:00:00Z","#,
+        r#""qui":"marie@exemple.ca","action":"statut","entite":"facture","entite_id":230,"#,
+        r#""details":"{\"vers\":\"ENVOYEE\"}"}],"suivant":null,"table_absente":false}"#
+    );
+
+    /// Une lecture sur un serveur sans réseau : ses pages, outil par outil, dans l'ordre (une panne, aussi) ; et ce
+    /// qu'Eve lui a demandé.
+    fn lire_avec(
+        registre: Vec<Result<&str, Panne>>,
+        historique: Vec<Result<&str, Panne>>,
+    ) -> (Result<LectureDeLaCompta, Panne>, Vec<(String, Value)>) {
+        let (mut r, mut h) = (registre.into_iter(), historique.into_iter());
+        let mut demandes = Vec::new();
+        let lu = lire_les_pages(
+            &mut |outil: &str, a: Value| {
+                demandes.push((outil.to_string(), a));
+                let page = if outil == compta::OUTIL_DU_REGISTRE { r.next() } else { h.next() };
+                page.unwrap_or_else(|| Err(Panne::Serveur(format!("{outil} : plus de page")))).map(str::to_string)
+            },
+            PAGES,
+            None,
+        );
+        (lu, demandes)
+    }
+
+    /// Le registre puis l'historique, page par page, des plus récents aux plus anciens — ce qu'Eve demande, ce qu'elle
+    /// garde de chaque facture, au cent, dans l'ordre des id ; une ligne sans id écartée et comptée, la lecture
+    /// continue.
+    #[test]
+    fn la_compta_se_lit_page_par_page() {
+        let (lu, demandes) = lire_avec(vec![Ok(PAGE_1), Ok(PAGE_2)], vec![Ok(HISTORIQUE_1), Ok(HISTORIQUE_2)]);
+        let l = lu.unwrap();
+        let attendu = [
+            ("comptabilite_lister_registre", json!({ "recentes_d_abord": true, "avant_id": 0, "limite": 1000 })),
+            ("comptabilite_lister_registre", json!({ "recentes_d_abord": true, "avant_id": 230, "limite": 1000 })),
+            ("comptabilite_lister_historique", json!({ "avant_id": 0, "limite": 500 })),
+            ("comptabilite_lister_historique", json!({ "avant_id": 5400, "limite": 500 })),
+        ];
+        assert_eq!(demandes, attendu.map(|(o, a)| (o.to_string(), a)));
+        let r = &l.registre;
+        assert_eq!(r.factures.iter().map(|f| f.id).collect::<Vec<_>>(), [104, 105, 230]);
+        assert_eq!((r.au_serveur, r.tronque, r.colonnes_absentes.clone()), (4, false, vec!["section".to_string()]));
+        assert_eq!((l.pages, l.pages_de_l_historique, l.lignes_ecartees, l.pages_illisibles), (2, 2, 2, 0));
+        // Une facture, champ par champ.
+        let f = &r.factures[0];
+        assert_eq!(
+            (f.numero.as_str(), f.numero_fournisseur.as_deref(), f.cote, f.type_document.as_str(), f.statut.as_str()),
+            ("FACT-2026-00104", None, compta::Cote::Client, "FACTURE", "ENVOYEE")
+        );
+        assert_eq!(
+            (f.date.as_deref(), f.echeance.as_deref(), f.paiement.as_deref()),
+            (Some("2026-11-01"), Some("2026-12-01"), None)
+        );
+        assert_eq!(
+            (f.tiers.as_str(), f.tiers_id, f.projet_id, f.projet.as_deref()),
+            ("Habitations Exemple", Some(12), Some(7), Some("Entrepôt Lévis"))
+        );
+        assert_eq!((f.section.as_deref(), f.fiabilite.as_deref()), (None, None));
+        assert_eq!(
+            (f.sous_total, f.tps, f.tvq, f.total, f.paye, f.solde),
+            (Some(100_000), Some(5_000), Some(9_975), Some(114_975), Some(0), Some(114_975))
+        );
+        assert_eq!((f.taxe1.as_deref(), f.taxe2.as_deref()), (Some("TPS"), Some("TVQ")));
+        assert_eq!(
+            (f.cree_le.as_deref(), f.modifie_le.as_deref()),
+            (Some("2026-11-01T15:12:00Z"), Some("2026-11-02T16:04:00Z"))
+        );
+        // Celle d'un fournisseur : son numéro à lui, sa section, sa fiabilité, payée à moitié, au cent près.
+        let g = &r.factures[1];
+        assert_eq!(
+            (g.cote, g.numero_fournisseur.as_deref(), g.section.as_deref(), g.fiabilite.as_deref()),
+            (compta::Cote::Fournisseur, Some("BE-40017"), Some("2. Fondation"), Some("a_verifier"))
+        );
+        assert_eq!((g.type_document.as_str(), g.statut.as_str()), ("FACTURE", "PARTIELLEMENT_PAYEE"));
+        assert_eq!(
+            (g.sous_total, g.tps, g.tvq, g.total, g.paye, g.solde),
+            (Some(843_207), Some(42_160), Some(84_110), Some(969_477), Some(484_738), Some(484_739))
+        );
+        // Une note de crédit : des montants négatifs, et un total absent qui reste absent — jamais zéro.
+        let a = &r.factures[2];
+        assert_eq!((a.sous_total, a.tps, a.tvq, a.total, a.paye), (Some(-5_000), Some(-250), Some(-499), None, None));
+        // L'historique, du plus récent au plus ancien ; personne, c'est le système (un texte vide).
+        let h: Vec<(i64, &str, &str)> =
+            r.historique.iter().map(|c| (c.id, c.qui.as_str(), c.action.as_str())).collect();
+        assert_eq!(
+            h,
+            [(5521, "luc@exemple.ca", "paiement"), (5400, "", "creation"), (5399, "marie@exemple.ca", "statut")]
+        );
+        assert_eq!(
+            (r.historique[0].entite_id, r.historique[0].details.as_str()),
+            (Some(105), r#"{"montant":"4847.38"}"#)
+        );
+        assert!(!r.historique_tronque && !r.historique_absent);
+        let resume = l.resume();
+        assert!(
+            resume.starts_with("3 factures en 2 pages (4 au serveur), 3 entrées d'historique en 2 pages, lue en "),
+            "{resume}"
+        );
+        assert!(resume.ends_with(" ; 1 colonne absente ; 2 lignes écartées"), "{resume}");
+        assert!(!resume.contains("Habitations") && !resume.contains("FACT-"), "des nombres seulement : {resume}");
+    }
+
+    /// Une page qui ne se lit pas arrête sa liste — dite tronquée, et comptée — sans faire tomber la lecture ; la
+    /// première du registre, si : sans rien de lisible, il n'y a rien à montrer. Une panne pendant le registre — un
+    /// texte d'erreur du serveur, un outil inconnu, un jeton refusé — fait manquer la lecture, au premier appel qui le
+    /// dit, sans aller plus loin. Pendant l'historique, elle ne fait plus que l'arrêter : cet essai disait qu'elle
+    /// faisait manquer la lecture entière, et c'était le défaut (la QA5 du lot 13.2 : une panne de l'historique seul
+    /// jetait le registre lu) ; le reste dans [`une_panne_de_l_historique_garde_le_registre`].
+    #[test]
+    fn une_page_illisible_arrete_sa_liste_une_panne_du_registre_la_lecture() {
+        let tronquee = r#"{"version":1,"factures":[{"id":104"#;
+        // La deuxième page du registre ne se lit pas : la première reste, l'historique se lit.
+        let (lu, demandes) = lire_avec(vec![Ok(PAGE_1), Ok(tronquee)], vec![Ok(HISTORIQUE_2)]);
+        let l = lu.unwrap();
+        assert_eq!((l.registre.factures.len(), l.registre.tronque, l.registre.au_serveur), (1, true, 4));
+        assert_eq!((l.pages, l.pages_illisibles, l.registre.historique.len()), (1, 1, 1));
+        assert_eq!(demandes.len(), 3);
+        // Sans sa liste (un autre JSON), pareil ; et un `suivant` qui ne mène pas plus loin arrête la liste.
+        let (lu, _) = lire_avec(vec![Ok(PAGE_1), Ok(r#"{"version":1,"total":4}"#)], vec![Ok(HISTORIQUE_2)]);
+        assert!(lu.unwrap().registre.tronque);
+        // La même page redonnée (son `suivant`, 230, celui qu'Eve vient de passer) : ses doublons écartés, la liste
+        // arrêtée là — jamais une boucle.
+        let (lu, demandes) = lire_avec(vec![Ok(PAGE_1), Ok(PAGE_1)], vec![Ok(HISTORIQUE_2)]);
+        let l = lu.unwrap();
+        assert_eq!((l.registre.tronque, l.pages_illisibles, demandes.len()), (true, 1, 3));
+        assert_eq!(
+            (l.registre.factures.len(), l.lignes_ecartees),
+            (1, 4),
+            "deux sans id, une en double, un changement"
+        );
+        // L'historique qui ne se lit pas : le registre reste, l'historique se dit tronqué — sans panne à dire.
+        let (lu, _) = lire_avec(vec![Ok(PAGE_2)], vec![Ok(HISTORIQUE_1), Ok("")]);
+        let l = lu.unwrap();
+        assert_eq!((l.registre.historique.len(), l.registre.historique_tronque, l.pages_illisibles), (2, true, 1));
+        assert_eq!(l.registre.historique_erreur, "");
+        // Le journal d'audit n'existe pas encore dans cette entreprise.
+        let absente = r#"{"version":1,"changements":[],"suivant":null,"table_absente":true}"#;
+        let (lu, _) = lire_avec(vec![Ok(PAGE_2)], vec![Ok(absente)]);
+        let r = lu.unwrap().registre;
+        assert_eq!((r.historique_absent, r.historique_tronque, r.historique.len()), (true, false, 0));
+        // La première page du registre ne se lit pas : la lecture manque (la dernière réussie reste, chez le chef).
+        let (lu, demandes) = lire_avec(vec![Ok(tronquee)], vec![]);
+        assert_eq!(lu.unwrap_err(), Panne::Serveur("Constructo AI a rendu un registre illisible".into()));
+        assert_eq!(demandes.len(), 1);
+        // Le texte d'erreur du serveur pendant le registre : une panne, dite telle quelle ; rien après.
+        let erreur = "Erreur lors de la lecture du registre (voir logs serveur).";
+        let (lu, demandes) = lire_avec(vec![Ok(PAGE_1), Ok(erreur)], vec![]);
+        assert_eq!(lu.unwrap_err(), Panne::Outil(erreur.into()));
+        assert_eq!(demandes.len(), 2);
+        // Pendant l'historique : le registre lu reste ; l'historique s'arrête là, et la panne se dit.
+        let erreur = "Erreur lors de la lecture de l'historique (voir logs serveur).";
+        let (lu, demandes) = lire_avec(vec![Ok(PAGE_2)], vec![Ok(erreur)]);
+        let r = lu.unwrap().registre;
+        assert_eq!((r.factures.len(), r.historique.len(), r.historique_tronque, demandes.len()), (2, 0, true, 2));
+        assert_eq!(
+            r.historique_erreur,
+            "Constructo AI n'a pas pu lire l'historique : « Erreur lors de la lecture de l'historique (voir logs \
+             serveur) »."
+        );
+        // Un serveur d'avant la comptabilité : un seul appel, puis la phrase ; un jeton refusé en route, pareil.
+        let inconnu = Panne::Inconnu(compta::OUTIL_DU_REGISTRE.into());
+        let (lu, demandes) = lire_avec(vec![Err(inconnu.clone())], vec![]);
+        assert_eq!((lu.unwrap_err(), demandes.len()), (inconnu, 1));
+        let (lu, demandes) = lire_avec(vec![Ok(PAGE_1), Err(Panne::Jeton)], vec![]);
+        assert_eq!((lu.unwrap_err(), demandes.len()), (Panne::Jeton, 2));
+    }
+
+    /// Les bornes : vingt mille factures — les PLUS RÉCENTES : la page qui les dépasse est coupée de ses plus
+    /// anciennes, et la suivante n'est pas demandée (lu du plus ancien au plus récent, le registre gardait les vingt
+    /// mille premières, et le mois en cours manquait : la QA5 du lot 13.2) —, mille entrées d'historique, deux cents
+    /// pages — un serveur qui rendrait une facture par page ne fait pas durer la lecture des heures.
+    #[test]
+    fn la_compta_s_arrete_a_ses_bornes() {
+        let n = compta::FACTURES_MAX as i64;
+        // Trente mille factures, en pages de 1 500 de la plus récente à la plus ancienne : la quatorzième passe les
+        // 20 000 ; il en reste encore après elle.
+        let mut demandes = 0;
+        let mut historique = 0;
+        let l = lire_les_pages(
+            &mut |outil: &str, a: Value| {
+                if outil == compta::OUTIL_DE_L_HISTORIQUE {
+                    // Des pages de 600 entrées, sans fin : 1 000 au plus.
+                    historique += 1;
+                    let avant = a["avant_id"].as_i64().unwrap();
+                    let haut = if avant == 0 { 1_000_000 } else { avant };
+                    let l: Vec<Value> = (1..=600).map(|k| json!({ "id": haut - k, "quand": "2026-11-02" })).collect();
+                    return Ok(json!({ "changements": l, "suivant": haut - 600 }).to_string());
+                }
+                demandes += 1;
+                assert_eq!(a["recentes_d_abord"], json!(true));
+                let avant = a["avant_id"].as_i64().unwrap();
+                // Chaque page sous la précédente, ses factures dans l'ordre des id (le contrat n'en promet pas) : la
+                // borne garde quand même les plus récentes.
+                let haut = if avant == 0 { 30_001 } else { avant };
+                let l: Vec<Value> = (1..=1500).rev().map(|k| json!({ "id": haut - k })).collect();
+                Ok(json!({ "factures": l, "suivant": haut - 1500, "total": 30_000 }).to_string())
+            },
+            PAGES,
+            None,
+        )
+        .unwrap();
+        let r = &l.registre;
+        assert_eq!((r.factures.len(), r.tronque, r.au_serveur, demandes), (compta::FACTURES_MAX, true, 30_000, 14));
+        assert_eq!((r.factures[0].id, r.factures.last().map(|f| f.id)), (10_001, Some(30_000)), "les plus récentes");
+        assert_eq!((r.historique.len(), r.historique_tronque, historique), (compta::CHANGEMENTS_MAX, true, 2));
+        // Juste vingt mille, et rien après : pas tronqué.
+        let l = lire_les_pages(
+            &mut |outil: &str, a: Value| {
+                if outil == compta::OUTIL_DE_L_HISTORIQUE {
+                    return Ok(r#"{"changements":[],"suivant":null}"#.into());
+                }
+                let avant = a["avant_id"].as_i64().unwrap();
+                let haut = if avant == 0 { n + 1 } else { avant };
+                let l: Vec<Value> = (1..=1000).map(|k| json!({ "id": haut - k })).collect();
+                let suivant = if haut - 1000 > 1 { json!(haut - 1000) } else { Value::Null };
+                Ok(json!({ "factures": l, "suivant": suivant, "total": n }).to_string())
+            },
+            PAGES,
+            None,
+        )
+        .unwrap();
+        assert_eq!((l.registre.factures.len(), l.registre.tronque, l.pages), (compta::FACTURES_MAX, false, 20));
+        // Une facture par page, sans fin : deux cents pages, puis la liste s'arrête, tronquée.
+        let mut appels = 0;
+        let l = lire_les_pages(
+            &mut |outil: &str, a: Value| {
+                appels += 1;
+                if outil == compta::OUTIL_DE_L_HISTORIQUE {
+                    return Ok(r#"{"changements":[],"suivant":null}"#.into());
+                }
+                let avant = a["avant_id"].as_i64().unwrap();
+                let suivant = if avant == 0 { 1_000_000 } else { avant - 1 };
+                Ok(json!({ "factures": [{ "id": suivant }], "suivant": suivant }).to_string())
+            },
+            PAGES,
+            None,
+        )
+        .unwrap();
+        assert_eq!((l.pages, l.registre.factures.len(), l.registre.tronque, appels), (200, 200, true, 201));
+    }
+
+    /// L'heure d'une lecture de la comptabilité porte son décalage (« 2026-11-02T14:05:09-05:00 »), et dit l'instant
+    /// présent (la QA5, passe 2 : écrite sans fuseau, son âge se comptait faux au changement d'heure).
+    #[test]
+    fn l_heure_d_une_lecture_porte_son_decalage() {
+        let h = heure_de_la_lecture();
+        let o = h.as_bytes();
+        assert_eq!((h.len(), o[10], o[22]), (25, b'T', b':'), "{h}");
+        assert!(matches!(o[19], b'+' | b'-'), "{h}");
+        let ecart = en_unix(&h).expect("une heure lisible") - unix_maintenant();
+        assert!(ecart.abs() <= 2, "{h} : {ecart} s");
+    }
+
+    /// Ce que la personne lit quand la lecture manque : chaque panne, sa phrase — celle d'un serveur d'avant la
+    /// comptabilité, mot pour mot.
+    #[test]
+    fn chaque_panne_de_la_compta_se_dit() {
+        assert_eq!(
+            phrase_de_la_compta(&Panne::Inconnu("comptabilite_lister_registre".into())),
+            "Constructo AI n'offre pas encore la lecture de la comptabilité : elle viendra avec sa prochaine mise à \
+             jour."
+        );
+        assert_eq!(
+            phrase_de_la_compta(&Panne::Jeton),
+            "Constructo AI a refusé le jeton d'Eve : elle relira la comptabilité avec le suivant."
+        );
+        let profil = "comptabilite_lister_registre : L'outil « comptabilite_lister_registre » n'est pas activé pour \
+                      votre entreprise. Un administrateur peut l'ajouter depuis Configuration \u{2192} MCP.";
+        assert_eq!(
+            phrase_de_la_compta(&Panne::Outil(profil.into())),
+            "La lecture de la comptabilité n'est pas activée pour ton entreprise dans Constructo AI : un \
+             administrateur peut l'ajouter depuis Configuration \u{2192} MCP."
+        );
+        assert_eq!(
+            phrase_de_la_compta(&Panne::Outil("Erreur lors de la lecture (voir logs serveur).".into())),
+            "Constructo AI n'a pas pu lire la comptabilité : « Erreur lors de la lecture (voir logs serveur) »."
+        );
+        assert_eq!(
+            phrase_de_la_compta(&Panne::Outil("comptabilite_lister_historique : Input validation error".into())),
+            "Constructo AI n'a pas pu lire la comptabilité : « Input validation error »."
+        );
+        assert_eq!(
+            phrase_de_la_compta(&Panne::Serveur("Constructo AI ne répond pas (HTTP 503)".into())),
+            "Constructo AI ne répond pas (HTTP 503)."
+        );
+        assert_eq!(phrase_de_la_compta(&Panne::Session), "Constructo AI a oublié la session.");
+        assert_eq!(phrase_de_la_compta(&Panne::Interdit), "Constructo AI refuse l'accès à ces lectures (HTTP 403).");
+        assert_eq!(
+            phrase_de_la_compta(&Panne::Serveur(LECTURE_TROP_LONGUE.into())),
+            "Constructo AI a mis plus de cinq minutes à rendre la comptabilité : Eve a arrêté la lecture."
+        );
+        // La QA5 (passe 2) : le refus d'une connexion sans entreprise (`_REG_REFUS_TENANT`), et la base occupée
+        // (`_reg_message_erreur`), dits par Eve — pas le texte du serveur, sans accents, entre guillemets.
+        let tenant = "comptabilite_lister_registre : Refus : aucune entreprise n'est rattachee a cette connexion ; rien \
+                      n'a ete lu. Reconnecte-toi avec les identifiants de ton entreprise.";
+        assert_eq!(phrase_de_la_compta(&Panne::Outil(tenant.into())), REFUS_DE_TENANT);
+        assert_eq!(phrase_de_l_historique(&Panne::Outil(tenant.into())), REFUS_DE_TENANT);
+        let occupee = "comptabilite_lister_registre : Erreur : la base est occupee ou la lecture du registre des \
+                       factures a pris trop de temps ; rien n'a ete lu. Reessaie dans un moment.";
+        assert_eq!(
+            phrase_de_la_compta(&Panne::Outil(occupee.into())),
+            "La base de Constructo AI était occupée : rien de la comptabilité n'a été lu. Réessaie dans un moment."
+        );
+        assert_eq!(
+            phrase_de_l_historique(&Panne::Outil(occupee.into())),
+            "La base de Constructo AI était occupée pendant la lecture de l'historique : il s'est arrêté là."
+        );
+        // Ce qui refuse l'accès lui-même (rien de l'entreprise ne reste alors) ; une lecture qui flanche, non.
+        for p in [
+            Panne::Interdit,
+            Panne::Outil(profil.into()),
+            Panne::Outil(tenant.into()),
+            Panne::Refuse("creer_facture".into()),
+        ] {
+            assert!(refus_d_autorisation(&p), "{p:?}");
+        }
+        for p in [
+            Panne::Jeton,
+            Panne::Session,
+            Panne::Inconnu(compta::OUTIL_DU_REGISTRE.into()),
+            Panne::Serveur("Constructo AI a répondu HTTP 500".into()),
+            Panne::Outil("Erreur lors de la lecture (voir logs serveur).".into()),
+            Panne::Outil(occupee.into()),
+        ] {
+            assert!(!refus_d_autorisation(&p), "{p:?}");
+        }
+        // Ce qui dit un outil inconnu : FastMCP, la spécification de MCP, d'autres serveurs ; rien d'autre.
+        for m in ["Unknown tool: comptabilite_lister_registre", "unknown TOOL", "Tool not found: x"] {
+            assert!(outil_inconnu(m), "{m}");
+        }
+        for m in ["Erreur lors de la lecture (voir logs serveur).", "Invalid params", profil, ""] {
+            assert!(!outil_inconnu(m), "{m}");
+        }
+    }
+
+    /// Un petit registre : trois factures, deux entrées d'historique.
+    fn registre_d_essai() -> compta::Registre {
+        let (lu, _) = lire_avec(vec![Ok(PAGE_1), Ok(PAGE_2)], vec![Ok(HISTORIQUE_1), Ok(r#"{"changements":[]}"#)]);
+        lu.unwrap().registre
+    }
+
+    /// `registre.json` : ses états (la lecture d'avant gardée, sans copie), son écriture d'un geste dans la forme de
+    /// `compta::Lecture`, sa relecture ; ce qu'il a à effacer à la déconnexion ; quand il est à relire.
+    #[test]
+    fn le_fichier_du_registre_garde_la_lecture_d_avant() {
+        let lu = FichierDuRegistre::lu(registre_d_essai(), "2026-11-02T14:05:09");
+        assert_eq!((lu.etat.as_str(), lu.lu_le.as_str(), lu.erreur.as_str()), (A_JOUR, "2026-11-02T14:05:09", ""));
+        let en_cours = lu.manque("une panne").en_cours();
+        assert_eq!(
+            (en_cours.etat.as_str(), en_cours.lu_le.as_str(), en_cours.erreur.as_str()),
+            (EN_COURS, "2026-11-02T14:05:09", "")
+        );
+        let manque = en_cours.manque("Constructo AI ne répond pas.");
+        assert_eq!((manque.etat.as_str(), manque.erreur.as_str()), (ERREUR, "Constructo AI ne répond pas."));
+        // Le registre d'avant, partagé tel quel : jamais recopié.
+        let (a, b, c) =
+            (lu.registre.as_ref().unwrap(), en_cours.registre.as_ref().unwrap(), manque.registre.as_ref().unwrap());
+        assert!(Arc::ptr_eq(a, b) && Arc::ptr_eq(a, c));
+        let rien = FichierDuRegistre::non_connecte();
+        assert_eq!((rien.etat.as_str(), rien.lu_le.as_str(), rien.registre.is_none()), (NON_CONNECTE, "", true));
+
+        let dossier = std::env::temp_dir().join(format!("eve-registre-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dossier);
+        fs::create_dir_all(&dossier).unwrap();
+        let chemin = dossier.join(compta::FICHIER);
+        assert!(FichierDuRegistre::rien_a_effacer(&dossier), "pas de fichier");
+        assert_eq!(FichierDuRegistre::charger(&dossier), FichierDuRegistre::default());
+        manque.ecrire(&dossier).unwrap();
+        // La forme du contrat, que lisent le centre et l'onglet ; du JSON compact.
+        let texte = fs::read_to_string(&chemin).unwrap();
+        let tete = r#"{"etat":"erreur","lu_le":"2026-11-02T14:05:09","erreur":"Constructo AI ne répond pas.","#;
+        assert!(texte.starts_with(tete) && texte.contains(r#","registre":{"factures":[{"id":104,"#), "{texte}");
+        assert!(!texte.contains('\n'));
+        let l: compta::Lecture = serde_json::from_str(&texte).unwrap();
+        assert_eq!(l.registre.as_ref(), Some(&**a));
+        assert_eq!(l.registre.unwrap().factures[0].total, Some(114_975));
+        assert_eq!(FichierDuRegistre::charger(&dossier), manque);
+        assert!(!FichierDuRegistre::rien_a_effacer(&dossier), "une lecture de l'entreprise : à effacer");
+        rien.ecrire(&dossier).unwrap();
+        assert_eq!(
+            fs::read_to_string(&chemin).unwrap(),
+            r#"{"etat":"non_connecte","lu_le":"","erreur":"","registre":null}"#
+        );
+        assert!(FichierDuRegistre::rien_a_effacer(&dossier));
+        // Un fichier illisible : rien de lu, et à remplacer.
+        fs::write(&chemin, b"{\"etat\":").unwrap();
+        assert_eq!(FichierDuRegistre::charger(&dossier), FichierDuRegistre::default());
+        assert!(!FichierDuRegistre::rien_a_effacer(&dossier));
+        // Une marque d'ordre des octets en tête passe.
+        let mut avec = b"\xEF\xBB\xBF".to_vec();
+        avec.extend_from_slice(texte.as_bytes());
+        fs::write(&chemin, &avec).unwrap();
+        assert_eq!(FichierDuRegistre::charger(&dossier), manque);
+        let _ = fs::remove_dir_all(&dossier);
+
+        // À relire, à la première demande de la séance : dix minutes après sa lecture (à cinq secondes près), ou
+        // quand on ne sait pas.
+        assert!(!lu.a_relire("2026-11-02 14:07:09"), "deux minutes");
+        assert!(!lu.a_relire("2026-11-02 14:15:03"), "9 min 54 s");
+        assert!(lu.a_relire("2026-11-02 14:15:04"), "9 min 55 s");
+        assert!(lu.a_relire("2026-11-03 08:00:00"), "le lendemain");
+        assert!(lu.a_relire("2026-11-02 14:00:00"), "l'horloge a reculé");
+        assert!(lu.en_cours().a_relire("2026-11-02 14:06:00"), "une lecture restée en cours (Eve s'est arrêtée)");
+        assert!(FichierDuRegistre::default().a_relire("2026-11-02 14:06:00"), "jamais lue");
+        assert!(FichierDuRegistre { lu_le: "hier".into(), ..lu.clone() }.a_relire("2026-11-02 14:06:00"));
+        assert!(!lu.manque("x").a_relire("2026-11-02 14:06:00"), "une lecture manquée garde l'heure de la dernière");
+    }
+
+    /// Le fil qui écrit `registre.json` pour le chef : les états, dans l'ordre ; plusieurs qui attendent, le dernier
+    /// seul s'écrit ; le chef parti, il finit ce qu'il a. Le fichier dit enfin le dernier état donné.
+    #[test]
+    fn le_fil_du_registre_ecrit_le_dernier_etat() {
+        let dossier = std::env::temp_dir().join(format!("eve-ecrivain-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dossier);
+        fs::create_dir_all(&dossier).unwrap();
+        let lu = FichierDuRegistre::lu(registre_d_essai(), "2026-11-02T14:05:09");
+        let ecrivain = EcrivainDuRegistre::demarrer(dossier.clone());
+        for f in
+            [lu.en_cours(), lu.clone(), lu.manque("Constructo AI ne répond pas."), FichierDuRegistre::non_connecte()]
+        {
+            ecrivain.ecrire(f);
+        }
+        drop(ecrivain);
+        let debut = Instant::now();
+        while FichierDuRegistre::charger(&dossier) != FichierDuRegistre::non_connecte()
+            && debut.elapsed() < Duration::from_secs(5)
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(FichierDuRegistre::charger(&dossier), FichierDuRegistre::non_connecte());
+        // Un autre, qui finit sur la lecture : elle, entière.
+        let ecrivain = EcrivainDuRegistre::demarrer(dossier.clone());
+        ecrivain.ecrire(lu.en_cours());
+        ecrivain.ecrire(lu.clone());
+        drop(ecrivain);
+        let debut = Instant::now();
+        while FichierDuRegistre::charger(&dossier) != lu && debut.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(FichierDuRegistre::charger(&dossier), lu);
+        let _ = fs::remove_dir_all(&dossier);
+    }
+
+    /// Les demandes de l'onglet, telles que le chef les mène : la première de la séance d'après `registre.json` ; puis
+    /// au plus une lecture par dix minutes (depuis le début de la précédente, à cinq secondes près), « Relire » par
+    /// trente secondes (plus tôt, elle attend) ; une seule à la fois ; un jeton refusé, la demande attend le suivant.
+    #[test]
+    fn les_demandes_de_la_compta() {
+        let t0 = Instant::now();
+        let s = |n: u64| t0 + Duration::from_secs(n);
+        let mut d = DemandesDeLaCompta::default();
+        d.vouloir(false, s(0), || false);
+        assert!(!d.voulue(), "registre.json lu il y a moins de dix minutes : rien");
+        d.vouloir(false, s(0), || true);
+        assert_eq!(d.partir(s(0), 1), Some(false));
+        // Pendant la lecture : rien ne s'ajoute, elle ne part pas deux fois.
+        d.vouloir(true, s(1), || true);
+        assert!(!d.voulue());
+        assert_eq!(d.partir(s(2), 1), None);
+        d.finie(FinDeLecture::Lue, false, s(3));
+        // L'onglet redemande toutes les deux minutes : rien avant les dix minutes ; `registre.json` n'est plus
+        // consulté.
+        for n in [120, 240, 360, 480, 594] {
+            d.vouloir(false, s(n), || panic!("la séance a sa lecture"));
+            assert!(!d.voulue(), "{n} s");
+        }
+        d.vouloir(false, s(595), || false);
+        assert_eq!(d.partir(s(595), 1), Some(false), "9 min 55 s : la cinquième demande de l'onglet");
+        d.finie(FinDeLecture::Manquee, false, s(600));
+        // « Relire » dix secondes après le début : il attend la fin de ses trente secondes, puis part.
+        d.vouloir(true, s(605), || false);
+        d.vouloir(false, s(610), || true);
+        assert_eq!(d.partir(s(624), 1), None);
+        assert_eq!(d.partir(s(625), 1), Some(true));
+        d.finie(FinDeLecture::Lue, true, s(626));
+        // « Relire » plus de trente secondes après : aussitôt.
+        d.vouloir(true, s(660), || false);
+        assert_eq!(d.partir(s(660), 1), Some(true));
+        // Un jeton refusé : la demande revient, et attend le jeton suivant — aussitôt qu'il est là.
+        d.finie(FinDeLecture::JetonRefuse(1), true, s(661));
+        assert!(d.voulue());
+        assert_eq!(d.partir(s(700), 1), None, "le jeton refusé : non");
+        assert_eq!(d.partir(s(700), 2), Some(true), "le suivant : oui");
+        d.finie(FinDeLecture::Lue, true, s(701));
+        // La connexion s'en va : plus rien n'attend ; la séance suivante repart de registre.json.
+        d.vouloir(true, s(800), || false);
+        assert!(d.voulue());
+        d.oublier();
+        assert!(!d.voulue());
+        assert_eq!(d.partir(s(900), 2), None);
+        d.vouloir(false, s(901), || false);
+        assert!(!d.voulue());
+        d.vouloir(false, s(901), || true);
+        assert_eq!(d.partir(s(901), 3), Some(false));
+    }
+
+    /// Une panne pendant l'historique — le réseau, le jeton refusé, un outil que le serveur n'a pas, la lecture qu'un
+    /// administrateur n'a pas ouverte — ne jette plus le registre lu : l'historique s'arrête là, tronqué, et elle se
+    /// dit (`historique_erreur`) ; un jeton refusé se dit aussi au chef, qui le fait renouveler. Un 403, lui, refuse
+    /// l'accès à tout : la lecture manque (la QA5 du lot 13.2).
+    #[test]
+    fn une_panne_de_l_historique_garde_le_registre() {
+        let reseau = Panne::Serveur("Constructo AI ne répond pas : le serveur ne répond pas à temps".into());
+        let (lu, _) = lire_avec(vec![Ok(PAGE_2)], vec![Ok(HISTORIQUE_1), Err(reseau)]);
+        let l = lu.unwrap();
+        let r = &l.registre;
+        assert_eq!((r.factures.len(), r.historique.len(), r.historique_tronque, l.jeton_refuse), (2, 2, true, false));
+        assert_eq!(
+            r.historique_erreur,
+            "L'historique s'est arrêté avant sa fin — Constructo AI ne répond pas : le serveur ne répond pas à temps."
+        );
+        let (lu, _) = lire_avec(vec![Ok(PAGE_2)], vec![Err(Panne::Jeton)]);
+        let l = lu.unwrap();
+        assert_eq!((l.registre.factures.len(), l.registre.historique_tronque, l.jeton_refuse), (2, true, true));
+        assert_eq!(
+            l.registre.historique_erreur,
+            "Constructo AI a refusé le jeton d'Eve pendant la lecture de l'historique : il se relira avec le suivant."
+        );
+        let (lu, _) = lire_avec(vec![Ok(PAGE_2)], vec![Err(Panne::Inconnu(compta::OUTIL_DE_L_HISTORIQUE.into()))]);
+        assert_eq!(
+            lu.unwrap().registre.historique_erreur,
+            "Constructo AI n'offre pas encore l'historique de la comptabilité : il viendra avec sa prochaine mise à \
+             jour."
+        );
+        let profil = "comptabilite_lister_historique : L'outil « comptabilite_lister_historique » n'est pas activé \
+                      pour votre entreprise. Un administrateur peut l'ajouter depuis Configuration \u{2192} MCP.";
+        let (lu, _) = lire_avec(vec![Ok(PAGE_2)], vec![Err(Panne::Outil(profil.into()))]);
+        assert_eq!(
+            lu.unwrap().registre.historique_erreur,
+            "La lecture de l'historique n'est pas activée pour ton entreprise dans Constructo AI : un administrateur \
+             peut l'ajouter depuis Configuration \u{2192} MCP."
+        );
+        let (lu, _) = lire_avec(vec![Ok(PAGE_2)], vec![Err(Panne::Interdit)]);
+        assert_eq!(lu.unwrap_err(), Panne::Interdit);
+    }
+
+    /// La lecture a son échéance : passée pendant le registre, la lecture manque et le dit ; passée pendant
+    /// l'historique, il s'arrête là et le dit, le registre gardé. Rien ne se demande plus après elle (la QA5 du lot
+    /// 13.2 : un serveur qui rendait des pages sans fin, ou qui ne répondait plus qu'en « : ping », tenait la lecture
+    /// des heures).
+    #[test]
+    fn la_lecture_a_son_echeance() {
+        // Un serveur qui rend une facture par page, une page par 60 ms, sans fin : l'échéance à 150 ms l'arrête.
+        let echeance = Instant::now() + Duration::from_millis(150);
+        let mut appels = 0;
+        let lu = lire_les_pages(
+            &mut |_: &str, a: Value| {
+                appels += 1;
+                std::thread::sleep(Duration::from_millis(60));
+                let avant = a["avant_id"].as_i64().unwrap();
+                let haut = if avant == 0 { 1_000_000 } else { avant };
+                Ok(json!({ "factures": [{ "id": haut - 1 }], "suivant": haut - 1 }).to_string())
+            },
+            PAGES,
+            Some(echeance),
+        );
+        assert_eq!(lu.unwrap_err(), Panne::Serveur(LECTURE_TROP_LONGUE.into()));
+        assert!(appels <= 5, "{appels} appels");
+        // Pendant l'historique : le registre lu reste ; l'historique s'arrête, et le dit.
+        let echeance = Instant::now() + Duration::from_millis(150);
+        let lu = lire_les_pages(
+            &mut |outil: &str, a: Value| {
+                if outil == compta::OUTIL_DU_REGISTRE {
+                    return Ok(PAGE_2.to_string());
+                }
+                std::thread::sleep(Duration::from_millis(60));
+                let avant = a["avant_id"].as_i64().unwrap();
+                let haut = if avant == 0 { 1_000_000 } else { avant };
+                let entree = json!({ "id": haut - 1, "quand": "2026-11-02T16:04:00Z" });
+                Ok(json!({ "changements": [entree], "suivant": haut - 1 }).to_string())
+            },
+            PAGES,
+            Some(echeance),
+        );
+        let r = lu.unwrap().registre;
+        assert_eq!((r.factures.len(), r.historique_tronque), (2, true));
+        assert!(r.historique.len() <= 5, "{} entrées", r.historique.len());
+        assert_eq!(
+            r.historique_erreur,
+            "Constructo AI a mis plus de cinq minutes à rendre la comptabilité : l'historique s'est arrêté là."
+        );
+    }
+
+    /// Un serveur sans les outils de la comptabilité n'est relu par les demandes ordinaires qu'une fois par heure — rien
+    /// ne les fera venir d'ici dix minutes, mais sa mise à jour les apportera (la QA5, passe 2 : il ne l'était plus de
+    /// la séance, et l'onglet disait « n'offre pas encore » après la mise à jour de l'ERP) — ; « Relire » essaie
+    /// encore, et une lecture qui réussit fait reprendre les dix minutes. Une panne ordinaire ne les ralentit pas ; une
+    /// nouvelle séance (une reconnexion) essaie de nouveau (la QA5 du lot 13.2).
+    #[test]
+    fn un_serveur_sans_les_outils_n_est_relu_qu_une_fois_par_heure() {
+        let t0 = Instant::now();
+        let s = |n: u64| t0 + Duration::from_secs(n);
+        let mut d = DemandesDeLaCompta::default();
+        d.vouloir(false, s(0), || true);
+        assert_eq!(d.partir(s(0), 1), Some(false));
+        d.finie(FinDeLecture::Absente, false, s(1));
+        for n in [600, 3_000, 3_594] {
+            d.vouloir(false, s(n), || true);
+            assert!(!d.voulue(), "{n} s");
+        }
+        // Une heure après le début de la lecture d'avant, à la marge près : la demande ordinaire part.
+        d.vouloir(false, s(3_595), || true);
+        assert_eq!(d.partir(s(3_595), 1), Some(false));
+        d.finie(FinDeLecture::Absente, false, s(3_596));
+        d.vouloir(false, s(4_300), || true);
+        assert!(!d.voulue(), "toujours sans les outils : l'heure d'après");
+        d.vouloir(true, s(4_301), || true);
+        assert_eq!(d.partir(s(4_301), 1), Some(true));
+        d.finie(FinDeLecture::Lue, true, s(4_302));
+        d.vouloir(false, s(4_901), || true);
+        assert!(d.voulue(), "lue : les demandes ordinaires reprennent");
+        let mut d = DemandesDeLaCompta::default();
+        d.vouloir(false, s(0), || true);
+        assert_eq!(d.partir(s(0), 1), Some(false));
+        d.finie(FinDeLecture::Manquee, false, s(1));
+        d.vouloir(false, s(600), || true);
+        assert!(d.voulue(), "une panne ordinaire : la suivante à dix minutes");
+        let mut d = DemandesDeLaCompta::default();
+        d.vouloir(false, s(0), || true);
+        assert_eq!(d.partir(s(0), 1), Some(false));
+        d.finie(FinDeLecture::Absente, false, s(1));
+        d.oublier();
+        d.vouloir(false, s(2), || true);
+        assert!(d.voulue(), "une nouvelle séance");
+    }
+
+    // ---- La comptabilité du chef (`LaCompta`) : ses gardes, une à une ------------------------------------------
+
+    /// Une connexion faite, son jeton prêt : l'émission `emis`, le tour `tour`.
+    fn reliee(emis: u64, tour: u64) -> EtatDeLaConnexion {
+        EtatDeLaConnexion { reliee: true, occupee: false, acces_valable: true, a_renouveler: false, emis, tour }
+    }
+
+    /// Les écritures de `registre.json` parmi ce que demande `LaCompta`.
+    fn ecrits(ordres: &[PourLaCompta]) -> Vec<&FichierDuRegistre> {
+        ordres
+            .iter()
+            .filter_map(|o| match o {
+                PourLaCompta::Ecrire(f) => Some(f),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Une lecture qui réussit, sans réseau : le petit registre.
+    fn lecture_d_essai() -> LectureDeLaCompta {
+        LectureDeLaCompta { registre: registre_d_essai(), ..LectureDeLaCompta::default() }
+    }
+
+    const HEURE: &str = "2026-11-02 14:05:09";
+
+    /// `LaCompta` menée jusqu'à une lecture qui part : une demande ordinaire, `registre.json` chargé (`f`), un
+    /// battement ; rend ce que demande le battement.
+    fn jusqu_a_la_lecture(
+        la: &mut LaCompta,
+        f: FichierDuRegistre,
+        c: &EtatDeLaConnexion,
+        t: Instant,
+    ) -> Vec<PourLaCompta> {
+        assert_eq!(la.demande(false, t, HEURE, c), vec![PourLaCompta::Charger { tour: c.tour }]);
+        assert_eq!(la.charge(f, c.tour, t, HEURE, c), vec![]);
+        la.battement(t, c)
+    }
+
+    /// Une lecture de l'entreprise A qui revient après une déconnexion, puis une connexion à B, est écartée : jamais la
+    /// comptabilité de A dans le `registre.json` de B ; celle de B reste en cours, une seule à la fois (la QA5 du lot
+    /// 13.2 : la garde du chef n'était essayée par rien).
+    #[test]
+    fn une_lecture_d_avant_la_deconnexion_est_ecartee() {
+        let t = Instant::now();
+        let mut la = LaCompta::default();
+        let a = reliee(1, 1);
+        let ordres = jusqu_a_la_lecture(&mut la, FichierDuRegistre::default(), &a, t);
+        assert!(ordres.contains(&PourLaCompta::Lire { tour: 1, emis: 1, relire: false }), "{ordres:?}");
+        la.sans_connexion(|| false);
+        let b = reliee(5, 2);
+        assert!(la.demande(false, t, HEURE, &b).is_empty(), "registre.json effacé : rien à charger");
+        assert!(la.battement(t, &b).contains(&PourLaCompta::Lire { tour: 2, emis: 5, relire: false }));
+        // La lecture de A revient : écartée.
+        let ordres = la.lue(1, 1, false, Duration::from_secs(3), Ok(lecture_d_essai()), t, "2026-11-02T14:05:12", &b);
+        assert!(ecrits(&ordres).is_empty(), "{ordres:?}");
+        assert_eq!(la.fichier.as_ref().map(|f| f.etat.as_str()), Some(EN_COURS));
+        let plus_tard = t + Duration::from_secs(60);
+        la.demande(true, plus_tard, HEURE, &b);
+        assert!(la.battement(plus_tard, &b).is_empty(), "celle de B se fait encore");
+        // Celle de B : prise.
+        let ordres = la.lue(2, 5, false, Duration::from_secs(3), Ok(lecture_d_essai()), t, "2026-11-02T14:05:12", &b);
+        assert_eq!(ecrits(&ordres).iter().map(|f| f.etat.as_str()).collect::<Vec<_>>(), [A_JOUR]);
+    }
+
+    /// La lecture ne part qu'avec un jeton prêt : jamais pendant un renouvellement, ni avec un jeton qui ne vaut plus
+    /// ou qui arrive à échéance ; dès qu'il l'est, elle part (la QA5 du lot 13.2 : la garde du chef n'était essayée
+    /// par rien).
+    #[test]
+    fn la_lecture_attend_un_jeton_pret() {
+        let t = Instant::now();
+        let mut la = LaCompta::default();
+        let pret = reliee(1, 1);
+        la.demande(false, t, HEURE, &pret);
+        la.charge(FichierDuRegistre::default(), 1, t, HEURE, &pret);
+        for (c, quoi) in [
+            (EtatDeLaConnexion { occupee: true, ..pret }, "un renouvellement en cours"),
+            (EtatDeLaConnexion { acces_valable: false, ..pret }, "un jeton qui ne vaut plus"),
+            (EtatDeLaConnexion { a_renouveler: true, ..pret }, "un jeton qui arrive à échéance"),
+        ] {
+            assert!(la.battement(t, &c).is_empty(), "{quoi}");
+        }
+        let ordres = la.battement(t, &pret);
+        assert!(ordres.contains(&PourLaCompta::Lire { tour: 1, emis: 1, relire: false }), "{ordres:?}");
+    }
+
+    /// Sans connexion, `registre.json` ne garde rien de l'entreprise : la déconnexion l'efface, un battement sans
+    /// connexion aussi s'il restait quelque chose ; un fichier qui ne dit déjà que cela ne se réécrit pas (la QA5 du
+    /// lot 13.2 : la garde du chef n'était essayée par rien).
+    #[test]
+    fn la_deconnexion_efface_la_compta() {
+        let t = Instant::now();
+        let c = reliee(1, 1);
+        let lue = |la: &mut LaCompta| {
+            jusqu_a_la_lecture(la, FichierDuRegistre::default(), &c, t);
+            la.lue(1, 1, false, Duration::from_secs(3), Ok(lecture_d_essai()), t, "2026-11-02T14:05:12", &c)
+        };
+        let effacer = vec![PourLaCompta::Ecrire(FichierDuRegistre::non_connecte())];
+        let mut la = LaCompta::default();
+        assert_eq!(ecrits(&lue(&mut la)).len(), 1);
+        assert_eq!(la.sans_connexion(|| panic!("le fichier est chargé : rien à demander au disque")), effacer);
+        assert!(la.sans_connexion(|| true).is_empty(), "déjà effacé : rien à réécrire");
+        assert!(la.battement(t, &EtatDeLaConnexion::default()).is_empty());
+        // Un battement sans connexion efface aussi ce qui restait.
+        let mut la = LaCompta::default();
+        lue(&mut la);
+        assert_eq!(la.battement(t, &EtatDeLaConnexion { reliee: false, ..c }), effacer);
+        assert!(la.battement(t, &EtatDeLaConnexion { reliee: false, ..c }).is_empty(), "une fois");
+        // Pas chargé : le disque en décide.
+        assert_eq!(LaCompta::default().sans_connexion(|| false), effacer);
+        assert!(LaCompta::default().sans_connexion(|| true).is_empty());
+    }
+
+    /// Un jeton refusé (un 401) fait renouveler celui de son émission, et la demande attend le suivant ; la lecture
+    /// d'avant reste, avec sa phrase. Pendant l'historique aussi (le registre lu, lui, reste). Une autre panne ne fait
+    /// rien renouveler (la QA5 du lot 13.2 : la garde du chef n'était essayée par rien).
+    #[test]
+    fn un_jeton_refuse_fait_renouveler() {
+        let t = Instant::now();
+        let c = reliee(7, 1);
+        let mut la = LaCompta::default();
+        jusqu_a_la_lecture(&mut la, FichierDuRegistre::lu(registre_d_essai(), "2026-11-02T13:00:00"), &c, t);
+        let ordres = la.lue(1, 7, false, Duration::from_secs(1), Err(Panne::Jeton), t, "2026-11-02T14:05:10", &c);
+        assert!(ordres.contains(&PourLaCompta::Renouveler { emis: 7 }), "{ordres:?}");
+        let f = ecrits(&ordres)[0];
+        assert_eq!((f.etat.as_str(), f.registre.is_some(), f.lu_le.as_str()), (ERREUR, true, "2026-11-02T13:00:00"));
+        assert_eq!(f.erreur, phrase_de_la_compta(&Panne::Jeton));
+        assert!(la.battement(t, &c).is_empty(), "pas avec le jeton refusé");
+        let suivant = reliee(8, 1);
+        assert!(la.battement(t, &suivant).contains(&PourLaCompta::Lire { tour: 1, emis: 8, relire: false }));
+        let pendant = LectureDeLaCompta { jeton_refuse: true, ..lecture_d_essai() };
+        let ordres = la.lue(1, 8, false, Duration::from_secs(1), Ok(pendant), t, "2026-11-02T14:05:12", &suivant);
+        assert!(ordres.contains(&PourLaCompta::Renouveler { emis: 8 }), "{ordres:?}");
+        assert_eq!(ecrits(&ordres)[0].etat, A_JOUR);
+        let mut la = LaCompta::default();
+        jusqu_a_la_lecture(&mut la, FichierDuRegistre::default(), &c, t);
+        let panne = Panne::Serveur("Constructo AI a répondu HTTP 500".into());
+        let ordres = la.lue(1, 7, false, Duration::from_secs(1), Err(panne), t, "2026-11-02T14:05:10", &c);
+        assert!(!ordres.iter().any(|o| matches!(o, PourLaCompta::Renouveler { .. })), "{ordres:?}");
+    }
+
+    /// Un refus d'accès — un 403, la lecture qu'un administrateur n'a pas ouverte à l'entreprise — n'en laisse rien :
+    /// ni la lecture d'avant, ni son heure, à l'écran comme dans `registre.json`, que lit Claude. Une panne ordinaire
+    /// garde la lecture d'avant (la QA5 du lot 13.2).
+    #[test]
+    fn un_refus_d_acces_ne_garde_rien() {
+        let t = Instant::now();
+        let c = reliee(1, 1);
+        let avant = || FichierDuRegistre::lu(registre_d_essai(), "2026-11-02T13:00:00");
+        let profil = "comptabilite_lister_registre : L'outil « comptabilite_lister_registre » n'est pas activé pour \
+                      votre entreprise. Un administrateur peut l'ajouter depuis Configuration \u{2192} MCP.";
+        for panne in [Panne::Interdit, Panne::Outil(profil.into())] {
+            let mut la = LaCompta::default();
+            jusqu_a_la_lecture(&mut la, avant(), &c, t);
+            let attendu = FichierDuRegistre::refusee(&phrase_de_la_compta(&panne));
+            assert_eq!((attendu.etat.as_str(), attendu.registre.is_none(), attendu.lu_le.as_str()), (ERREUR, true, ""));
+            let ordres = la.lue(1, 1, false, Duration::from_secs(1), Err(panne), t, "2026-11-02T14:05:10", &c);
+            assert_eq!(ecrits(&ordres), vec![&attendu]);
+        }
+        let mut la = LaCompta::default();
+        jusqu_a_la_lecture(&mut la, avant(), &c, t);
+        let panne = Panne::Serveur("Constructo AI ne répond pas (HTTP 503)".into());
+        let ordres = la.lue(1, 1, false, Duration::from_secs(1), Err(panne), t, "2026-11-02T14:05:10", &c);
+        let f = ecrits(&ordres)[0];
+        assert_eq!((f.etat.as_str(), f.registre.is_some(), f.lu_le.as_str()), (ERREUR, true, "2026-11-02T13:00:00"));
+    }
+
+    /// Un serveur sans les outils de la comptabilité : l'onglet qui redemande toutes les deux minutes ne fait rien
+    /// partir avant l'heure ; « Relire » essaie encore (la QA5 du lot 13.2) ; une heure après la dernière lecture, une
+    /// demande ordinaire repart — la mise à jour de l'ERP a pu les apporter (la QA5, passe 2 : plus jamais de la
+    /// séance).
+    #[test]
+    fn sans_les_outils_une_lecture_ordinaire_par_heure() {
+        let t = Instant::now();
+        let s = |n: u64| t + Duration::from_secs(n);
+        let c = reliee(1, 1);
+        let mut la = LaCompta::default();
+        jusqu_a_la_lecture(&mut la, FichierDuRegistre::default(), &c, t);
+        let inconnu = || Panne::Inconnu(compta::OUTIL_DU_REGISTRE.into());
+        let ordres = la.lue(1, 1, false, Duration::from_secs(1), Err(inconnu()), s(1), "2026-11-02T14:05:10", &c);
+        assert_eq!(ecrits(&ordres)[0].erreur, COMPTA_PAS_ENCORE);
+        for n in (120..=480).step_by(120) {
+            la.demande(false, s(n), HEURE, &c);
+            assert!(la.battement(s(n), &c).is_empty(), "{n} s");
+        }
+        la.demande(true, s(601), HEURE, &c);
+        assert!(la.battement(s(601), &c).contains(&PourLaCompta::Lire { tour: 1, emis: 1, relire: true }));
+        la.lue(1, 1, true, Duration::from_secs(1), Err(inconnu()), s(602), "2026-11-02T14:15:10", &c);
+        for n in (721..=4_081).step_by(120) {
+            la.demande(false, s(n), HEURE, &c);
+            assert!(la.battement(s(n), &c).is_empty(), "{n} s");
+        }
+        la.demande(false, s(4_201), HEURE, &c);
+        assert!(la.battement(s(4_201), &c).contains(&PourLaCompta::Lire { tour: 1, emis: 1, relire: false }));
+    }
+
+    /// `registre.json` se charge dans un fil, une fois, à la première demande — vingt mille factures, un dixième de
+    /// seconde que le chef ne passe pas à attendre (la QA5 du lot 13.2) ; la demande l'attend, puis se fait ; un
+    /// chargement d'avant une déconnexion est écarté.
+    #[test]
+    fn le_registre_se_charge_hors_du_chef() {
+        let t = Instant::now();
+        let c = reliee(1, 1);
+        let mut la = LaCompta::default();
+        assert_eq!(la.demande(false, t, HEURE, &c), vec![PourLaCompta::Charger { tour: 1 }]);
+        assert!(la.demande(true, t, HEURE, &c).is_empty(), "un seul chargement");
+        assert!(la.battement(t, &c).is_empty(), "pas avant le fichier");
+        // Chargé : la demande qui l'attendait se fait — « Relire », la plus forte des deux.
+        let frais = FichierDuRegistre::lu(registre_d_essai(), "2026-11-02T14:04:00");
+        assert!(la.charge(frais.clone(), 1, t, HEURE, &c).is_empty());
+        assert!(la.battement(t, &c).contains(&PourLaCompta::Lire { tour: 1, emis: 1, relire: true }));
+        // Une demande ordinaire seule, sur un fichier lu il y a une minute : rien.
+        let mut la = LaCompta::default();
+        la.demande(false, t, HEURE, &c);
+        la.charge(frais.clone(), 1, t, HEURE, &c);
+        assert!(la.battement(t, &c).is_empty());
+        // Un chargement qui revient après une déconnexion : écarté ; le fichier reste effacé.
+        let mut la = LaCompta::default();
+        la.demande(false, t, HEURE, &c);
+        la.sans_connexion(|| false);
+        assert!(ecrits(&la.charge(frais, 1, t, HEURE, &c)).is_empty());
+        assert_eq!(la.fichier, Some(FichierDuRegistre::non_connecte()));
+    }
+
+    // ---- Les essais qui manquaient à la lecture (la QA5 du lot 13.2, mutation, passe 1) ----------------------------
+    //
+    // Écrits par la QA contre la lecture du plus ancien au plus récent : ceux du registre redonnent ici leurs pages des
+    // plus récentes aux plus anciennes (`avant_id`), comme le lit Eve maintenant ; ce qu'ils jugent reste le même.
+
+    /// Une lecture sur un serveur inventé : la page du registre avant `avant_id` (des plus récentes aux plus
+    /// anciennes), celle de l'historique avant `avant_id` ; et combien d'appels à chaque outil.
+    fn lire_un_serveur(
+        mut registre: impl FnMut(i64) -> Value,
+        mut historique: impl FnMut(i64) -> Value,
+    ) -> (LectureDeLaCompta, usize, usize) {
+        let (mut nr, mut nh) = (0, 0);
+        let l = lire_les_pages(
+            &mut |outil: &str, a: Value| {
+                if outil == compta::OUTIL_DU_REGISTRE {
+                    nr += 1;
+                    assert_eq!(a["recentes_d_abord"], json!(true));
+                    Ok(registre(a["avant_id"].as_i64().unwrap()).to_string())
+                } else {
+                    nh += 1;
+                    Ok(historique(a["avant_id"].as_i64().unwrap()).to_string())
+                }
+            },
+            PAGES,
+            None,
+        )
+        .unwrap();
+        (l, nr, nh)
+    }
+
+    fn un_registre(_: i64) -> Value {
+        json!({ "factures": [{ "id": 1 }], "suivant": null, "total": 1 })
+    }
+
+    fn aucun_historique(_: i64) -> Value {
+        json!({ "changements": [], "suivant": null })
+    }
+
+    /// Une entrée d'historique que redonne la page suivante s'écarte (le mutant 509 la gardait) ; un `suivant` qui ne
+    /// recule pas arrête l'historique, tronqué, la page comptée illisible (le mutant 510 le suivait).
+    #[test]
+    fn une_entree_redonnee_et_un_suivant_qui_ne_recule_pas() {
+        let (l, _, _) = lire_un_serveur(un_registre, |avant| {
+            if avant == 0 {
+                json!({ "changements": [{ "id": 10 }, { "id": 9 }], "suivant": 9 })
+            } else {
+                json!({ "changements": [{ "id": 9 }, { "id": 8 }], "suivant": null })
+            }
+        });
+        assert_eq!(l.registre.historique.iter().map(|c| c.id).collect::<Vec<_>>(), [10, 9, 8]);
+        let (l, _, nh) = lire_un_serveur(un_registre, |avant| {
+            if avant == 0 {
+                json!({ "changements": [{ "id": 10 }, { "id": 9 }], "suivant": 9 })
+            } else {
+                json!({ "changements": [{ "id": 8 }], "suivant": 9 })
+            }
+        });
+        assert_eq!((nh, l.registre.historique_tronque, l.pages_illisibles), (2, true, 1));
+    }
+
+    /// Vingt pages d'historique au plus (le mutant 511 en lisait vingt et une).
+    #[test]
+    fn vingt_pages_d_historique_au_plus() {
+        let (l, _, nh) = lire_un_serveur(un_registre, |avant| {
+            let haut = if avant == 0 { 1_000 } else { avant };
+            json!({ "changements": [{ "id": haut - 1 }], "suivant": haut - 1 })
+        });
+        assert_eq!((nh, l.registre.historique_tronque), (20, true));
+    }
+
+    /// Juste à la borne, par pages du serveur : mille entrées en deux pages, la dernière sans `suivant`, ne sont pas
+    /// tronquées (le mutant 512 le disait toujours) ; vingt mille factures en vingt pages pleines, d'autres après : la
+    /// vingt et unième n'est pas demandée (le mutant 502 la demandait) ; mille entrées, d'autres après : tronqué, sans
+    /// troisième page (le mutant 513 la demandait).
+    #[test]
+    fn juste_a_la_borne_par_pages_du_serveur() {
+        let (l, _, nh) = lire_un_serveur(un_registre, |avant| {
+            let haut = if avant == 0 { 2_000 } else { avant };
+            let lignes: Vec<Value> = (1..=500).map(|k| json!({ "id": haut - k })).collect();
+            let suivant = if avant == 0 { json!(haut - 500) } else { Value::Null };
+            json!({ "changements": lignes, "suivant": suivant })
+        });
+        assert_eq!((l.registre.historique.len(), l.registre.historique_tronque, nh), (1_000, false, 2));
+        let (l, nr, _) = lire_un_serveur(
+            |avant| {
+                let haut = if avant == 0 { 30_001 } else { avant };
+                let lignes: Vec<Value> = (1..=1_000).map(|k| json!({ "id": haut - k })).collect();
+                json!({ "factures": lignes, "suivant": haut - 1_000, "total": 30_000 })
+            },
+            aucun_historique,
+        );
+        assert_eq!((l.registre.factures.len(), l.registre.tronque, nr), (compta::FACTURES_MAX, true, 20));
+        let (l, _, nh) = lire_un_serveur(un_registre, |avant| {
+            let haut = if avant == 0 { 5_000 } else { avant };
+            let lignes: Vec<Value> = (1..=500).map(|k| json!({ "id": haut - k })).collect();
+            json!({ "changements": lignes, "suivant": haut - 500 })
+        });
+        assert_eq!((l.registre.historique.len(), l.registre.historique_tronque, nh), (1_000, true, 2));
+    }
+
+    /// Un serveur qui ne dit pas son `total` : les factures lues le disent (le mutant 518 disait zéro) ; un `suivant`
+    /// écrit en texte se lit (le mutant 543 arrêtait la liste).
+    #[test]
+    fn un_serveur_sans_total_et_un_suivant_ecrit_en_texte() {
+        let (l, nr, _) = lire_un_serveur(
+            |avant| {
+                if avant == 0 {
+                    json!({ "factures": [{ "id": 3 }, { "id": 2 }], "suivant": "2" })
+                } else {
+                    json!({ "factures": [{ "id": 1 }], "suivant": null })
+                }
+            },
+            aucun_historique,
+        );
+        assert_eq!((nr, l.registre.factures.len(), l.registre.tronque, l.registre.au_serveur), (2, 3, false, 3));
+    }
+
+    /// « Relire » en début de séance part, `registre.json` frais ou non (le mutant 528 attendait) ; deux demandes qui
+    /// attendent se rejoignent — la plus proche, et « Relire » si l'une l'est (le mutant 529 gardait la seconde).
+    #[test]
+    fn relire_en_debut_de_seance_et_deux_demandes() {
+        let t0 = Instant::now();
+        let s = |n: u64| t0 + Duration::from_secs(n);
+        let mut d = DemandesDeLaCompta::default();
+        d.vouloir(true, s(0), || false);
+        assert_eq!(d.partir(s(0), 1), Some(true));
+        let mut d = DemandesDeLaCompta::default();
+        d.vouloir(false, s(0), || true);
+        assert_eq!(d.partir(s(0), 1), Some(false));
+        d.finie(FinDeLecture::Lue, false, s(1));
+        d.vouloir(false, s(600), || panic!("la séance a sa lecture"));
+        d.vouloir(true, s(601), || panic!("la séance a sa lecture"));
+        assert_eq!(d.partir(s(600), 1), Some(true));
+    }
+
+    /// Une panne qui finit par un point n'en prend pas un second (le mutant 552 en ajoutait toujours un).
+    #[test]
+    fn une_panne_qui_finit_par_un_point_n_en_prend_pas_deux() {
+        let p = Panne::Serveur("Constructo AI ne répond pas.".into());
+        assert_eq!(phrase_de_la_compta(&p), "Constructo AI ne répond pas.");
+        assert_eq!(phrase_de_l_historique(&p), "L'historique s'est arrêté avant sa fin — Constructo AI ne répond pas.");
+    }
+
+    /// Un gros `registre.json` (plus de 4 Kio : une lecture de l'entreprise) est à effacer à la déconnexion, sans le
+    /// lire en entier (le mutant 562 le laissait).
+    #[test]
+    fn un_gros_registre_json_est_a_effacer() {
+        let dossier = std::env::temp_dir().join(format!("eve-qa-gros-registre-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dossier);
+        fs::create_dir_all(&dossier).unwrap();
+        let factures = (1..=50)
+            .map(|k| compta::Facture {
+                id: k,
+                numero: format!("FACT-2026-{k:05}"),
+                tiers: "Habitations Exemple".into(),
+                ..compta::Facture::default()
+            })
+            .collect();
+        let registre = compta::Registre { factures, ..compta::Registre::default() };
+        FichierDuRegistre::lu(registre, "2026-11-02T14:05:09").ecrire(&dossier).unwrap();
+        assert!(fs::metadata(dossier.join(compta::FICHIER)).unwrap().len() > 4096);
+        assert!(!FichierDuRegistre::rien_a_effacer(&dossier));
+        let _ = fs::remove_dir_all(&dossier);
+    }
+
+    /// La comptabilité de bout en bout sur le faux Constructo AI (jamais le vrai) : la session, le registre de la
+    /// vitrine lu par pages (de 25 et de 15 : plusieurs, comme une grande entreprise en pages de 1000 et de 500),
+    /// chaque facture telle quelle, des montants vérifiés au cent ; puis `registre.json` écrit comme le chef l'écrit,
+    /// et relu par le fil du centre, pour l'onglet.
+    #[test]
+    fn la_compta_de_bout_en_bout_sur_le_faux_serveur() {
+        let faux = crate::essais::FauxConstructo::demarrer(0, 3600, 0).unwrap();
+        let (jeton, lien) = jeton_du_faux(&faux, "compta");
+        let attendu = compta::vitrine::registre(&crate::journal::date());
+        let pages = Pages { registre: 25, historique: 15 };
+        let l = lire_la_compta(&lien.ressource(), &jeton, pages, COMPTA_DUREE_MAX).unwrap();
+        let r = &l.registre;
+        let n = attendu.factures.len();
+        assert!(n > 100, "la vitrine a-t-elle changé ? {n} factures");
+        assert_eq!((l.pages, l.pages_de_l_historique), (n.div_ceil(25), 3), "40 entrées en pages de 15");
+        assert_eq!((r.factures.len(), r.au_serveur, r.tronque, l.lignes_ecartees), (n, n as u64, false, 0));
+        let journal = faux.journal();
+        let appels =
+            |o: &str| journal.iter().filter(|x| x.contains(&format!("mcp tools/call {o} (jeton courant)"))).count();
+        assert_eq!((appels(compta::OUTIL_DU_REGISTRE), appels(compta::OUTIL_DE_L_HISTORIQUE)), (l.pages, 3));
+        assert_eq!(faux.sessions(), 0, "la session est fermée");
+        assert!(!journal.join("\n").contains(&jeton), "jamais un jeton au journal du serveur");
+        // Chaque facture, champ par champ, telle que la vitrine l'a inventée.
+        assert_eq!(r.factures, attendu.factures);
+        // Trois d'entre elles, leurs montants calculés à la main : 423,50 $ + 21,18 $ (21,175 : la demie loin de zéro)
+        // + 42,24 $ (42,244125) = 486,92 $.
+        let tiers = |t: &str| r.factures.iter().find(|f| f.tiers == t).unwrap();
+        let f = tiers("Bureau en Gros Fictif");
+        assert_eq!(
+            (f.cote, f.statut.as_str(), f.projet_id, f.section.clone()),
+            (compta::Cote::Fournisseur, "ENVOYEE", None, None)
+        );
+        assert_eq!(
+            (f.sous_total, f.tps, f.tvq, f.total, f.paye, f.solde),
+            (Some(42_350), Some(2_118), Some(4_224), Some(48_692), Some(0), Some(48_692))
+        );
+        assert_eq!(compta::argent(f.total.unwrap()), "486,92\u{a0}$");
+        // La note de crédit, stockée positive : 4 500,00 $ + 225,00 $ + 448,88 $ (448,875) = 5 173,88 $.
+        let a = r.factures.iter().find(|f| f.est_avoir()).unwrap();
+        assert_eq!((a.sous_total, a.tps, a.tvq, a.total), (Some(450_000), Some(22_500), Some(44_888), Some(517_388)));
+        // La facture sans total : `null` au serveur, absente ici — jamais zéro.
+        let q = tiers("Quincaillerie Modèle");
+        assert_eq!((q.sous_total, q.total, q.tps), (None, None, Some(0)));
+        // L'historique : le plus récent d'abord (le plus grand id), entier.
+        let mut h = attendu.historique.clone();
+        h.sort_by(|x, y| y.id.cmp(&x.id));
+        assert_eq!(r.historique, h);
+        assert!(!r.historique_tronque && !r.historique_absent);
+
+        // registre.json, comme le chef l'écrit ; le fil du centre le relit pour l'onglet.
+        let dossier = std::env::temp_dir().join(format!("eve-compta-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dossier);
+        fs::create_dir_all(&dossier).unwrap();
+        FichierDuRegistre::lu(l.registre.clone(), "2026-11-02T14:05:09").ecrire(&dossier).unwrap();
+        let ecrit: compta::Lecture = serde_json::from_slice(&fs::read(dossier.join(compta::FICHIER)).unwrap()).unwrap();
+        assert_eq!(
+            (ecrit.etat.as_str(), ecrit.lu_le.as_str(), ecrit.erreur.as_str()),
+            (A_JOUR, "2026-11-02T14:05:09", "")
+        );
+        assert_eq!(ecrit.registre.as_ref(), Some(&l.registre));
+        let c = crate::centre::Centre::avec_journal(None, Some(dossier.clone()), eframe::egui::Context::default());
+        let debut = Instant::now();
+        while c.registre().is_none() && debut.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let vu = c.registre().expect("le centre relit registre.json");
+        assert_eq!(vu.lu_le, "2026-11-02T14:05:09");
+        assert_eq!(vu.registre.as_ref().map(|r| r.factures.len()), Some(n));
+        drop(c);
+        let _ = fs::remove_dir_all(&dossier);
+        let _ = fs::remove_file(&lien.fichier);
+    }
+
+    /// Un serveur d'avant la comptabilité (le vrai, tant que l'ERP n'est pas mis à jour) : FastMCP rend « Unknown
+    /// tool » en résultat d'erreur, la spécification en erreur JSON-RPC — dans les deux cas, un seul appel, puis la
+    /// phrase, mot pour mot ; la session fermée ; et l'entreprise s'y lit comme avant. Un outil de la comptabilité en
+    /// panne, un jeton refusé : une lecture manquée, dite.
+    #[test]
+    fn un_serveur_d_avant_la_compta_le_dit_en_une_phrase() {
+        for en_jsonrpc in [false, true] {
+            let faux = crate::essais::FauxConstructo::demarrer(0, 3600, 0).unwrap();
+            let (jeton, lien) = jeton_du_faux(&faux, if en_jsonrpc { "avant-rpc" } else { "avant" });
+            faux.sans_la_compta(en_jsonrpc);
+            let p = lire_la_compta(&lien.ressource(), &jeton, PAGES, COMPTA_DUREE_MAX).unwrap_err();
+            assert_eq!(p, Panne::Inconnu(compta::OUTIL_DU_REGISTRE.into()), "en JSON-RPC : {en_jsonrpc}");
+            assert_eq!(
+                phrase_de_la_compta(&p),
+                "Constructo AI n'offre pas encore la lecture de la comptabilité : elle viendra avec sa prochaine \
+                 mise à jour."
+            );
+            let journal = faux.journal();
+            assert_eq!(journal.iter().filter(|x| x.contains("tools/call comptabilite_")).count(), 1, "{journal:?}");
+            assert_eq!(faux.sessions(), 0, "la session est fermée");
+            let e = lire(&lien.ressource(), &jeton, &crate::journal::date(), false).unwrap();
+            assert!(e.manques.is_empty(), "{:?}", e.manques);
+            let _ = fs::remove_file(&lien.fichier);
+        }
+        // L'historique en panne : le registre lu reste, l'historique dit sa panne (la QA5 du lot 13.2 : la lecture
+        // entière manquait). Le registre en panne : la lecture manque.
+        let faux = crate::essais::FauxConstructo::demarrer(0, 3600, 0).unwrap();
+        let (jeton, lien) = jeton_du_faux(&faux, "historique-en-panne");
+        faux.faire_echouer(compta::OUTIL_DE_L_HISTORIQUE);
+        let l = lire_la_compta(&lien.ressource(), &jeton, PAGES, COMPTA_DUREE_MAX).unwrap();
+        let n = compta::vitrine::registre(&crate::journal::date()).factures.len();
+        assert_eq!(
+            (l.registre.factures.len(), l.registre.historique.len(), l.registre.historique_tronque),
+            (n, 0, true)
+        );
+        assert_eq!(
+            l.registre.historique_erreur,
+            "Constructo AI n'a pas pu lire l'historique : « Erreur lors de la lecture (voir logs serveur) »."
+        );
+        faux.faire_echouer(compta::OUTIL_DU_REGISTRE);
+        let p = lire_la_compta(&lien.ressource(), &jeton, PAGES, COMPTA_DUREE_MAX).unwrap_err();
+        assert_eq!(
+            phrase_de_la_compta(&p),
+            "Constructo AI n'a pas pu lire la comptabilité : « Erreur lors de la lecture (voir logs serveur) »."
+        );
+        let p = lire_la_compta(&lien.ressource(), "eyJ.inconnu.sig", PAGES, COMPTA_DUREE_MAX).unwrap_err();
+        assert_eq!(p, Panne::Jeton);
+        let _ = fs::remove_file(&lien.fichier);
+    }
+
+    /// Un serveur qui refuse l'accès lui-même (un 403, à toute requête) : la lecture de la comptabilité manque d'un
+    /// refus ([`Panne::Interdit`] : rien ne reste de l'entreprise, la QA5 du lot 13.2) ; celle de l'entreprise le dit
+    /// comme avant.
+    #[test]
+    fn un_403_refuse_l_acces() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let ecoute = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = ecoute.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut flux in ecoute.incoming().flatten() {
+                // La demande entière (ses en-têtes, puis son corps), puis le refus.
+                let Ok(copie) = flux.try_clone() else { continue };
+                let mut lecteur = BufReader::new(copie);
+                let (mut ligne, mut longueur) = (String::new(), 0usize);
+                loop {
+                    ligne.clear();
+                    match lecteur.read_line(&mut ligne) {
+                        Ok(n) if n > 0 && !ligne.trim().is_empty() => {
+                            if let Some((nom, valeur)) = ligne.split_once(':')
+                                && nom.trim().eq_ignore_ascii_case("content-length")
+                            {
+                                longueur = valeur.trim().parse().unwrap_or(0);
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+                let mut corps = vec![0u8; longueur];
+                let _ = lecteur.read_exact(&mut corps);
+                let _ = flux.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            }
+        });
+        let ressource = format!("http://127.0.0.1:{port}/mcp");
+        let p = lire_la_compta(&ressource, "jeton", PAGES, Duration::from_secs(10)).unwrap_err();
+        assert_eq!(p, Panne::Interdit);
+        assert!(refus_d_autorisation(&p));
+        assert_eq!(phrase_de_la_compta(&p), "Constructo AI refuse l'accès à ces lectures (HTTP 403).");
+        let p = lire(&ressource, "jeton", "2026-11-02", false).unwrap_err();
+        assert_eq!(p.texte(), "Constructo AI refuse l'accès à ces lectures (HTTP 403)");
+    }
+
+    /// Un connecteur qui ne répond pas, endormi vingt secondes, bien plus que l'échéance de la lecture (1,5 s) : elle
+    /// s'arrête à son échéance et le dit, au lieu d'attendre le délai de chaque requête (la QA5 du lot 13.2). Une
+    /// marge large : ce qui précède l'envoi (le proxy du poste, la connexion) n'est borné que par attente, et prend
+    /// parfois des secondes quand tous les essais tournent ensemble (jusqu'à 6 s mesurées, sous la charge).
+    #[test]
+    fn une_lecture_trop_longue_s_arrete_sur_le_faux_serveur() {
+        let faux = crate::essais::FauxConstructo::demarrer(0, 3600, 0).unwrap();
+        let (jeton, lien) = jeton_du_faux(&faux, "trop-longue");
+        faux.endormir(20);
+        let debut = Instant::now();
+        let p = lire_la_compta(&lien.ressource(), &jeton, PAGES, Duration::from_millis(1500)).unwrap_err();
+        let duree = debut.elapsed();
+        assert_eq!(p, Panne::Serveur(LECTURE_TROP_LONGUE.into()));
+        assert!(duree < Duration::from_secs(10), "l'échéance est à 1,5 s, la lecture a pris {duree:?}");
+        let _ = fs::remove_file(&lien.fichier);
+    }
+
+    /// La mesure d'une grande entreprise : vingt mille factures et mille entrées, `registre.json` écrit comme le chef
+    /// l'écrit sur son fil (deux fois par lecture : `en_cours`, puis `a_jour`), et relu comme le fil du centre le
+    /// relit. Rien n'y est jugé : `cargo test --release --bin eve mesure_d_un_grand_registre -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn mesure_d_un_grand_registre() {
+        let base = compta::vitrine::registre("2026-11-02");
+        let factures: Vec<compta::Facture> = base
+            .factures
+            .iter()
+            .cycle()
+            .take(compta::FACTURES_MAX)
+            .enumerate()
+            .map(|(k, f)| compta::Facture { id: k as i64 + 1, ..f.clone() })
+            .collect();
+        let historique = base.historique.iter().cycle().take(compta::CHANGEMENTS_MAX).cloned().collect();
+        let r = compta::Registre { factures, historique, au_serveur: 20_000, ..compta::Registre::default() };
+        let dossier = std::env::temp_dir().join(format!("eve-mesure-registre-{}", std::process::id()));
+        fs::create_dir_all(&dossier).unwrap();
+        let lu = FichierDuRegistre::lu(r, "2026-11-02T14:05:09");
+        let t = Instant::now();
+        lu.en_cours().ecrire(&dossier).unwrap();
+        let en_cours = t.elapsed();
+        let t = Instant::now();
+        lu.ecrire(&dossier).unwrap();
+        let a_jour = t.elapsed();
+        let chemin = dossier.join(compta::FICHIER);
+        let taille = fs::metadata(&chemin).unwrap().len();
+        let t = Instant::now();
+        let relu = crate::centre::lire_le_registre(&chemin).unwrap();
+        let relire = t.elapsed();
+        assert_eq!(relu.registre.map(|r| r.factures.len()), Some(compta::FACTURES_MAX));
+        eprintln!(
+            "registre.json, 20 000 factures et 1 000 entrées : {taille} octets ; écrit en {en_cours:?} (en cours) et \
+             en {a_jour:?} (à jour) ; relu en {relire:?}"
+        );
+        let _ = fs::remove_dir_all(&dossier);
+    }
+}
+
+/// QA5 du lot 13.2, passe 2 (mutation) : les essais qui manquaient à la lecture. Chacun passe sur le code d'aujourd'hui
+/// et rougit sous le mutant de son nom.
+#[cfg(test)]
+mod manques_qa2 {
+    use super::*;
+
+    /// Une lecture sur un serveur inventé (le registre, puis un historique vide).
+    fn lire_le_registre(registre: impl Fn(i64) -> Value) -> LectureDeLaCompta {
+        lire_les_pages(
+            &mut |outil: &str, a: Value| {
+                if outil == compta::OUTIL_DU_REGISTRE {
+                    Ok(registre(a["avant_id"].as_i64().unwrap()).to_string())
+                } else {
+                    Ok(json!({ "changements": [], "suivant": null }).to_string())
+                }
+            },
+            PAGES,
+            None,
+        )
+        .unwrap()
+    }
+
+    /// Une dernière page qui dépasse la borne se dit tronquée, même sans `suivant` : vingt et un mille factures
+    /// lues, vingt mille gardées (mutant 406 : elle se disait entière).
+    #[test]
+    fn manque_406_une_derniere_page_qui_depasse_la_borne() {
+        let pages_de_3000 = |fin_a_la_septieme: bool| {
+            move |avant: i64| {
+                let haut = if avant == 0 { 30_001 } else { avant };
+                let lignes: Vec<Value> = (1..=3_000).rev().map(|k| json!({ "id": haut - k })).collect();
+                let derniere = fin_a_la_septieme && haut == 12_001;
+                let suivant = if derniere { Value::Null } else { json!(haut - 3_000) };
+                json!({ "factures": lignes, "suivant": suivant, "total": 21_000 })
+            }
+        };
+        let l = lire_le_registre(pages_de_3000(true));
+        assert_eq!((l.pages, l.registre.factures.len(), l.registre.tronque), (7, 20_000, true));
+    }
+
+    const HEURE: &str = "2026-11-02 14:05:09";
+
+    fn reliee(emis: u64, tour: u64) -> EtatDeLaConnexion {
+        EtatDeLaConnexion { reliee: true, occupee: false, acces_valable: true, a_renouveler: false, emis, tour }
+    }
+
+    fn une_lecture() -> LectureDeLaCompta {
+        let f = compta::Facture { id: 1, ..compta::Facture::default() };
+        LectureDeLaCompta {
+            registre: compta::Registre { factures: vec![f], ..compta::Registre::default() },
+            ..LectureDeLaCompta::default()
+        }
+    }
+
+    /// Une lecture qui revient quand Eve n'est plus reliée (l'espace de Constructo AI quitté, sans déconnexion : le
+    /// même tour) est écartée : rien de l'entreprise dans `registre.json` (mutant 506).
+    #[test]
+    fn manque_506_une_lecture_revenue_hors_connexion_est_ecartee() {
+        let t = Instant::now();
+        let c = reliee(1, 1);
+        let mut la = LaCompta::default();
+        la.demande(false, t, HEURE, &c);
+        la.charge(FichierDuRegistre::default(), 1, t, HEURE, &c);
+        assert!(la.battement(t, &c).contains(&PourLaCompta::Lire { tour: 1, emis: 1, relire: false }));
+        let hors = EtatDeLaConnexion { reliee: false, ..c };
+        let ordres = la.lue(1, 1, false, Duration::from_secs(1), Ok(une_lecture()), t, "2026-11-02T14:05:12", &hors);
+        assert!(!ordres.iter().any(|o| matches!(o, PourLaCompta::Ecrire(_))), "{ordres:?}");
+    }
+
+    /// La connexion perdue pendant que `registre.json` se charge : le battement oublie le chargement et la demande, et
+    /// le dit au fichier ; le chargement qui revient ensuite est écarté (mutant 513 : il était pris).
+    #[test]
+    fn manque_513_la_connexion_perdue_pendant_le_chargement() {
+        let t = Instant::now();
+        let c = reliee(1, 1);
+        let mut la = LaCompta::default();
+        assert_eq!(la.demande(true, t, HEURE, &c), vec![PourLaCompta::Charger { tour: 1 }]);
+        let hors = EtatDeLaConnexion { reliee: false, ..c };
+        assert_eq!(la.battement(t, &hors), vec![PourLaCompta::Ecrire(FichierDuRegistre::non_connecte())]);
+        let lu = FichierDuRegistre::lu(compta::Registre::default(), "2026-11-02T14:00:00");
+        let ordres = la.charge(lu, 1, t, HEURE, &c);
+        assert!(matches!(ordres.as_slice(), [PourLaCompta::Noter(_)]), "{ordres:?}");
+        assert_eq!(la.fichier, Some(FichierDuRegistre::non_connecte()));
+    }
+
+    /// `registre.json` chargé quand Eve n'est plus reliée : la demande qui l'attendait ne part pas (mutant 518) ; une
+    /// demande sans connexion ne charge rien (mutant 521).
+    #[test]
+    fn manque_518_521_rien_ne_part_hors_connexion() {
+        let t = Instant::now();
+        let c = reliee(1, 1);
+        let hors = EtatDeLaConnexion { reliee: false, ..c };
+        assert!(LaCompta::default().demande(true, t, HEURE, &hors).is_empty());
+        let mut la = LaCompta::default();
+        la.demande(true, t, HEURE, &c);
+        la.charge(FichierDuRegistre::default(), 1, t, HEURE, &hors);
+        assert!(!la.demandes.voulue());
+    }
+
+    /// Un « Relire » qui attend le chargement de `registre.json` le reste, même suivi d'une demande ordinaire (mutant
+    /// 519 : la demande ordinaire l'effaçait, et un fichier frais ne se relisait pas).
+    #[test]
+    fn manque_519_relire_attend_le_chargement() {
+        let t = Instant::now();
+        let c = reliee(1, 1);
+        let mut la = LaCompta::default();
+        assert_eq!(la.demande(true, t, HEURE, &c), vec![PourLaCompta::Charger { tour: 1 }]);
+        assert!(la.demande(false, t, HEURE, &c).is_empty());
+        let frais = FichierDuRegistre::lu(compta::Registre::default(), "2026-11-02T14:04:00");
+        la.charge(frais, 1, t, HEURE, &c);
+        assert!(la.battement(t, &c).contains(&PourLaCompta::Lire { tour: 1, emis: 1, relire: true }));
+    }
+
+    /// Un chargement demandé sous un autre tour de connexion est écarté, même sans déconnexion vue entre-temps (mutant
+    /// 516).
+    #[test]
+    fn manque_516_un_chargement_d_un_autre_tour() {
+        let t = Instant::now();
+        let mut la = LaCompta::default();
+        la.demande(false, t, HEURE, &reliee(1, 1));
+        let ordres = la.charge(FichierDuRegistre::default(), 1, t, HEURE, &reliee(1, 2));
+        assert!(matches!(ordres.as_slice(), [PourLaCompta::Noter(_)]), "{ordres:?}");
+        assert!(la.fichier.is_none());
     }
 }

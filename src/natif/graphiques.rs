@@ -79,7 +79,45 @@ pub(crate) struct Graphique {
     pub(crate) unite: String,
     pub(crate) souligne: Option<usize>,
     pub(crate) autres: bool,
+    pub(crate) precisions: Precisions,
 }
+
+/// Ce que précise un graphique fait par le code plutôt que lu d'une carte (le tableau de bord de la comptabilité, le
+/// lot 13.2) ; rien d'office.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Precisions {
+    /// Des montants en centimes : chaque valeur se dit au cent par `compta::argent` (la bulle, la vue en tableau) et en
+    /// bref par `compta::compact` (les axes, les valeurs écrites, le centre d'un anneau), jamais d'après un nombre à
+    /// virgule arrondi ; le flottant ne sert qu'aux longueurs.
+    pub(crate) centimes: bool,
+    /// La couleur de chaque série (de chaque part d'un anneau ; de chaque barre d'une série seule en barres
+    /// horizontales), à la place de la palette dans son ordre.
+    pub(crate) couleurs: Vec<Color32>,
+    /// Les catégories qui réunissent les autres, ou qui ne mènent nulle part (« Sans section ») : un clic ne les choisit
+    /// pas, et elles sont grises, sauf la couleur imposée à leur barre ou à leur part.
+    pub(crate) autres: Vec<usize>,
+    /// Une ligne de repère (une moyenne) : sa valeur et son nom, que la légende dit.
+    pub(crate) repere: Option<(f64, String)>,
+    /// Un anneau sans sa légende : une liste à côté la tient.
+    pub(crate) sans_legende: bool,
+    /// Le titre de la bulle de chaque catégorie, quand l'axe la dit en bref (« sept. » ; la bulle : « septembre
+    /// 2026 ») ; d'office, son étiquette.
+    pub(crate) titres: Vec<String>,
+    /// Ce que dit le centre d'un anneau sous sa somme ; d'office « au total ». Un anneau qui n'a pas pu tout montrer
+    /// (des parts négatives écartées) le dit : sa somme n'est alors pas le total (la QA5 du lot 13.2).
+    pub(crate) mot_du_centre: Option<String>,
+}
+
+/// Ce qu'un clic a touché dans un graphique : sa catégorie (une colonne, une barre, une part), et la série sous le
+/// pointeur quand elle se distingue (une colonne d'un groupe, une barre d'une rangée).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Touche {
+    pub(crate) categorie: usize,
+    pub(crate) serie: Option<usize>,
+}
+
+/// La ligne de repère : l'encre secondaire, en tirets (un repère, pas une donnée ni la grille).
+const REPERE: Color32 = erp::TEXTE_2;
 
 impl Graphique {
     /// Le graphique d'une carte épinglée : sa `forme`, ses `etiquettes`, ses `series` (chacune son `nom` et ses
@@ -142,7 +180,8 @@ impl Graphique {
             .map(eve::parole::normaliser)
             .and_then(|nom| series.iter().position(|s| !s.nom.is_empty() && eve::parole::normaliser(&s.nom) == nom));
         let unite = en_texte(&c["unite"]).trim().to_string();
-        let mut g = Graphique { forme, etiquettes, series, unite, souligne, autres: false };
+        let mut g =
+            Graphique { forme, etiquettes, series, unite, souligne, autres: false, precisions: Precisions::default() };
         if forme == Forme::Anneau {
             g.plier_les_parts();
             if g.etiquettes.is_empty() {
@@ -187,6 +226,30 @@ impl Graphique {
         }
     }
 
+    /// La couleur de la série `s` (sa clé dans la légende, sa ligne) : celle que le code impose, sinon la palette.
+    fn couleur_de_serie(&self, s: usize) -> Color32 {
+        self.precisions.couleurs.get(s).copied().unwrap_or_else(|| self.couleur(s))
+    }
+
+    /// La couleur d'une marque, la série `s` à la catégorie `i` : celle que le code impose à chaque part d'un anneau, ou
+    /// à chaque barre d'une série seule en barres horizontales ; sinon, la catégorie qui réunit les autres en gris ;
+    /// sinon celle de la série (d'un anneau : de sa part, dans la palette).
+    fn couleur_de_marque(&self, s: usize, i: usize) -> Color32 {
+        let par_categorie =
+            self.forme == Forme::Anneau || (self.forme == Forme::Horizontales && self.series.len() == 1);
+        if par_categorie && let Some(c) = self.precisions.couleurs.get(i) {
+            return *c;
+        }
+        if self.precisions.autres.contains(&i) {
+            return CONTEXTE;
+        }
+        match self.forme {
+            Forme::Anneau => self.couleur(i),
+            _ if par_categorie => self.couleur(s),
+            _ => self.couleur_de_serie(s),
+        }
+    }
+
     /// Le nom de la série `k` tel qu'il se lit (une série sans nom : « Valeur », ou « Série 2 » parmi d'autres).
     fn nom(&self, k: usize) -> String {
         match &self.series[k].nom {
@@ -196,9 +259,18 @@ impl Graphique {
         }
     }
 
-    /// Une valeur dite en entier, avec son unité (« 12 500 $ »).
+    /// Une valeur dite en entier, avec son unité (« 12 500 $ ») ; des centimes, au cent (« 12 500,00 $ »).
     fn dite(&self, v: f64) -> String {
-        avec_unite(&nombre_fr(v), &self.unite)
+        if self.precisions.centimes {
+            crate::compta::argent(v.round() as i64)
+        } else {
+            avec_unite(&nombre_fr(v), &self.unite)
+        }
+    }
+
+    /// Une valeur en bref, pour un axe ou une valeur écrite (« 12,5 k$ ») ; des centimes, comme EG (« 12,3 k$ »).
+    fn breve(&self, v: f64) -> String {
+        if self.precisions.centimes { crate::compta::compact(v.round() as i64) } else { compact(v, &self.unite) }
     }
 
     /// Le graphique en tableau — la vue en tableau de sa carte, où chaque valeur se lit sans survol : une rangée par
@@ -206,27 +278,26 @@ impl Graphique {
     /// en JSON (`cartes::Cartes::tableau_seul`).
     pub(crate) fn en_tableau(&self) -> String {
         let dite = |v: Option<f64>| v.map_or(String::new(), |v| self.dite(v));
+        // Une catégorie s'y dit en entier (son titre, s'il y en a un).
+        let titre = |i: usize| self.precisions.titres.get(i).unwrap_or(&self.etiquettes[i]).clone();
         if self.forme == Forme::Anneau {
             let valeurs = &self.series[0].valeurs;
             let total: f64 = valeurs.iter().flatten().sum();
-            let lignes: Vec<Value> = self
-                .etiquettes
+            let lignes: Vec<Value> = valeurs
                 .iter()
-                .zip(valeurs)
-                .map(|(e, v)| json!([e, dite(*v), pourcent(v.unwrap_or(0.0) / total)]))
+                .take(self.etiquettes.len())
+                .enumerate()
+                .map(|(i, v)| json!([titre(i), dite(*v), pourcent(v.unwrap_or(0.0) / total)]))
                 .collect();
             let pied = ["Total".to_string(), dite(Some(total)), pourcent(1.0)];
             return json!({ "colonnes": ["", "Valeur", "Part"], "lignes": lignes, "pied": pied }).to_string();
         }
         let colonnes: Vec<String> =
             std::iter::once(String::new()).chain((0..self.series.len()).map(|k| self.nom(k))).collect();
-        let lignes: Vec<Value> = self
-            .etiquettes
-            .iter()
-            .enumerate()
-            .map(|(i, e)| {
+        let lignes: Vec<Value> = (0..self.etiquettes.len())
+            .map(|i| {
                 let rangee: Vec<String> =
-                    std::iter::once(e.clone()).chain(self.series.iter().map(|s| dite(s.valeurs[i]))).collect();
+                    std::iter::once(titre(i)).chain(self.series.iter().map(|s| dite(s.valeurs[i]))).collect();
                 json!(rangee)
             })
             .collect();
@@ -242,6 +313,10 @@ impl Graphique {
             haut = (0..self.etiquettes.len())
                 .map(|i| self.series.iter().filter_map(|s| s.valeurs[i]).filter(|v| *v > 0.0).sum::<f64>())
                 .fold(0.0, f64::max);
+        }
+        // La ligne de repère se voit toujours.
+        if let Some((v, _)) = &self.precisions.repere {
+            (bas, haut) = (bas.min(*v), haut.max(*v));
         }
         (bas, haut)
     }
@@ -322,11 +397,30 @@ pub(crate) fn graduer(bas: f64, haut: f64) -> Vec<f64> {
 
 /// Le graphique `g` dans toute la largeur donnée ; `cle` : de quoi nommer sa bulle.
 pub(crate) fn graphique(ui: &mut egui::Ui, g: &Graphique, cle: &str) {
+    dessiner(ui, g, cle, false);
+}
+
+/// Le graphique `g`, qu'on touche : sous le pointeur, la main, et la colonne (la moitié d'un groupe), la rangée ou la
+/// part qu'un clic choisirait ; rend ce que le clic a touché — jamais la catégorie qui réunit les autres.
+pub(crate) fn graphique_touche(ui: &mut egui::Ui, g: &Graphique, cle: &str) -> Option<Touche> {
+    dessiner(ui, g, cle, true)
+}
+
+fn dessiner(ui: &mut egui::Ui, g: &Graphique, cle: &str, cliquable: bool) -> Option<Touche> {
     match g.forme {
-        Forme::Anneau => anneau(ui, g, cle),
-        Forme::Horizontales => horizontales(ui, g, cle),
-        _ => vertical(ui, g, cle),
+        Forme::Anneau => anneau(ui, g, cle, cliquable),
+        Forme::Horizontales => horizontales(ui, g, cle, cliquable),
+        _ => vertical(ui, g, cle, cliquable),
     }
+}
+
+/// Ce qu'un clic touche s'il tombe là (`touche`), la main au survol ; rend la touche si le clic a eu lieu.
+fn au_clic(ui: &egui::Ui, rep: &egui::Response, cliquable: bool, touche: Option<Touche>) -> Option<Touche> {
+    if !cliquable || touche.is_none() {
+        return None;
+    }
+    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    if rep.clicked() { touche } else { None }
 }
 
 /// La police des axes et des étiquettes ; celle d'une valeur écrite.
@@ -340,8 +434,8 @@ fn police_de_valeur() -> FontId {
 
 /// Des colonnes (côte à côte ou empilées), des lignes ou des aires : l'axe des valeurs à gauche, ses graduations et leur
 /// grille ; l'axe des étiquettes dessous, une sur deux ou sur trois s'il le faut pour qu'elles ne se touchent pas.
-fn vertical(ui: &mut egui::Ui, g: &Graphique, cle: &str) {
-    if g.series.len() > 1 {
+fn vertical(ui: &mut egui::Ui, g: &Graphique, cle: &str, cliquable: bool) -> Option<Touche> {
+    if g.series.len() > 1 || g.precisions.repere.is_some() {
         legende(ui, g);
         ui.add_space(6.0);
     }
@@ -351,7 +445,7 @@ fn vertical(ui: &mut egui::Ui, g: &Graphique, cle: &str) {
     let (min, max) = (graduations[0], graduations[graduations.len() - 1]);
     let p = ui.painter().clone();
     let marques: Vec<Arc<egui::Galley>> =
-        graduations.iter().map(|v| p.layout_no_wrap(compact(*v, &g.unite), police_d_axe(), erp::TEXTE_2)).collect();
+        graduations.iter().map(|v| p.layout_no_wrap(g.breve(*v), police_d_axe(), erp::TEXTE_2)).collect();
     let gauche = marques.iter().map(|m| m.size().x).fold(0.0, f32::max) + 8.0;
     let courbes = matches!(g.forme, Forme::Lignes | Forme::Aires);
     // Le bout de chaque ligne, écrit à sa droite (quatre séries au plus) : la place qu'il prend.
@@ -362,7 +456,7 @@ fn vertical(ui: &mut egui::Ui, g: &Graphique, cle: &str) {
         bouts
             .iter()
             .flatten()
-            .map(|(_, v)| p.layout_no_wrap(compact(*v, &g.unite), police_de_valeur(), erp::TITRE).size().x)
+            .map(|(_, v)| p.layout_no_wrap(g.breve(*v), police_de_valeur(), erp::TITRE).size().x)
             .fold(0.0, f32::max)
             + 10.0
     } else {
@@ -370,7 +464,8 @@ fn vertical(ui: &mut egui::Ui, g: &Graphique, cle: &str) {
     };
     let largeur = ui.available_width();
     // Au-dessus du tracé, la place d'une valeur écrite sur la plus haute colonne.
-    let (rect, rep) = ui.allocate_exact_size(vec2(largeur, HAUTEUR + 40.0), Sense::hover());
+    let sens = if cliquable { Sense::click() } else { Sense::hover() };
+    let (rect, rep) = ui.allocate_exact_size(vec2(largeur, HAUTEUR + 40.0), sens);
     let trace = Rect::from_min_max(
         pos2(rect.left() + gauche, rect.top() + 20.0),
         pos2((rect.right() - l_bout).max(rect.left() + gauche + 40.0), rect.top() + 20.0 + HAUTEUR),
@@ -408,10 +503,31 @@ fn vertical(ui: &mut egui::Ui, g: &Graphique, cle: &str) {
             (((pt.x - trace.left()) / bande).floor().max(0.0) as usize).min(n - 1)
         }
     });
+    // Ce qu'un clic toucherait : une colonne d'un groupe se touche dans sa part de la bande (la moitié de gauche, celle
+    // de droite…), plus large que sa marque.
+    let k = g.series.len();
+    let touche = survol.zip(pointeur).filter(|(i, _)| !g.precisions.autres.contains(i)).map(|(i, pt)| {
+        let serie = (g.forme == Forme::Colonnes).then(|| {
+            let dans = pt.x - (trace.left() + bande * i as f32);
+            ((dans / (bande / k as f32)).floor().max(0.0) as usize).min(k - 1)
+        });
+        Touche { categorie: i, serie }
+    });
+    let lavee = if cliquable { touche.and_then(|t| t.serie) } else { None };
     if courbes {
         tracer_les_courbes(&p, g, trace, &x_de, &y, min, survol);
     } else {
-        tracer_les_colonnes(&p, g, trace, bande, &y, min, survol);
+        tracer_les_colonnes(&p, g, trace, bande, &y, min, survol, lavee);
+    }
+    // La ligne de repère (une moyenne), en tirets, par-dessus les marques.
+    if let Some((v, _)) = &g.precisions.repere {
+        let yy = y(*v);
+        p.extend(Shape::dashed_line(
+            &[pos2(trace.left(), yy), pos2(trace.right(), yy)],
+            Stroke::new(1.5, REPERE),
+            6.0,
+            4.0,
+        ));
     }
     // Les valeurs écrites : d'une série seule, la plus haute et la dernière ; le bout de chaque ligne.
     if g.series.len() == 1 && g.forme != Forme::Empilees {
@@ -421,18 +537,17 @@ fn vertical(ui: &mut egui::Ui, g: &Graphique, cle: &str) {
         if let Some((i, v)) = plus_haute
             && bouts[0].is_none_or(|(j, _)| j != i || !ecrits_au_bout)
         {
-            valeur_au_dessus(&p, pos2(x_de(i), y(v.max(0.0))), &compact(v, &g.unite));
+            valeur_au_dessus(&p, pos2(x_de(i), y(v.max(0.0))), &g.breve(v));
         }
         if !courbes
             && let Some((j, v)) = bouts[0]
             && plus_haute.is_none_or(|(i, _)| i != j)
         {
-            valeur_au_dessus(&p, pos2(x_de(j), y(v.max(0.0))), &compact(v, &g.unite));
+            valeur_au_dessus(&p, pos2(x_de(j), y(v.max(0.0))), &g.breve(v));
         }
     }
     if ecrits_au_bout {
-        let mut places: Vec<(f32, String)> =
-            bouts.iter().flatten().map(|(_, v)| (y(*v), compact(*v, &g.unite))).collect();
+        let mut places: Vec<(f32, String)> = bouts.iter().flatten().map(|(_, v)| (y(*v), g.breve(*v))).collect();
         places.sort_by(|a, b| a.0.total_cmp(&b.0));
         // Des bouts qui se chevaucheraient ne s'écrivent pas : la légende et la bulle les disent.
         if places.windows(2).all(|w| w[1].0 - w[0].0 >= 14.0) {
@@ -446,20 +561,23 @@ fn vertical(ui: &mut egui::Ui, g: &Graphique, cle: &str) {
     if let (Some(i), Some(pt)) = (survol, pointeur) {
         let lignes: Vec<(Color32, String, String)> = (0..g.series.len())
             .filter_map(|k| {
-                g.series[k].valeurs[i]
-                    .map(|v| (g.couleur(k), g.dite(v), if g.series.len() > 1 { g.nom(k) } else { String::new() }))
+                g.series[k].valeurs[i].map(|v| {
+                    (g.couleur_de_marque(k, i), g.dite(v), if g.series.len() > 1 { g.nom(k) } else { String::new() })
+                })
             })
             .collect();
         // Une pile dit aussi son total.
+        let etiquette = g.precisions.titres.get(i).unwrap_or(&g.etiquettes[i]);
         let titre = match g.forme {
             Forme::Empilees => {
                 let total: f64 = g.series.iter().filter_map(|s| s.valeurs[i]).filter(|v| *v > 0.0).sum();
-                format!("{} · {} au total", g.etiquettes[i], compact(total, &g.unite))
+                format!("{etiquette} · {} au total", g.breve(total))
             }
-            _ => g.etiquettes[i].clone(),
+            _ => etiquette.clone(),
         };
         bulle(ui, pt, &titre, &lignes, cle);
     }
+    au_clic(ui, &rep, cliquable, touche)
 }
 
 /// Une valeur écrite au-dessus d'une marque (`haut` : le haut de la marque), dans l'encre des valeurs.
@@ -477,7 +595,9 @@ fn bout(largeur: f32, hauteur: f32, vers_le_haut: bool) -> CornerRadius {
 }
 
 /// Les colonnes : côte à côte (deux points de blanc entre elles), ou empilées (deux points de blanc entre leurs parts,
-/// le bout arrondi en haut de la pile) ; la bande survolée lavée de gris derrière elles.
+/// le bout arrondi en haut de la pile) ; la bande survolée lavée de gris derrière elles — d'un groupe qu'on touche,
+/// seulement la part de la série sous le pointeur (`lavee`).
+#[allow(clippy::too_many_arguments)]
 fn tracer_les_colonnes(
     p: &egui::Painter,
     g: &Graphique,
@@ -486,11 +606,16 @@ fn tracer_les_colonnes(
     y: &dyn Fn(f64) -> f32,
     min: f64,
     survol: Option<usize>,
+    lavee: Option<usize>,
 ) {
     let (n, k) = (g.etiquettes.len(), g.series.len());
     if let Some(i) = survol {
         let x = trace.left() + bande * i as f32;
-        p.rect_filled(Rect::from_x_y_ranges(x..=x + bande, trace.y_range()), 6.0, erp::SURVOL);
+        let (x, l) = match lavee.filter(|_| k > 1) {
+            Some(s) => (x + bande / k as f32 * s as f32, bande / k as f32),
+            None => (x, bande),
+        };
+        p.rect_filled(Rect::from_x_y_ranges(x..=x + l, trace.y_range()), 6.0, erp::SURVOL);
     }
     let zero = y(0.0_f64.max(min));
     if g.forme == Forme::Empilees {
@@ -510,7 +635,7 @@ fn tracer_les_colonnes(
                 let r = Rect::from_x_y_ranges(cx - epaisseur / 2.0..=cx + epaisseur / 2.0, dessus..=dessous);
                 let rayon =
                     if sommet == Some(s) { bout(epaisseur, dessous - dessus, true) } else { CornerRadius::ZERO };
-                p.rect_filled(r, rayon, g.couleur(s));
+                p.rect_filled(r, rayon, g.couleur_de_marque(s, i));
             }
         }
         return;
@@ -530,7 +655,7 @@ fn tracer_les_colonnes(
                 continue;
             }
             let r = Rect::from_x_y_ranges(x0..=x0 + barre, dessus..=dessous);
-            p.rect_filled(r, bout(barre, dessous - dessus, v >= 0.0), g.couleur(s));
+            p.rect_filled(r, bout(barre, dessous - dessus, v >= 0.0), g.couleur_de_marque(s, i));
         }
     }
 }
@@ -549,7 +674,7 @@ fn tracer_les_courbes(
 ) {
     let base = y(0.0_f64.max(min));
     for s in (0..g.series.len()).rev() {
-        let couleur = g.couleur(s);
+        let couleur = g.couleur_de_serie(s);
         // Les morceaux de la série : une valeur qui manque en commence un autre.
         let mut morceaux: Vec<Vec<Pos2>> = Vec::new();
         let mut en_cours: Vec<Pos2> = Vec::new();
@@ -592,7 +717,7 @@ fn tracer_les_courbes(
         p.vline(x, trace.y_range(), Stroke::new(1.0, BASE));
         for s in 0..g.series.len() {
             if let Some(v) = g.series[s].valeurs[i] {
-                point(p, pos2(x, y(v)), g.couleur(s));
+                point(p, pos2(x, y(v)), g.couleur_de_serie(s));
             }
         }
     }
@@ -605,8 +730,9 @@ fn point(p: &egui::Painter, c: Pos2, couleur: Color32) {
 }
 
 /// Des barres horizontales, une rangée par étiquette (son nom à gauche, coupé s'il est trop long ; ses barres ; la valeur
-/// au bout de chacune) ; la rangée survolée lavée de gris, et sa bulle quand il y a plusieurs séries.
-fn horizontales(ui: &mut egui::Ui, g: &Graphique, cle: &str) {
+/// au bout de chacune) ; la rangée survolée lavée de gris, et sa bulle quand il y a plusieurs séries (ou des centimes :
+/// la valeur au cent).
+fn horizontales(ui: &mut egui::Ui, g: &Graphique, cle: &str, cliquable: bool) -> Option<Touche> {
     let k = g.series.len();
     if k > 1 {
         legende(ui, g);
@@ -626,15 +752,21 @@ fn horizontales(ui: &mut egui::Ui, g: &Graphique, cle: &str) {
         .series
         .iter()
         .flat_map(|s| s.valeurs.iter().flatten())
-        .map(|v| p.layout_no_wrap(compact(*v, &g.unite), police_de_valeur(), erp::TITRE).size().x)
+        .map(|v| p.layout_no_wrap(g.breve(*v), police_de_valeur(), erp::TITRE).size().x)
         .fold(0.0, f32::max)
         + 8.0;
     let epaisseur = if k == 1 { 14.0 } else { 10.0 };
-    let h_rangee = epaisseur * k as f32 + INTERVALLE * (k - 1) as f32 + 12.0;
+    // Entre les barres d'une rangée, la place de la valeur écrite au bout de chacune : plus haute que sa barre, elle
+    // ne déborde pas sur la suivante.
+    let h_valeur = p.layout_no_wrap("0".into(), police_de_valeur(), erp::TITRE).size().y;
+    let intervalle = if k > 1 { INTERVALLE.max(h_valeur - epaisseur + 1.0) } else { INTERVALLE };
+    let h_rangee = epaisseur * k as f32 + intervalle * (k - 1) as f32 + 12.0;
     let n = g.etiquettes.len();
-    let (rect, rep) = ui.allocate_exact_size(vec2(largeur, h_rangee * n as f32), Sense::hover());
+    let sens = if cliquable { Sense::click() } else { Sense::hover() };
+    let (rect, rep) = ui.allocate_exact_size(vec2(largeur, h_rangee * n as f32), sens);
     let x0 = rect.left() + l_etiquette;
     let plage = (rect.right() - l_valeur - x0).max(10.0);
+    let mut touche = None;
     for (i, e) in g.etiquettes.iter().enumerate() {
         let r = Rect::from_min_size(pos2(rect.left(), rect.top() + h_rangee * i as f32), vec2(largeur, h_rangee));
         let survolee = rep.hover_pos().filter(|pt| r.contains(*pt));
@@ -647,59 +779,88 @@ fn horizontales(ui: &mut egui::Ui, g: &Graphique, cle: &str) {
         p.galley(pos2(r.left() + 4.0, r.center().y - nom.size().y / 2.0), nom, erp::TEXTE);
         for s in 0..k {
             let Some(v) = g.series[s].valeurs[i] else { continue };
-            let yy = r.top() + 6.0 + s as f32 * (epaisseur + INTERVALLE);
+            let yy = r.top() + 6.0 + s as f32 * (epaisseur + intervalle);
             let l = (v.max(0.0) / haut) as f32 * plage;
             if l >= 0.5 {
                 let rayon = 4.0_f32.min(epaisseur / 2.0).min(l) as u8;
                 let barre = Rect::from_min_size(pos2(x0, yy), vec2(l, epaisseur));
-                p.rect_filled(barre, CornerRadius { nw: 0, sw: 0, ne: rayon, se: rayon }, g.couleur(s));
+                p.rect_filled(barre, CornerRadius { nw: 0, sw: 0, ne: rayon, se: rayon }, g.couleur_de_marque(s, i));
             }
-            let texte = p.layout_no_wrap(compact(v, &g.unite), police_de_valeur(), erp::TITRE);
+            let texte = p.layout_no_wrap(g.breve(v), police_de_valeur(), erp::TITRE);
             p.galley(pos2(x0 + l + 6.0, yy + epaisseur / 2.0 - texte.size().y / 2.0), texte, erp::TITRE);
         }
-        if let Some(pt) = survolee
-            && k > 1
-        {
-            let lignes: Vec<(Color32, String, String)> =
-                (0..k).filter_map(|s| g.series[s].valeurs[i].map(|v| (g.couleur(s), g.dite(v), g.nom(s)))).collect();
-            bulle(ui, pt, e, &lignes, cle);
+        if let Some(pt) = survolee {
+            // La barre sous le pointeur, dans sa rangée.
+            let s = ((pt.y - r.top() - 6.0) / (epaisseur + intervalle)).floor().clamp(0.0, (k - 1) as f32) as usize;
+            if !g.precisions.autres.contains(&i) {
+                touche = Some(Touche { categorie: i, serie: Some(s) });
+            }
+            if k > 1 || g.precisions.centimes {
+                let lignes: Vec<(Color32, String, String)> = (0..k)
+                    .filter_map(|s| {
+                        let nom = if k > 1 { g.nom(s) } else { String::new() };
+                        g.series[s].valeurs[i].map(|v| (g.couleur_de_marque(s, i), g.dite(v), nom))
+                    })
+                    .collect();
+                bulle(ui, pt, g.precisions.titres.get(i).unwrap_or(e), &lignes, cle);
+            }
         }
     }
+    au_clic(ui, &rep, cliquable, touche)
 }
 
 /// Un anneau : ses parts dans le sens des aiguilles d'une montre depuis le haut, deux points de blanc entre elles ; au
 /// milieu, le total ; à côté (ou dessous, dans une carte étroite), la légende — chaque part, sa valeur, sa part du total.
 /// La part survolée s'avance un peu, et sa bulle la dit.
-fn anneau(ui: &mut egui::Ui, g: &Graphique, cle: &str) {
+fn anneau(ui: &mut egui::Ui, g: &Graphique, cle: &str, cliquable: bool) -> Option<Touche> {
     let valeurs: Vec<f64> = g.series[0].valeurs.iter().map(|v| v.unwrap_or(0.0)).collect();
     let total: f64 = valeurs.iter().sum();
     let largeur = ui.available_width();
     let cote = 150.0_f32.min(largeur);
+    let avec_legende = !g.precisions.sans_legende;
     let cote_a_cote = largeur >= 340.0;
     let p = ui.painter().clone();
     let police = FontId::proportional(12.5);
-    let legendes: Vec<(Arc<egui::Galley>, Arc<egui::Galley>)> = g
-        .etiquettes
-        .iter()
-        .zip(&valeurs)
-        .map(|(e, v)| {
-            let chiffres = format!("{} · {}", compact(*v, &g.unite), pourcent(v / total));
-            (
-                p.layout_no_wrap(e.clone(), police.clone(), erp::TEXTE),
-                p.layout_no_wrap(chiffres, police_de_valeur(), erp::TITRE),
-            )
-        })
-        .collect();
+    let legendes: Vec<(Arc<egui::Galley>, Arc<egui::Galley>)> = if avec_legende {
+        g.etiquettes
+            .iter()
+            .zip(&valeurs)
+            .map(|(e, v)| {
+                let chiffres = format!("{} · {}", g.breve(*v), pourcent(v / total));
+                (
+                    p.layout_no_wrap(e.clone(), police.clone(), erp::TEXTE),
+                    p.layout_no_wrap(chiffres, police_de_valeur(), erp::TITRE),
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let h_legende = 22.0 * legendes.len() as f32;
-    let hauteur = if cote_a_cote { cote.max(h_legende) } else { cote + 12.0 + h_legende };
-    let (rect, rep) = ui.allocate_exact_size(vec2(largeur, hauteur), Sense::hover());
-    let centre = if cote_a_cote {
+    let hauteur = match (avec_legende, cote_a_cote) {
+        (false, _) => cote,
+        (true, true) => cote.max(h_legende),
+        (true, false) => cote + 12.0 + h_legende,
+    };
+    let sens = if cliquable { Sense::click() } else { Sense::hover() };
+    let (rect, rep) = ui.allocate_exact_size(vec2(largeur, hauteur), sens);
+    let centre = if cote_a_cote && avec_legende {
         pos2(rect.left() + cote / 2.0, rect.top() + hauteur / 2.0)
     } else {
         pos2(rect.center().x, rect.top() + cote / 2.0)
     };
+    let (gauche, haut) = if cote_a_cote {
+        (rect.left() + cote + 22.0, rect.top() + (hauteur - h_legende) / 2.0)
+    } else {
+        (rect.left(), rect.top() + cote + 12.0)
+    };
     let (exterieur, interieur) = (cote / 2.0 - 5.0, cote / 2.0 - 27.0);
+    // La part sous le pointeur : sur l'anneau, ou sur sa rangée de la légende.
     let survol = rep.hover_pos().and_then(|pt| {
+        let rangee = ((pt.y - haut) / 22.0).floor();
+        if avec_legende && pt.x >= gauche && rangee >= 0.0 && (rangee as usize) < legendes.len() {
+            return Some(rangee as usize);
+        }
         let d = pt - centre;
         let r = d.length();
         if r < interieur - 4.0 || r > exterieur + 6.0 {
@@ -720,25 +881,25 @@ fn anneau(ui: &mut egui::Ui, g: &Graphique, cle: &str) {
         let fin = debut + (*v / total) as f32 * TAU;
         let avance = if survol == Some(k) { 3.0 } else { 0.0 };
         if fin - debut > ecart {
-            secteur(&p, centre, interieur, exterieur + avance, debut + ecart / 2.0, fin - ecart / 2.0, g.couleur(k));
+            let couleur = g.couleur_de_marque(0, k);
+            secteur(&p, centre, interieur, exterieur + avance, debut + ecart / 2.0, fin - ecart / 2.0, couleur);
         }
         debut = fin;
     }
-    let somme =
-        p.layout_no_wrap(compact(total, &g.unite), FontId::new(18.0, FontFamily::Name(SEMI.into())), erp::TITRE);
-    let dit = p.layout_no_wrap("au total".into(), FontId::proportional(11.0), erp::TEXTE_2);
+    let somme = p.layout_no_wrap(g.breve(total), FontId::new(18.0, FontFamily::Name(SEMI.into())), erp::TITRE);
+    let mot = g.precisions.mot_du_centre.clone().unwrap_or_else(|| "au total".into());
+    let dit = p.layout_no_wrap(mot, FontId::proportional(11.0), erp::TEXTE_2);
     let (l_somme, h_somme) = (somme.size().x, somme.size().y);
     let h = h_somme + dit.size().y;
     p.galley(pos2(centre.x - l_somme / 2.0, centre.y - h / 2.0), somme, erp::TITRE);
     p.galley(pos2(centre.x - dit.size().x / 2.0, centre.y - h / 2.0 + h_somme), dit, erp::TEXTE_2);
-    let (gauche, haut) = if cote_a_cote {
-        (rect.left() + cote + 22.0, rect.top() + (hauteur - h_legende) / 2.0)
-    } else {
-        (rect.left(), rect.top() + cote + 12.0)
-    };
     for (k, (nom, chiffres)) in legendes.into_iter().enumerate() {
         let yy = haut + 22.0 * k as f32 + 11.0;
-        p.rect_filled(Rect::from_center_size(pos2(gauche + 5.0, yy), vec2(10.0, 10.0)), 2.0, g.couleur(k));
+        if cliquable && survol == Some(k) {
+            let r = Rect::from_min_max(pos2(gauche - 6.0, yy - 11.0), pos2(rect.right() + 4.0, yy + 11.0));
+            p.rect_filled(r, 6.0, erp::SURVOL);
+        }
+        p.rect_filled(Rect::from_center_size(pos2(gauche + 5.0, yy), vec2(10.0, 10.0)), 2.0, g.couleur_de_marque(0, k));
         let place = (rect.right() - gauche - 18.0 - chiffres.size().x - 10.0).max(20.0);
         let mut job = egui::text::LayoutJob::simple_singleline(g.etiquettes[k].clone(), police.clone(), erp::TEXTE);
         job.wrap = egui::text::TextWrapping::truncate_at_width(place);
@@ -747,9 +908,13 @@ fn anneau(ui: &mut egui::Ui, g: &Graphique, cle: &str) {
         p.galley(pos2(rect.right() - chiffres.size().x, yy - chiffres.size().y / 2.0), chiffres, erp::TITRE);
     }
     if let (Some(k), Some(pt)) = (survol, rep.hover_pos()) {
-        let ligne = (g.couleur(k), g.dite(valeurs[k]), pourcent(valeurs[k] / total));
-        bulle(ui, pt, &g.etiquettes[k], &[ligne], cle);
+        let ligne = (g.couleur_de_marque(0, k), g.dite(valeurs[k]), pourcent(valeurs[k] / total));
+        bulle(ui, pt, g.precisions.titres.get(k).unwrap_or(&g.etiquettes[k]), &[ligne], cle);
     }
+    // La part qui réunit les autres ne se choisit pas.
+    let des_autres = |k: usize| g.precisions.autres.contains(&k) || (g.autres && k + 1 == valeurs.len());
+    let touche = survol.filter(|k| !des_autres(*k)).map(|k| Touche { categorie: k, serie: None });
+    au_clic(ui, &rep, cliquable, touche)
 }
 
 /// Une part d'un anneau, de l'angle `debut` à `fin` (depuis le haut, dans le sens des aiguilles d'une montre), entre
@@ -778,17 +943,29 @@ fn legende(ui: &mut egui::Ui, g: &Graphique) {
     let trait_de_ligne = g.forme == Forme::Lignes;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(14.0, 6.0);
-        for k in 0..g.series.len() {
+        // Une série seule n'a pas de clé (le titre la nomme), sauf à côté d'une ligne de repère.
+        let series = if g.series.len() > 1 || g.precisions.repere.is_some() { g.series.len() } else { 0 };
+        for k in 0..series {
             let nom = ui.painter().layout_no_wrap(g.nom(k), FontId::proportional(12.5), erp::TEXTE);
             let (r, _) = ui.allocate_exact_size(vec2(18.0 + nom.size().x, nom.size().y.max(12.0)), Sense::hover());
             let p = ui.painter();
             let c = pos2(r.left() + 6.0, r.center().y);
             if trait_de_ligne {
-                p.line_segment([c - vec2(6.0, 0.0), c + vec2(6.0, 0.0)], Stroke::new(2.0, g.couleur(k)));
+                p.line_segment([c - vec2(6.0, 0.0), c + vec2(6.0, 0.0)], Stroke::new(2.0, g.couleur_de_serie(k)));
             } else {
-                p.rect_filled(Rect::from_center_size(c, vec2(10.0, 10.0)), 2.0, g.couleur(k));
+                p.rect_filled(Rect::from_center_size(c, vec2(10.0, 10.0)), 2.0, g.couleur_de_serie(k));
             }
             p.galley(pos2(r.left() + 18.0, r.center().y - nom.size().y / 2.0), nom, erp::TEXTE);
+        }
+        // La ligne de repère : sa clé en tirets, son nom.
+        if let Some((_, nom)) = &g.precisions.repere {
+            let nom = ui.painter().layout_no_wrap(nom.clone(), FontId::proportional(12.5), erp::TEXTE);
+            let (r, _) = ui.allocate_exact_size(vec2(24.0 + nom.size().x, nom.size().y.max(12.0)), Sense::hover());
+            let p = ui.painter();
+            let y = r.center().y;
+            let tirets = [pos2(r.left(), y), pos2(r.left() + 16.0, y)];
+            p.extend(Shape::dashed_line(&tirets, Stroke::new(1.5, REPERE), 5.0, 3.0));
+            p.galley(pos2(r.left() + 24.0, y - nom.size().y / 2.0), nom, erp::TEXTE);
         }
     });
 }
@@ -914,5 +1091,50 @@ mod tests {
         );
         let rien = graduer(0.0, 0.0);
         assert!(rien.len() == 6 && rien[0] == 0.0 && (rien[5] - 1.0).abs() < 1e-9, "{rien:?}");
+    }
+
+    /// Un graphique fait par le code (la comptabilité) : des centimes dits au cent dans sa vue en tableau et en bref
+    /// sur ses axes, la catégorie entière (son titre) à la place de l'étiquette brève, ses couleurs imposées, la
+    /// catégorie des autres en gris, et la ligne de repère dans son étendue.
+    #[test]
+    fn un_graphique_en_centimes() {
+        let precisions = Precisions {
+            centimes: true,
+            couleurs: vec![SERIES[2], SERIES[0]],
+            autres: vec![2],
+            repere: Some((500_000.0, "Moyenne".into())),
+            titres: vec!["septembre 2026".into(), "octobre 2026".into(), "Autres".into()],
+            ..Precisions::default()
+        };
+        let g = Graphique {
+            forme: Forme::Colonnes,
+            etiquettes: vec!["sept.".into(), "oct.".into(), "autres".into()],
+            series: vec![
+                Serie { nom: "Dépenses".into(), valeurs: vec![Some(123_450.0), Some(5.0), Some(1.0)] },
+                Serie { nom: "Revenus".into(), valeurs: vec![Some(0.0), None, Some(2.0)] },
+            ],
+            unite: "$".into(),
+            souligne: None,
+            autres: false,
+            precisions,
+        };
+        let t: Value = serde_json::from_str(&g.en_tableau()).unwrap();
+        assert_eq!(t["lignes"][0], json!(["septembre 2026", "1\u{202f}234,50\u{a0}$", "0,00\u{a0}$"]));
+        assert_eq!(t["lignes"][1], json!(["octobre 2026", "0,05\u{a0}$", ""]));
+        assert_eq!(g.breve(1_234_500.0), "12,3\u{a0}k$");
+        assert_eq!((g.couleur_de_marque(0, 0), g.couleur_de_marque(1, 1)), (SERIES[2], SERIES[0]));
+        assert_eq!((g.couleur_de_marque(0, 2), g.couleur_de_serie(1)), (CONTEXTE, SERIES[0]));
+        assert_eq!(g.etendue(), (0.0, 500_000.0), "la moyenne au-dessus des colonnes reste dans l'axe");
+        // Une série seule en barres horizontales : une couleur par barre ; sans couleur imposée, la première de la
+        // palette pour toutes, comme avant.
+        let barres = Graphique {
+            forme: Forme::Horizontales,
+            series: vec![g.series[0].clone()],
+            precisions: Precisions { couleurs: vec![SERIES[4], SERIES[5]], ..Precisions::default() },
+            ..g.clone()
+        };
+        assert_eq!((barres.couleur_de_marque(0, 1), barres.couleur_de_marque(0, 2)), (SERIES[5], SERIES[0]));
+        let sans = Graphique { precisions: Precisions::default(), ..barres };
+        assert_eq!(sans.couleur_de_marque(0, 1), SERIES[0]);
     }
 }
